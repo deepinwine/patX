@@ -1,4 +1,4 @@
-/**
+﻿/**
  * patX 数据迁移工具
  * 
  * 从 Python 版 SQLite 数据库迁移数据
@@ -58,6 +58,12 @@ private:
     bool MigratePatents(void* source_db, void* target_db);
     bool MigrateOaRecords(void* source_db, void* target_db);
     bool MigratePctPatents(void* source_db, void* target_db);
+    bool MigrateSoftware(void* source_db, void* target_db);
+    bool MigrateIcLayouts(void* source_db, void* target_db);
+    bool MigrateForeignPatents(void* source_db, void* target_db);
+    
+    // 辅助方法
+    int GetMigratedCount(void* db, const std::string& table);
 };
 
 // 全局实例

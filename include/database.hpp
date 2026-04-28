@@ -1,4 +1,4 @@
-/**
+﻿/**
  * patX 数据库管理模块
  * 
  * 基于 SQLite3 原生 C 接口的高性能数据库操作
@@ -24,6 +24,9 @@ public:
     bool Open(const std::string& db_path);
     void Close();
     bool IsOpen() const;
+    
+    // 获取原始 SQLite3 指针 (用于迁移)
+    sqlite3* GetRawHandle() { return db_; }
     
     // 表结构初始化 (兼容 Python 版)
     bool InitTables();
