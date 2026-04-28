@@ -1,0 +1,23 @@
+﻿# Build
+target/
+build/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data
+*.db
+*.sqlite
+data/test_*
+
+# Temp
+*.log
+*.tmp
