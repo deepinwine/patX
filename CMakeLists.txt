@@ -43,7 +43,7 @@ set(CPP_HEADERS
 )
 
 # 创建静态库
-add_library(patx_cpp STATIC  )
+add_library(patx_cpp STATIC ${CPP_SOURCES})
 target_include_directories(patx_cpp PUBLIC include)
 target_link_libraries(patx_cpp 
     SQLite::SQLite3
@@ -58,9 +58,9 @@ endif()
 
 # Rust 库 (通过 Cargo 构建)
 add_custom_command(
-    OUTPUT /libpatx_core.a
+    OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/target/release/libpatx_core.a
     COMMAND cargo build --release
-    WORKING_DIRECTORY 
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     COMMENT "Building Rust library"
 )
 
@@ -68,7 +68,9 @@ add_custom_command(
 add_executable(patx src/cpp/main.cpp)
 target_link_libraries(patx 
     patx_cpp
-    /libpatx_core.a
+    ${CMAKE_CURRENT_SOURCE_DIR}/target/release/libpatx_core.a
+    pthread
+    dl
 )
 
 # 测试
@@ -84,4 +86,4 @@ target_link_libraries(patx_benchmark patx_cpp)
 
 # 安装
 install(TARGETS patx patx_cpp DESTINATION bin)
-install(FILES  DESTINATION include)
+install(FILES ${CPP_HEADERS} DESTINATION include)

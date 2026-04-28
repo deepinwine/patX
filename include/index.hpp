@@ -1,4 +1,4 @@
-/**
+﻿/**
  * patX 内存索引模块
  * 
  * 基于 flat_hash_map 的极速内存索引
@@ -29,7 +29,7 @@ public:
     // 移除专利
     void Remove(int32_t id);
     
-    // 精准检索 - O(1)
+    // 精确检索 - O(1)
     Patent* FindByGekeCode(std::string_view geke_code);
     Patent* FindByApplicationNo(std::string_view app_no);
     Patent* FindById(int32_t id);

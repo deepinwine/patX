@@ -96,8 +96,9 @@ pub extern "C" fn patx_init() -> i32 {
     }
     
     // 初始化任务调度器
+    let num_threads = num_cpus::get().max(2);
     let config = scheduler::ThreadPoolConfig {
-        num_threads: num_cpus::get().max(2),
+        num_threads,
         queue_capacity: 1024,
         thread_name: "patx-worker".to_string(),
     };
@@ -105,7 +106,7 @@ pub extern "C" fn patx_init() -> i32 {
     runtime.scheduler = Some(Arc::new(scheduler::TaskScheduler::new(config)));
     runtime.initialized = true;
     
-    println!("[patX] System initialized with {} workers", config.num_threads);
+    println!("[patX] System initialized with {} workers", num_threads);
     0
 }
 
@@ -132,11 +133,9 @@ pub extern "C" fn patx_shutdown() -> i32 {
 /// 获取版本
 #[no_mangle]
 pub extern "C" fn patx_version() -> *mut c_char {
-    unsafe { 
-        CString::new("0.1.0")
-            .unwrap()
-            .into_raw() 
-    }
+    CString::new("0.1.0")
+        .unwrap()
+        .into_raw()
 }
 
 /// 获取调度器统计

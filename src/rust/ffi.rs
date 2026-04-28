@@ -1,6 +1,4 @@
 //! FFI 交互模块
-//! 
-//! C++ 与 Rust 交互接口
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -35,41 +33,19 @@ pub extern "C" fn patx_free_string(s: *mut c_char) {
     }
 }
 
-// C++ 函数声明
-extern "C" {
-    // 内存索引操作
-    fn cpp_index_add(patent: *const Patent) -> i32;
-    fn cpp_index_remove(id: i32) -> i32;
-    fn cpp_index_find_by_geke(geke_code: *const c_char) -> *mut Patent;
-    fn cpp_index_count() -> usize;
-    
-    // 数据库操作
-    fn cpp_db_init(db_path: *const c_char) -> i32;
-    fn cpp_db_close() -> i32;
-    fn cpp_db_load_all() -> i32;
-    fn cpp_db_save_all() -> i32;
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// 初始化系统
-#[no_mangle]
-pub extern "C" fn patx_init_system(db_path: *const c_char) -> i32 {
-    unsafe {
-        cpp_db_init(db_path)
-    }
-}
-
-/// 加载所有数据
-#[no_mangle]
-pub extern "C" fn patx_load_data() -> i32 {
-    unsafe {
-        cpp_db_load_all()
-    }
-}
-
-/// 获取专利数量
-#[no_mangle]
-pub extern "C" fn patx_get_count() -> usize {
-    unsafe {
-        cpp_index_count()
+    #[test]
+    fn test_c_str_conversion() {
+        let original = "test string";
+        let c_str = string_to_c_str(original.to_string());
+        assert!(!c_str.is_null());
+        
+        let rust_str = c_str_to_string(c_str);
+        assert_eq!(rust_str, original);
+        
+        patx_free_string(c_str);
     }
 }

@@ -6,6 +6,7 @@ authors = ["deepinwine"]
 
 [lib]
 name = "patx_core"
+path = "src/rust/lib.rs"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
@@ -18,9 +19,6 @@ thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 num_cpus = "1.16"
-
-[build-dependencies]
-cc = "1.0"
 
 [profile.release]
 opt-level = 3
