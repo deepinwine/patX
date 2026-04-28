@@ -1,0 +1,20 @@
+﻿你是一个 C++/Rust 专家。当前项目是 patX - 将 Python 专利管理系统迁移到 C++/Rust。
+
+## 当前状态
+已完成基础框架：
+- C++ 数据结构 (patent.hpp)
+- C++ 数据库模块 (database.hpp/cpp)
+- C++ 内存索引 (index.hpp/cpp)
+- Rust FFI/并发/校验模块
+
+## 需要完成
+1. 实现批量 Excel 导入导出 (使用 OpenXLSX 或 xlnt)
+2. 实现 PDF 解析 (使用 poppler-cpp)
+3. 完善数据迁移工具 (从 Python 版数据库导入)
+4. 编写更多测试
+
+## 性能目标
+- 检索速度提升 50-100 倍
+- 批量导入速度提升 20-50 倍
+
+请分析 REQUIREMENTS.md 和现有代码，实现缺失的模块。
