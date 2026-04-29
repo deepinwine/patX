@@ -1126,7 +1126,7 @@ private:
 
         // Statistics
         tb2->Add(new wxStaticText(panel, wxID_ANY, "| Statistics:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
-        wxButton* stats_btn = new wxButton(panel, wxID_ANY, "Show Stats");
+        wxButton* stats_btn = new wxButton(panel, wxID_ANY, current_lang == 0 ? "Show Stats" : "显示统计");
         stats_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             auto patents = db->GetPatents();
             int core = 0, important = 0, normal = 0;
