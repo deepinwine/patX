@@ -857,6 +857,8 @@ private:
         tools_menu->AppendSeparator();
         tools_menu->Append(ID_BACKUP, current_lang == 0 ? "&Backup Database" : "备份数据库(&B)");
         tools_menu->Append(ID_RESTORE, current_lang == 0 ? "&Restore Backup..." : "恢复备份(&R)...");
+        tools_menu->AppendSeparator();
+        tools_menu->Append(ID_VALIDATE_DATA, current_lang == 0 ? "Validate Data" : "数据验证");
         mb->Append(tools_menu, current_lang == 0 ? "&Tools" : "工具(&T)");
 
         // Help menu
@@ -879,6 +881,44 @@ private:
         Bind(wxEVT_MENU, &PatXFrame::OnNasConfig, this, ID_NAS_CONFIG);
         Bind(wxEVT_MENU, &PatXFrame::OnBackup, this, ID_BACKUP);
         Bind(wxEVT_MENU, &PatXFrame::OnRestore, this, ID_RESTORE);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+            // Validate data - check for issues
+            int issues = 0;
+            wxString report;
+            
+            auto patents = db->GetPatents();
+            
+            // Check empty fields
+            for (const auto& p : patents) {
+                if (p.geke_code.empty()) {
+                    report += "Empty GEKE Code in patent ID " + std::to_string(p.id) + "\n";
+                    issues++;
+                }
+                if (p.title.empty()) {
+                    report += "Empty Title in patent " + p.geke_code + "\n";
+                    issues++;
+                }
+            }
+            
+            // Check OA deadlines
+            auto oas = db->GetOARecords();
+            for (const auto& oa : oas) {
+                if (oa.official_deadline.empty() && !oa.is_completed) {
+                    report += "Missing deadline for OA: " + oa.geke_code + " - " + oa.oa_type + "\n";
+                    issues++;
+                }
+            }
+            
+            if (issues == 0) {
+                wxMessageBox(current_lang == 0 ? 
+                    "All data validated successfully!\nNo issues found." :
+                    "数据验证成功！\n未发现问题。", 
+                    current_lang == 0 ? "Data Validation" : "数据验证", wxOK | wxICON_INFORMATION);
+            } else {
+                wxMessageBox(report, wxString::Format(current_lang == 0 ? 
+                    "Found %d issues:" : "发现 %d 个问题:", issues), wxOK | wxICON_WARNING);
+            }
+        }, ID_VALIDATE_DATA);
         Bind(wxEVT_MENU, &PatXFrame::OnSwitchDatabase, this, ID_SWITCH_DB);
         Bind(wxEVT_MENU, &PatXFrame::OnAutoBackup, this, ID_AUTO_BACKUP);
         Bind(wxEVT_MENU, &PatXFrame::OnAbout, this, wxID_ABOUT);
@@ -905,7 +945,8 @@ private:
         ID_PRINT,
         ID_EXPORT_PDF,
         ID_LANG_EN,
-        ID_LANG_ZH
+        ID_LANG_ZH,
+        ID_VALIDATE_DATA
     };
     
     int current_lang = 0; // 0=English, 1=Chinese
