@@ -936,7 +936,7 @@ private:
         main_sizer->Add(notebook, 1, wxEXPAND | wxALL, 5);
 
         status_bar = CreateStatusBar();
-        status_bar->SetStatusText("Ready - patX v0.3.0 | Database: patents.db");
+        status_bar->SetStatusText("patX v1.0.0 | Database: patents.db | Press F1 for help");
 
         main_panel->SetSizer(main_sizer);
     }
@@ -2153,25 +2153,27 @@ private:
 
     void OnAbout(wxCommandEvent&) {
         wxMessageBox(
-            "patX v0.7.0 - Patent Data Management System\n"
+            "patX v1.0.0 - Patent Management System\n"
             "========================================\n\n"
             "Features:\n"
-            "- Domestic Patents (with OA tracking)\n"
-            "- PCT Applications\n"
-            "- Software Copyright\n"
-            "- IC Layout Design\n"
-            "- Foreign Patents\n"
-            "- OA Processing with deadline alerts\n"
-            "- Annual Fee Management\n"
-            "- Deadline Rules\n\n"
-            "Operations:\n"
-            "- Batch Set Level/Status (multi-select)\n"
-            "- Auto-calculate Expiration (20y invention, 10y utility)\n"
-            "- Import/Export CSV\n"
-            "- Undo Delete\n"
-            "- Database Backup/Restore\n\n"
-            "Tech: C++17 + wxWidgets + SQLite\n"
-            "Portable EXE - No Installation\n\n"
+            "- 8 Tabs: Patents, OA, PCT, Software, IC, Foreign, AnnualFee, Rules\n"
+            "- Full CRUD with edit dialogs\n"
+            "- Batch operations: Set Level/Status\n"
+            "- CSV Import/Export\n"
+            "- OA deadline alerts (color-coded)\n"
+            "- Theme switching (Light/Dark/Eye)\n"
+            "- Search & Statistics\n"
+            "- Backup/Restore\n\n"
+            "Keyboard Shortcuts:\n"
+            "Ctrl+N - New Patent\n"
+            "Ctrl+E - Edit\n"
+            "Ctrl+Z - Undo\n"
+            "Ctrl+F - Search\n"
+            "Del - Delete\n"
+            "F5 - Refresh\n"
+            "F1 - Help\n\n"
+            "Tech: C++17 + wxWidgets + SQLite3\n"
+            "Portable: 6 MB single exe\n\n"
             "GitHub: https://github.com/deepinwine/patX",
             "About patX", wxOK | wxICON_INFORMATION
         );
