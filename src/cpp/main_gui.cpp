@@ -1303,14 +1303,14 @@ private:
 
         patent_list = new wxListCtrl(splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                       wxLC_REPORT | wxLC_SINGLE_SEL);
-        patent_list->AppendColumn("GEKE Code", wxLIST_FORMAT_LEFT, 90);
+        patent_list->AppendColumn(current_lang == 0 ? "GEKE Code" : "格科代码", wxLIST_FORMAT_LEFT, 90);
         patent_list->AppendColumn("App No", wxLIST_FORMAT_LEFT, 130);
-        patent_list->AppendColumn("Title", wxLIST_FORMAT_LEFT, 280);
-        patent_list->AppendColumn("Type", wxLIST_FORMAT_LEFT, 70);
-        patent_list->AppendColumn("Level", wxLIST_FORMAT_LEFT, 80);
-        patent_list->AppendColumn("Status", wxLIST_FORMAT_LEFT, 90);
-        patent_list->AppendColumn("Handler", wxLIST_FORMAT_LEFT, 70);
-        patent_list->AppendColumn("Inventor", wxLIST_FORMAT_LEFT, 100);
+        patent_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
+        patent_list->AppendColumn(current_lang == 0 ? "Type" : "类型", wxLIST_FORMAT_LEFT, 70);
+        patent_list->AppendColumn(current_lang == 0 ? "Level" : "等级", wxLIST_FORMAT_LEFT, 80);
+        patent_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 90);
+        patent_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 70);
+        patent_list->AppendColumn(current_lang == 0 ? "Inventor" : "发明人", wxLIST_FORMAT_LEFT, 100);
         patent_list->AppendColumn("App Date", wxLIST_FORMAT_LEFT, 90);
         patent_list->AppendColumn("Exp Date", wxLIST_FORMAT_LEFT, 90);
 
@@ -1676,16 +1676,16 @@ private:
         sizer->Add(tb, 0, wxALL, 5);
 
         oa_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
-        oa_list->AppendColumn("GEKE Code", wxLIST_FORMAT_LEFT, 90);
-        oa_list->AppendColumn("Title", wxLIST_FORMAT_LEFT, 220);
-        oa_list->AppendColumn("OA Type", wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn("Issue Date", wxLIST_FORMAT_LEFT, 90);
-        oa_list->AppendColumn("Deadline", wxLIST_FORMAT_LEFT, 100);
+        oa_list->AppendColumn(current_lang == 0 ? "GEKE Code" : "格科代码", wxLIST_FORMAT_LEFT, 90);
+        oa_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 220);
+        oa_list->AppendColumn(current_lang == 0 ? "OA Type" : "OA类型", wxLIST_FORMAT_LEFT, 80);
+        oa_list->AppendColumn(current_lang == 0 ? "Issue Date" : "发文日", wxLIST_FORMAT_LEFT, 90);
+        oa_list->AppendColumn(current_lang == 0 ? "Deadline" : "截止日", wxLIST_FORMAT_LEFT, 100);
         oa_list->AppendColumn("Days Left", wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn("Handler", wxLIST_FORMAT_LEFT, 80);
+        oa_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
         oa_list->AppendColumn("Writer", wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn("Progress", wxLIST_FORMAT_LEFT, 100);
-        oa_list->AppendColumn("Level", wxLIST_FORMAT_LEFT, 80);
+        oa_list->AppendColumn(current_lang == 0 ? "Progress" : "进度", wxLIST_FORMAT_LEFT, 100);
+        oa_list->AppendColumn(current_lang == 0 ? "Level" : "等级", wxLIST_FORMAT_LEFT, 80);
 
         sizer->Add(oa_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
@@ -1815,13 +1815,13 @@ private:
         tb2->AddStretchSpacer();
         sizer->Add(tb2, 0, wxALL, 5);
 
-        pct_list->AppendColumn("GEKE Code", wxLIST_FORMAT_LEFT, 90);
+        pct_list->AppendColumn(current_lang == 0 ? "GEKE Code" : "格科代码", wxLIST_FORMAT_LEFT, 90);
         pct_list->AppendColumn("Source", wxLIST_FORMAT_LEFT, 90);
         pct_list->AppendColumn("PCT No", wxLIST_FORMAT_LEFT, 140);
         pct_list->AppendColumn("Country App No", wxLIST_FORMAT_LEFT, 140);
-        pct_list->AppendColumn("Title", wxLIST_FORMAT_LEFT, 280);
-        pct_list->AppendColumn("Status", wxLIST_FORMAT_LEFT, 100);
-        pct_list->AppendColumn("Handler", wxLIST_FORMAT_LEFT, 80);
+        pct_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
+        pct_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 100);
+        pct_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
 
         sizer->Add(pct_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
@@ -1879,10 +1879,10 @@ private:
         sw_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
         sw_list->AppendColumn("Case No", wxLIST_FORMAT_LEFT, 90);
         sw_list->AppendColumn("Reg No", wxLIST_FORMAT_LEFT, 110);
-        sw_list->AppendColumn("Title", wxLIST_FORMAT_LEFT, 280);
+        sw_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
         sw_list->AppendColumn("Owner", wxLIST_FORMAT_LEFT, 120);
-        sw_list->AppendColumn("Status", wxLIST_FORMAT_LEFT, 100);
-        sw_list->AppendColumn("Handler", wxLIST_FORMAT_LEFT, 80);
+        sw_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 100);
+        sw_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
 
         sizer->Add(sw_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
@@ -1928,9 +1928,9 @@ private:
         ic_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
         ic_list->AppendColumn("Case No", wxLIST_FORMAT_LEFT, 90);
         ic_list->AppendColumn("Reg No", wxLIST_FORMAT_LEFT, 110);
-        ic_list->AppendColumn("Title", wxLIST_FORMAT_LEFT, 280);
+        ic_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
         ic_list->AppendColumn("Owner", wxLIST_FORMAT_LEFT, 120);
-        ic_list->AppendColumn("Status", wxLIST_FORMAT_LEFT, 100);
+        ic_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 100);
         ic_list->AppendColumn("Designer", wxLIST_FORMAT_LEFT, 80);
 
         sizer->Add(ic_list, 1, wxEXPAND | wxALL, 5);
@@ -1978,10 +1978,10 @@ private:
         foreign_list->AppendColumn("Case No", wxLIST_FORMAT_LEFT, 90);
         foreign_list->AppendColumn("PCT No", wxLIST_FORMAT_LEFT, 140);
         foreign_list->AppendColumn("Country", wxLIST_FORMAT_LEFT, 70);
-        foreign_list->AppendColumn("Title", wxLIST_FORMAT_LEFT, 280);
+        foreign_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
         foreign_list->AppendColumn("Owner", wxLIST_FORMAT_LEFT, 120);
-        foreign_list->AppendColumn("Status", wxLIST_FORMAT_LEFT, 100);
-        foreign_list->AppendColumn("Handler", wxLIST_FORMAT_LEFT, 80);
+        foreign_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 100);
+        foreign_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
 
         sizer->Add(foreign_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
@@ -2016,13 +2016,13 @@ private:
         sizer->Add(tb, 0, wxALL, 5);
 
         fee_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
-        fee_list->AppendColumn("GEKE Code", wxLIST_FORMAT_LEFT, 90);
-        fee_list->AppendColumn("Title", wxLIST_FORMAT_LEFT, 250);
+        fee_list->AppendColumn(current_lang == 0 ? "GEKE Code" : "格科代码", wxLIST_FORMAT_LEFT, 90);
+        fee_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 250);
         fee_list->AppendColumn("Year", wxLIST_FORMAT_LEFT, 60);
         fee_list->AppendColumn("Due Date", wxLIST_FORMAT_LEFT, 100);
         fee_list->AppendColumn("Amount", wxLIST_FORMAT_LEFT, 80);
-        fee_list->AppendColumn("Status", wxLIST_FORMAT_LEFT, 90);
-        fee_list->AppendColumn("Handler", wxLIST_FORMAT_LEFT, 80);
+        fee_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 90);
+        fee_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
 
         sizer->Add(fee_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
