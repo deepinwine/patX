@@ -2393,20 +2393,35 @@ private:
                     }
                 }
                 
-                // 调试信息
+                // 调试信息 - 显示所有列标题
+                wxString headersList = "Excel列标题:\n";
+                for (size_t i = 0; i < headers.size(); i++) {
+                    headersList += wxString::Format("[%zu]: %s\n", i, headers[i]);
+                }
+                
                 wxString debugInfo = wxString::Format(
-                    "Column mapping:\nGEKE=%d, Title=%d, Type=%d, Status=%d, Level=%d\n"
-                    "AppNo=%d, Date=%d, Handler=%d, Inventor=%d\n\n"
-                    "Headers found: %zu",
+                    "\n列映射结果:\n"
+                    "GEKE Code(格科代码) = %d\n"
+                    "Title(标题) = %d\n"
+                    "Type(类型) = %d\n"
+                    "Status(状态) = %d\n"
+                    "Level(等级) = %d\n"
+                    "AppNo(申请号) = %d\n"
+                    "Date(申请日) = %d\n"
+                    "Handler(处理人) = %d\n"
+                    "Inventor(发明人) = %d\n"
+                    "总列数: %zu",
                     gekeIdx, titleIdx, typeIdx, statusIdx, levelIdx,
                     appNoIdx, filingDateIdx, handlerIdx, inventorIdx, headers.size());
                 
-                // 如果关键字段未找到，显示警告
-                if (gekeIdx < 0 || titleIdx < 0) {
-                    wxMessageBox(debugInfo + "\n\n关键列未找到，请检查Excel列标题是否正确", 
-                        current_lang == 0 ? "Import Warning" : "导入警告", wxOK | wxICON_WARNING);
-                }
+                // 显示完整的匹配信息
+                wxMessageBox(headersList + debugInfo, 
+                    current_lang == 0 ? "Import Info" : "导入信息", wxOK | wxICON_INFORMATION);
                 
+                // 如果关键字段未找到，返回
+                if (gekeIdx < 0 || titleIdx < 0) {
+                    return;
+                }
                 // Parse data rows
                 for (line = file.GetNextLine(); !file.Eof(); line = file.GetNextLine()) {
                     if (line.IsEmpty()) continue;
