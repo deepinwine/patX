@@ -896,7 +896,9 @@ private:
         ID_COPY_CODE,
         ID_COPY_TITLE,
         ID_SWITCH_DB,
-        ID_AUTO_BACKUP
+        ID_AUTO_BACKUP,
+        ID_PRINT,
+        ID_EXPORT_PDF
     };
 
     void SetupUI() {
@@ -1111,6 +1113,50 @@ private:
         wxButton* export_btn = new wxButton(panel, wxID_ANY, "Export CSV");
         export_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnExport, this);
         tb2->Add(export_btn, 0, wxLEFT, 10);
+        
+        // Report export button
+        wxButton* report_btn = new wxButton(panel, wxID_ANY, "Report");
+        report_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            wxFileDialog dlg(this, "Export Report", "", "patent_report.txt",
+                             "Text files (*.txt)|*.txt|CSV (*.csv)|*.csv", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+            if (dlg.ShowModal() == wxID_OK) {
+                auto patents = db->GetPatents();
+                wxTextFile file(dlg.GetPath());
+                file.Create();
+                
+                file.AddLine("=== Patent Management Report ===");
+                file.AddLine(wxString::Format("Generated: %s", wxDateTime::Now().FormatDate()));
+                file.AddLine(wxString::Format("Total Patents: %zu", patents.size()));
+                file.AddLine("");
+                
+                // Statistics
+                int pending=0, granted=0, rejected=0, core=0;
+                for (const auto& p : patents) {
+                    if (p.application_status == "pending") pending++;
+                    else if (p.application_status == "granted") granted++;
+                    else if (p.application_status == "rejected") rejected++;
+                    if (p.patent_level == "core") core++;
+                }
+                file.AddLine("--- Summary ---");
+                file.AddLine(wxString::Format("Pending: %d", pending));
+                file.AddLine(wxString::Format("Granted: %d", granted));
+                file.AddLine(wxString::Format("Rejected: %d", rejected));
+                file.AddLine(wxString::Format("Core Patents: %d", core));
+                file.AddLine("");
+                
+                // Patent list
+                file.AddLine("--- Patent List ---");
+                for (const auto& p : patents) {
+                    file.AddLine(wxString::Format("%s | %s | %s | %s | %s",
+                        p.geke_code, p.title, p.patent_type, p.patent_level, p.application_status));
+                }
+                
+                file.Write();
+                file.Close();
+                wxMessageBox("Report exported!", "Done", wxOK | wxICON_INFORMATION);
+            }
+        });
+        tb2->Add(report_btn, 0, wxLEFT, 5);
 
         tb2->AddStretchSpacer();
         sizer->Add(tb2, 0, wxALL, 5);
