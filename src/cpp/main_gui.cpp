@@ -1,4 +1,4 @@
-// patX GUI - Complete Patent Manager with SQLite
+﻿// patX GUI - Complete Patent Manager with SQLite
 #include <wx/wx.h>
 #include <wx/listctrl.h>
 #include <wx/notebook.h>
@@ -819,47 +819,50 @@ private:
 
         // File menu
         wxMenu* file_menu = new wxMenu;
-        file_menu->Append(wxID_NEW, "&New Patent\tCtrl+N");
-        file_menu->Append(wxID_OPEN, "&Import...");
-        file_menu->Append(wxID_SAVE, "&Export...");
+        file_menu->Append(wxID_NEW, current_lang == 0 ? "&New Patent\tCtrl+N" : "新建专利(&N)\tCtrl+N");
+        file_menu->Append(wxID_OPEN, current_lang == 0 ? "&Import..." : "导入(&I)...");
+        file_menu->Append(wxID_SAVE, current_lang == 0 ? "&Export..." : "导出(&E)...");
         file_menu->AppendSeparator();
-        file_menu->Append(ID_SWITCH_DB, "Switch Database...");
-        file_menu->Append(ID_AUTO_BACKUP, "Auto Backup Settings...");
+        file_menu->Append(ID_SWITCH_DB, current_lang == 0 ? "Switch Database..." : "切换数据库...");
+        file_menu->Append(ID_AUTO_BACKUP, current_lang == 0 ? "Auto Backup Settings..." : "自动备份设置...");
         file_menu->AppendSeparator();
-        file_menu->Append(wxID_EXIT, "E&xit\tAlt+F4");
-        mb->Append(file_menu, "&File");
+        file_menu->Append(wxID_EXIT, current_lang == 0 ? "E&xit\tAlt+F4" : "退出(&X)\tAlt+F4");
+        mb->Append(file_menu, current_lang == 0 ? "&File" : "文件(&F)");
 
         // Edit menu
         wxMenu* edit_menu = new wxMenu;
-        edit_menu->Append(wxID_UNDO, "&Undo\tCtrl+Z");
-        edit_menu->Append(wxID_REDO, "&Redo\tCtrl+Y");
+        edit_menu->Append(wxID_UNDO, current_lang == 0 ? "&Undo\tCtrl+Z" : "撤销(&U)\tCtrl+Z");
+        edit_menu->Append(wxID_REDO, current_lang == 0 ? "&Redo\tCtrl+Y" : "重做(&R)\tCtrl+Y");
         edit_menu->AppendSeparator();
-        edit_menu->Append(wxID_EDIT, "&Edit Selected\tEnter");
-        edit_menu->Append(wxID_DELETE, "&Delete\tDel");
-        mb->Append(edit_menu, "&Edit");
+        edit_menu->Append(wxID_EDIT, current_lang == 0 ? "&Edit Selected\tEnter" : "编辑(&E)\tEnter");
+        edit_menu->Append(wxID_DELETE, current_lang == 0 ? "&Delete\tDel" : "删除(&D)\tDel");
+        mb->Append(edit_menu, current_lang == 0 ? "&Edit" : "编辑(&E)");
 
         // View menu
         wxMenu* view_menu = new wxMenu;
-        view_menu->Append(wxID_REFRESH, "&Refresh\tF5");
+        view_menu->Append(wxID_REFRESH, current_lang == 0 ? "&Refresh\tF5" : "刷新(&R)\tF5");
         view_menu->AppendSeparator();
-        view_menu->Append(ID_THEME_LIGHT, "Light Theme");
-        view_menu->Append(ID_THEME_DARK, "Dark Theme");
-        view_menu->Append(ID_THEME_EYE, "Eye Protection Theme");
-        mb->Append(view_menu, "&View");
+        view_menu->Append(ID_THEME_LIGHT, current_lang == 0 ? "Light Theme" : "浅色主题");
+        view_menu->Append(ID_THEME_DARK, current_lang == 0 ? "Dark Theme" : "深色主题");
+        view_menu->Append(ID_THEME_EYE, current_lang == 0 ? "Eye Protection Theme" : "护眼主题");
+        view_menu->AppendSeparator();
+        view_menu->Append(ID_LANG_EN, "English");
+        view_menu->Append(ID_LANG_ZH, "中文");
+        mb->Append(view_menu, current_lang == 0 ? "&View" : "视图(&V)");
 
         // Tools menu
         wxMenu* tools_menu = new wxMenu;
-        tools_menu->Append(ID_SYNC, "&Sync with NAS");
-        tools_menu->Append(ID_NAS_CONFIG, "NAS &Configuration...");
+        tools_menu->Append(ID_SYNC, current_lang == 0 ? "&Sync with NAS" : "NAS同步(&S)");
+        tools_menu->Append(ID_NAS_CONFIG, current_lang == 0 ? "NAS &Configuration..." : "NAS配置(&C)...");
         tools_menu->AppendSeparator();
-        tools_menu->Append(ID_BACKUP, "&Backup Database");
-        tools_menu->Append(ID_RESTORE, "&Restore Backup...");
-        mb->Append(tools_menu, "&Tools");
+        tools_menu->Append(ID_BACKUP, current_lang == 0 ? "&Backup Database" : "备份数据库(&B)");
+        tools_menu->Append(ID_RESTORE, current_lang == 0 ? "&Restore Backup..." : "恢复备份(&R)...");
+        mb->Append(tools_menu, current_lang == 0 ? "&Tools" : "工具(&T)");
 
         // Help menu
         wxMenu* help_menu = new wxMenu;
-        help_menu->Append(wxID_ABOUT, "&About");
-        mb->Append(help_menu, "&Help");
+        help_menu->Append(wxID_ABOUT, current_lang == 0 ? "&About" : "关于(&A)");
+        mb->Append(help_menu, current_lang == 0 ? "&Help" : "帮助(&H)");
 
         SetMenuBar(mb);
 
@@ -882,6 +885,8 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(0); }, ID_THEME_LIGHT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(1); }, ID_THEME_DARK);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(2); }, ID_THEME_EYE);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetLanguage(0); }, ID_LANG_EN);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetLanguage(1); }, ID_LANG_ZH);
     }
 
     enum {
@@ -898,8 +903,12 @@ private:
         ID_SWITCH_DB,
         ID_AUTO_BACKUP,
         ID_PRINT,
-        ID_EXPORT_PDF
+        ID_EXPORT_PDF,
+        ID_LANG_EN,
+        ID_LANG_ZH
     };
+    
+    int current_lang = 0; // 0=English, 1=Chinese
 
     void SetupUI() {
         wxPanel* main_panel = new wxPanel(this);
@@ -931,9 +940,12 @@ private:
 
         main_sizer->Add(top_bar, 0, wxALL, 5);
 
-        // Notebook with tabs
+        // Notebook with tabs - use simple wxNotebook
         notebook = new wxAuiNotebook(main_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                                      wxAUI_NB_TOP | wxAUI_NB_TAB_SPLIT | wxAUI_NB_TAB_MOVE);
+                                      wxAUI_NB_TOP | wxAUI_NB_TAB_SPLIT | wxAUI_NB_TAB_MOVE | wxAUI_NB_CLOSE_ON_ACTIVE_TAB);
+        
+        // Make sure notebook has a proper size
+        notebook->SetMinSize(wxSize(800, 600));
 
         SetupPatentTab();
         SetupOATab();
@@ -950,6 +962,11 @@ private:
         status_bar->SetStatusText("patX v1.0.0 | Database: patents.db | Press F1 for help");
 
         main_panel->SetSizer(main_sizer);
+        
+        // Force layout update
+        main_sizer->SetSizeHints(this);
+        SetSize(wxSize(1400, 900));
+        Centre();
     }
 
     // ============== Patent Tab ==============
@@ -1352,7 +1369,7 @@ private:
         sizer->Add(splitter, 1, wxEXPAND | wxALL, 5);
 
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, "Domestic Patents");
+        notebook->AddPage(panel, current_lang == 0 ? "Domestic Patents" : "国内专利");
     }
 
     void LoadPatents() {
@@ -1631,7 +1648,7 @@ private:
 
         sizer->Add(oa_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, "OA Processing");
+        notebook->AddPage(panel, current_lang == 0 ? "OA Processing" : "OA处理");
     }
 
     void LoadOA() {
@@ -1767,7 +1784,7 @@ private:
 
         sizer->Add(pct_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, "PCT");
+        notebook->AddPage(panel, current_lang == 0 ? "PCT" : "PCT申请");
     }
 
     void LoadPCT() {
@@ -1828,7 +1845,7 @@ private:
 
         sizer->Add(sw_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, "Software Copyright");
+        notebook->AddPage(panel, current_lang == 0 ? "Software Copyright" : "软件著作权");
     }
 
     void LoadSoftware() {
@@ -1877,7 +1894,7 @@ private:
 
         sizer->Add(ic_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, "IC Layout");
+        notebook->AddPage(panel, current_lang == 0 ? "IC Layout" : "集成电路");
     }
 
     void LoadIC() {
@@ -1927,7 +1944,7 @@ private:
 
         sizer->Add(foreign_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, "Foreign Patents");
+        notebook->AddPage(panel, current_lang == 0 ? "Foreign Patents" : "国外专利");
     }
 
     void LoadForeign() {
@@ -1968,7 +1985,7 @@ private:
 
         sizer->Add(fee_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, "Annual Fees");
+        notebook->AddPage(panel, current_lang == 0 ? "Annual Fees" : "年费管理");
     }
 
     void LoadAnnualFees() {
@@ -2018,7 +2035,7 @@ private:
 
         sizer->Add(rule_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, "Deadline Rules");
+        notebook->AddPage(panel, current_lang == 0 ? "Deadline Rules" : "期限规则");
     }
 
     void LoadDeadlineRules() {
@@ -2061,6 +2078,24 @@ private:
         }
         SetBackgroundColour(bg);
         SetForegroundColour(fg);
+        Refresh();
+    }
+    
+    // ============== Language ==============
+    void SetLanguage(int lang) {
+        current_lang = lang;
+        // Refresh UI with new language
+        SetTitle(lang == 0 ? "patX - Patent Manager v1.0.0" : "patX - 专利管理系统 v1.0.0");
+        status_bar->SetStatusText(lang == 0 ? 
+            "patX v1.0.0 | Database: patents.db | Press F1 for help" :
+            "patX v1.0.0 | 数据库: patents.db | 按F1获取帮助");
+        
+        // Show message about restart
+        wxString msg = lang == 0 ? 
+            "Language changed to English\nSome UI elements require restart to take effect" :
+            "语言已切换为中文\n部分界面元素需要重启后生效";
+        wxMessageBox(msg, lang == 0 ? "Language" : "语言", wxOK | wxICON_INFORMATION);
+        
         Refresh();
     }
 
