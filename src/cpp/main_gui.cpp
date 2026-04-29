@@ -14,6 +14,8 @@
 #include <wx/file.h>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
+#include <wx/spinctrl.h>
+#include <wx/filename.h>
 #include <memory>
 #include "database.hpp"
 
@@ -821,6 +823,9 @@ private:
         file_menu->Append(wxID_OPEN, "&Import...");
         file_menu->Append(wxID_SAVE, "&Export...");
         file_menu->AppendSeparator();
+        file_menu->Append(ID_SWITCH_DB, "Switch Database...");
+        file_menu->Append(ID_AUTO_BACKUP, "Auto Backup Settings...");
+        file_menu->AppendSeparator();
         file_menu->Append(wxID_EXIT, "E&xit\tAlt+F4");
         mb->Append(file_menu, "&File");
 
@@ -871,6 +876,8 @@ private:
         Bind(wxEVT_MENU, &PatXFrame::OnNasConfig, this, ID_NAS_CONFIG);
         Bind(wxEVT_MENU, &PatXFrame::OnBackup, this, ID_BACKUP);
         Bind(wxEVT_MENU, &PatXFrame::OnRestore, this, ID_RESTORE);
+        Bind(wxEVT_MENU, &PatXFrame::OnSwitchDatabase, this, ID_SWITCH_DB);
+        Bind(wxEVT_MENU, &PatXFrame::OnAutoBackup, this, ID_AUTO_BACKUP);
         Bind(wxEVT_MENU, &PatXFrame::OnAbout, this, wxID_ABOUT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(0); }, ID_THEME_LIGHT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(1); }, ID_THEME_DARK);
@@ -887,7 +894,9 @@ private:
         ID_THEME_EYE,
         ID_SEARCH_PATENTS,
         ID_COPY_CODE,
-        ID_COPY_TITLE
+        ID_COPY_TITLE,
+        ID_SWITCH_DB,
+        ID_AUTO_BACKUP
     };
 
     void SetupUI() {
@@ -2114,6 +2123,56 @@ private:
             wxCopyFile("patents.db", dlg.GetPath());
             wxMessageBox("Backup created successfully!", "Backup", wxOK | wxICON_INFORMATION);
         }
+    }
+
+    void OnSwitchDatabase(wxCommandEvent&) {
+        wxFileDialog dlg(this, "Open Database", "", "",
+                         "Database (*.db)|*.db|All files (*.*)|*.*",
+                         wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dlg.ShowModal() == wxID_OK) {
+            if (wxMessageBox(wxString::Format("Switch to database:\n%s\n\nCurrent database will be closed.",
+                            dlg.GetPath()), "Switch Database", wxYES_NO | wxICON_QUESTION) == wxYES) {
+                db.reset();
+                db = std::make_unique<Database>(dlg.GetPath().ToStdString());
+                LoadAllData();
+                status_bar->SetStatusText(wxString::Format("patX v1.0.0 | Database: %s",
+                    wxFileName(dlg.GetPath()).GetFullName()));
+                wxMessageBox("Database switched successfully!", "Success", wxOK | wxICON_INFORMATION);
+            }
+        }
+    }
+
+    void OnAutoBackup(wxCommandEvent&) {
+        wxDialog dlg(this, wxID_ANY, "Auto Backup Settings", wxDefaultPosition, wxSize(400, 250));
+        wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
+        
+        wxCheckBox* enable_cb = new wxCheckBox(&dlg, wxID_ANY, "Enable auto backup on exit");
+        sizer->Add(enable_cb, 0, wxALL, 10);
+        
+        wxBoxSizer* row1 = new wxBoxSizer(wxHORIZONTAL);
+        row1->Add(new wxStaticText(&dlg, wxID_ANY, "Backup interval:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+        wxComboBox* interval = new wxComboBox(&dlg, wxID_ANY, "Daily", wxDefaultPosition, wxSize(150, -1));
+        interval->Append("Daily"); interval->Append("Weekly"); interval->Append("Monthly");
+        row1->Add(interval, 1);
+        sizer->Add(row1, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+        
+        wxBoxSizer* row2 = new wxBoxSizer(wxHORIZONTAL);
+        row2->Add(new wxStaticText(&dlg, wxID_ANY, "Max backups:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+        wxSpinCtrl* max_backups = new wxSpinCtrl(&dlg, wxID_ANY, "10", wxDefaultPosition, wxSize(80, -1));
+        max_backups->SetRange(1, 100);
+        row2->Add(max_backups, 1);
+        sizer->Add(row2, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, 10);
+        
+        sizer->Add(new wxStaticText(&dlg, wxID_ANY, "Backup location: same folder as database"),
+                   0, wxLEFT | wxRIGHT | wxTOP, 15);
+        
+        wxBoxSizer* btn_sizer = new wxBoxSizer(wxHORIZONTAL);
+        btn_sizer->Add(new wxButton(&dlg, wxID_OK, "Save"), 0, wxALL, 5);
+        btn_sizer->Add(new wxButton(&dlg, wxID_CANCEL, "Cancel"), 0, wxALL, 5);
+        sizer->Add(btn_sizer, 0, wxALIGN_CENTER | wxTOP, 15);
+        
+        dlg.SetSizer(sizer);
+        dlg.ShowModal();
     }
 
     void OnRestore(wxCommandEvent&) {
