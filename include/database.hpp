@@ -1,83 +1,188 @@
-﻿/**
- * patX 数据库管理模块
- * 
- * 基于 SQLite3 原生 C 接口的高性能数据库操作
- */
-
+// patX Database - SQLite wrapper for patent data
 #pragma once
 
-#include <sqlite3.h>
 #include <string>
 #include <vector>
-#include <functional>
 #include <memory>
-#include "patent.hpp"
+#include <map>
+#include <ctime>
+#include <sqlite3.h>
 
-namespace patx {
+struct Patent {
+    int id = 0;
+    std::string geke_code;
+    std::string application_number;
+    std::string title;
+    std::string proposal_name;
+    std::string application_status;
+    std::string patent_type;
+    std::string patent_level;
+    std::string application_date;
+    std::string authorization_date;
+    std::string expiration_date;
+    std::string geke_handler;
+    std::string rd_department;
+    std::string agency_firm;
+    std::string original_applicant;
+    std::string current_applicant;
+    std::string inventor;
+    std::string notes;
+    std::string class_level1;
+    std::string class_level2;
+    std::string class_level3;
+};
+
+struct OARecord {
+    int id = 0;
+    int patent_id = 0;
+    std::string geke_code;
+    std::string patent_title;
+    std::string oa_type;
+    std::string official_deadline;
+    std::string issue_date;
+    std::string response_date;
+    std::string handler;
+    std::string writer;
+    std::string progress;
+    std::string agency;
+    std::string oa_summary;
+    bool is_completed = false;
+    bool is_extendable = false;
+    bool extension_requested = false;
+    int extension_months = 0;
+    std::string extended_deadline;
+    std::string notes;
+};
+
+struct PCTPatent {
+    int id = 0;
+    std::string geke_code;
+    std::string domestic_source;
+    std::string application_no;
+    std::string country_app_no;
+    std::string title;
+    std::string application_status;
+    std::string handler;
+    std::string inventor;
+    std::string filing_date;
+    std::string application_date;
+    std::string priority_date;
+    std::string country;
+    std::string notes;
+};
+
+struct SoftwareCopyright {
+    int id = 0;
+    std::string case_no;
+    std::string reg_no;
+    std::string title;
+    std::string original_owner;
+    std::string current_owner;
+    std::string application_status;
+    std::string handler;
+    std::string developer;
+    std::string inventor;
+    std::string dev_complete_date;
+    std::string application_date;
+    std::string reg_date;
+    std::string version;
+    std::string notes;
+};
+
+struct ICLayout {
+    int id = 0;
+    std::string case_no;
+    std::string reg_no;
+    std::string title;
+    std::string original_owner;
+    std::string current_owner;
+    std::string application_status;
+    std::string handler;
+    std::string designer;
+    std::string inventor;
+    std::string application_date;
+    std::string creation_date;
+    std::string cert_date;
+    std::string notes;
+};
+
+struct ForeignPatent {
+    int id = 0;
+    std::string case_no;
+    std::string pct_no;
+    std::string country_app_no;
+    std::string title;
+    std::string owner;
+    std::string patent_status;
+    std::string handler;
+    std::string inventor;
+    std::string application_date;
+    std::string authorization_date;
+    std::string country;
+    std::string application_no;
+    std::string notes;
+};
 
 class Database {
 public:
-    Database();
+    Database(const std::string& db_path);
     ~Database();
     
-    // 打开/关闭数据库
-    bool Open(const std::string& db_path);
-    void Close();
-    bool IsOpen() const;
+    bool IsOpen() const { return db_ != nullptr; }
     
-    // 获取原始 SQLite3 指针 (用于迁移)
-    sqlite3* GetRawHandle() { return db_; }
+    // Patents
+    std::vector<Patent> GetPatents(const std::string& status_filter = "",
+                                    const std::string& level_filter = "",
+                                    const std::string& handler_filter = "");
+    Patent GetPatentById(int id);
+    Patent GetPatentByCode(const std::string& geke_code);
+    int InsertPatent(const Patent& p);
+    bool UpdatePatent(int id, const Patent& p);
+    bool DeletePatent(int id);
+    std::vector<Patent> SearchPatents(const std::string& keyword);
     
-    // 表结构初始化 (兼容 Python 版)
-    bool InitTables();
+    // OA Records
+    std::vector<OARecord> GetOARecords(const std::string& filter_type = "",
+                                        const std::string& handler_filter = "",
+                                        const std::string& writer_filter = "");
+    OARecord GetOAById(int id);
+    std::vector<OARecord> GetOAByPatent(const std::string& geke_code);
+    int InsertOA(const OARecord& oa);
+    bool UpdateOA(int id, const OARecord& oa);
+    bool DeleteOA(int id);
+    bool MarkOACompleted(int id);
     
-    // 专利 CRUD
-    bool InsertPatent(const Patent& patent);
-    bool UpdatePatent(const Patent& patent);
-    bool DeletePatent(int32_t id);
-    Patent* FindPatentById(int32_t id);
+    // PCT
+    std::vector<PCTPatent> GetPCTPatents(const std::string& handler_filter = "");
+    int InsertPCT(const PCTPatent& p);
+    bool UpdatePCT(int id, const PCTPatent& p);
+    bool DeletePCT(int id);
     
-    // 批量操作
-    bool InsertPatentsBatch(const std::vector<Patent>& patents);
-    std::vector<Patent> LoadAllPatents();
+    // Software
+    std::vector<SoftwareCopyright> GetSoftwareCopyrights(const std::string& handler_filter = "");
+    int InsertSoftware(const SoftwareCopyright& s);
+    bool UpdateSoftware(int id, const SoftwareCopyright& s);
+    bool DeleteSoftware(int id);
     
-    // 检索
-    std::vector<Patent> SearchPatents(const std::string& query);
-    std::vector<Patent> SearchPatentsMulti(
-        const std::string& applicant,
-        const std::string& patent_type,
-        const std::string& date_from,
-        const std::string& date_to,
-        const std::string& legal_status
-    );
+    // IC Layouts
+    std::vector<ICLayout> GetICLayouts();
+    int InsertIC(const ICLayout& ic);
+    bool UpdateIC(int id, const ICLayout& ic);
+    bool DeleteIC(int id);
     
-    // 统计
-    Statistics GetStatistics();
+    // Foreign
+    std::vector<ForeignPatent> GetForeignPatents();
+    int InsertForeign(const ForeignPatent& f);
+    bool UpdateForeign(int id, const ForeignPatent& f);
+    bool DeleteForeign(int id);
     
-    // 事务
-    bool BeginTransaction();
-    bool Commit();
-    bool Rollback();
-    
-    // 错误处理
-    std::string GetLastError() const;
+    // Utility
+    std::vector<std::string> GetDistinctValues(const std::string& table, const std::string& column);
     
 private:
-    sqlite3* db_;
-    std::string db_path_;
-    std::string last_error_;
+    sqlite3* db_ = nullptr;
     
-    // 预编译语句缓存
-    sqlite3_stmt* stmt_insert_patent_ = nullptr;
-    sqlite3_stmt* stmt_update_patent_ = nullptr;
-    sqlite3_stmt* stmt_find_by_id_ = nullptr;
-    sqlite3_stmt* stmt_delete_by_id_ = nullptr;
-    
-    bool PrepareStatements();
-    Patent ParsePatent(sqlite3_stmt* stmt);
+    bool Execute(const std::string& sql);
+    std::string EscapeString(const std::string& s);
+    std::string GetCurrentDate();
 };
-
-// 全局数据库实例
-Database& GetDatabase();
-
-} // namespace patx
