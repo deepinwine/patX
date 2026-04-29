@@ -6,21 +6,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # vcpkg dependencies
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
-find_package(absl CONFIG REQUIRED)
+find_package(wxWidgets CONFIG REQUIRED)
 
-# Source files
-set(CPP_SOURCES
-    src/cpp/main.cpp
+# GUI version - WIN32 means GUI subsystem
+add_executable(patx WIN32
+    src/cpp/main_gui.cpp
 )
 
-# Create executable
-add_executable(patx ${CPP_SOURCES})
 target_include_directories(patx PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
-# Link dependencies
 target_link_libraries(patx PRIVATE 
     unofficial::sqlite3::sqlite3
-    absl::strings
+    wx::core
+    wx::base
+    wx::adv
 )
 
-message(STATUS "patX build configured with vcpkg")
+message(STATUS "patX GUI build configured")
