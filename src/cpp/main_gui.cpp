@@ -2125,19 +2125,140 @@ private:
     // ============== Language ==============
     void SetLanguage(int lang) {
         current_lang = lang;
-        // Refresh UI with new language
+        
+        // Update window title
         SetTitle(lang == 0 ? "patX - Patent Manager v1.0.0" : "patX - 专利管理系统 v1.0.0");
+        
+        // Update status bar
         status_bar->SetStatusText(lang == 0 ? 
             "patX v1.0.0 | Database: patents.db | Press F1 for help" :
             "patX v1.0.0 | 数据库: patents.db | 按F1获取帮助");
         
-        // Show message about restart
-        wxString msg = lang == 0 ? 
-            "Language changed to English\nSome UI elements require restart to take effect" :
-            "语言已切换为中文\n部分界面元素需要重启后生效";
-        wxMessageBox(msg, lang == 0 ? "Language" : "语言", wxOK | wxICON_INFORMATION);
+        // Update notebook tab names
+        for (size_t i = 0; i < notebook->GetPageCount(); i++) {
+            wxString newName;
+            switch (i) {
+                case 0: newName = lang == 0 ? "Domestic Patents" : "国内专利"; break;
+                case 1: newName = lang == 0 ? "OA Processing" : "OA处理"; break;
+                case 2: newName = lang == 0 ? "PCT" : "PCT申请"; break;
+                case 3: newName = lang == 0 ? "Software Copyright" : "软件著作权"; break;
+                case 4: newName = lang == 0 ? "IC Layout" : "集成电路"; break;
+                case 5: newName = lang == 0 ? "Foreign Patents" : "国外专利"; break;
+                case 6: newName = lang == 0 ? "Annual Fees" : "年费管理"; break;
+                case 7: newName = lang == 0 ? "Deadline Rules" : "期限规则"; break;
+            }
+            notebook->SetPageText(i, newName);
+        }
         
+        // Update list column headers
+        UpdateColumnHeaders();
+        
+        // Rebuild menu bar with new language
+        wxMenuBar* oldMb = GetMenuBar();
+        if (oldMb) {
+            // Store current menu state if needed
+        }
+        
+        wxMenuBar* newMb = new wxMenuBar();
+        
+        // File menu
+        wxMenu* file_menu = new wxMenu;
+        file_menu->Append(wxID_NEW, lang == 0 ? "&New Patent\tCtrl+N" : "新建专利(&N)\tCtrl+N");
+        file_menu->Append(wxID_OPEN, lang == 0 ? "&Import..." : "导入(&I)...");
+        file_menu->Append(wxID_SAVE, lang == 0 ? "&Export..." : "导出(&E)...");
+        file_menu->AppendSeparator();
+        file_menu->Append(ID_SWITCH_DB, lang == 0 ? "Switch Database..." : "切换数据库...");
+        file_menu->Append(ID_AUTO_BACKUP, lang == 0 ? "Auto Backup Settings..." : "自动备份设置...");
+        file_menu->AppendSeparator();
+        file_menu->Append(wxID_EXIT, lang == 0 ? "E&xit\tAlt+F4" : "退出(&X)\tAlt+F4");
+        newMb->Append(file_menu, lang == 0 ? "&File" : "文件(&F)");
+        
+        // Edit menu
+        wxMenu* edit_menu = new wxMenu;
+        edit_menu->Append(wxID_UNDO, lang == 0 ? "&Undo\tCtrl+Z" : "撤销(&U)\tCtrl+Z");
+        edit_menu->Append(wxID_REDO, lang == 0 ? "&Redo\tCtrl+Y" : "重做(&R)\tCtrl+Y");
+        edit_menu->AppendSeparator();
+        edit_menu->Append(wxID_EDIT, lang == 0 ? "&Edit Selected\tEnter" : "编辑(&E)\tEnter");
+        edit_menu->Append(wxID_DELETE, lang == 0 ? "&Delete\tDel" : "删除(&D)\tDel");
+        newMb->Append(edit_menu, lang == 0 ? "&Edit" : "编辑(&E)");
+        
+        // View menu
+        wxMenu* view_menu = new wxMenu;
+        view_menu->Append(wxID_REFRESH, lang == 0 ? "&Refresh\tF5" : "刷新(&R)\tF5");
+        view_menu->AppendSeparator();
+        view_menu->Append(ID_THEME_LIGHT, lang == 0 ? "Light Theme" : "浅色主题");
+        view_menu->Append(ID_THEME_DARK, lang == 0 ? "Dark Theme" : "深色主题");
+        view_menu->Append(ID_THEME_EYE, lang == 0 ? "Eye Protection Theme" : "护眼主题");
+        view_menu->AppendSeparator();
+        view_menu->Append(ID_LANG_EN, "English");
+        view_menu->Append(ID_LANG_ZH, "中文");
+        newMb->Append(view_menu, lang == 0 ? "&View" : "视图(&V)");
+        
+        // Tools menu
+        wxMenu* tools_menu = new wxMenu;
+        tools_menu->Append(ID_SYNC, lang == 0 ? "&Sync with NAS" : "NAS同步(&S)");
+        tools_menu->Append(ID_NAS_CONFIG, lang == 0 ? "NAS &Configuration..." : "NAS配置(&C)...");
+        tools_menu->AppendSeparator();
+        tools_menu->Append(ID_BACKUP, lang == 0 ? "&Backup Database" : "备份数据库(&B)");
+        tools_menu->Append(ID_RESTORE, lang == 0 ? "&Restore Backup..." : "恢复备份(&R)...");
+        tools_menu->AppendSeparator();
+        tools_menu->Append(ID_VALIDATE_DATA, lang == 0 ? "Validate Data" : "数据验证");
+        newMb->Append(tools_menu, lang == 0 ? "&Tools" : "工具(&T)");
+        
+        // Help menu
+        wxMenu* help_menu = new wxMenu;
+        help_menu->Append(wxID_ABOUT, lang == 0 ? "&About" : "关于(&A)");
+        newMb->Append(help_menu, lang == 0 ? "&Help" : "帮助(&H)");
+        
+        SetMenuBar(newMb);
+        
+        // Refresh the window
         Refresh();
+        Update();
+        
+        // Show brief message
+        wxMessageBox(lang == 0 ? 
+            "Language changed to English" : 
+            "语言已切换为中文", 
+            lang == 0 ? "Language" : "语言", wxOK | wxICON_INFORMATION);
+    }
+    
+    void UpdateColumnHeaders() {
+        // Update patent list columns
+        if (patent_list) {
+            wxListItem item;
+            item.SetMask(wxLIST_MASK_TEXT);
+            
+            item.SetText(current_lang == 0 ? "GEKE Code" : "格科代码");
+            patent_list->SetColumn(0, item);
+            
+            item.SetText(current_lang == 0 ? "App. No." : "申请号");
+            patent_list->SetColumn(1, item);
+            
+            item.SetText(current_lang == 0 ? "Title" : "标题");
+            patent_list->SetColumn(2, item);
+            
+            item.SetText(current_lang == 0 ? "Type" : "类型");
+            patent_list->SetColumn(3, item);
+            
+            item.SetText(current_lang == 0 ? "Level" : "等级");
+            patent_list->SetColumn(4, item);
+            
+            item.SetText(current_lang == 0 ? "Status" : "状态");
+            patent_list->SetColumn(5, item);
+            
+            item.SetText(current_lang == 0 ? "Handler" : "处理人");
+            patent_list->SetColumn(6, item);
+            
+            item.SetText(current_lang == 0 ? "Inventor" : "发明人");
+            patent_list->SetColumn(7, item);
+            
+            item.SetText(current_lang == 0 ? "Filing Date" : "申请日");
+            patent_list->SetColumn(8, item);
+            
+            item.SetText(current_lang == 0 ? "Notes" : "备注");
+            patent_list->SetColumn(9, item);
+        }
     }
 
     // ============== Menu Handlers ==============
