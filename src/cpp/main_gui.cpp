@@ -2330,20 +2330,81 @@ private:
                 }
                 headers.push_back(field.Strip(wxString::both));
                 
-                // Find column indices
+                // Find column indices - 改进的字段匹配
                 int gekeIdx = -1, titleIdx = -1, typeIdx = -1, statusIdx = -1, levelIdx = -1;
                 int appNoIdx = -1, filingDateIdx = -1, handlerIdx = -1, inventorIdx = -1;
+                
                 for (size_t i = 0; i < headers.size(); i++) {
                     wxString h = headers[i].Lower();
-                    if (h.Contains("geke") || h.Contains("格科") || h.Contains("代码")) gekeIdx = i;
-                    else if (h.Contains("title") || h.Contains("标题") || h.Contains("名称")) titleIdx = i;
-                    else if (h.Contains("type") || h.Contains("类型")) typeIdx = i;
-                    else if (h.Contains("status") || h.Contains("状态")) statusIdx = i;
-                    else if (h.Contains("level") || h.Contains("等级") || h.Contains("级别")) levelIdx = i;
-                    else if (h.Contains("app") || h.Contains("申请号")) appNoIdx = i;
-                    else if (h.Contains("filing") || h.Contains("申请日")) filingDateIdx = i;
-                    else if (h.Contains("handler") || h.Contains("处理人")) handlerIdx = i;
-                    else if (h.Contains("inventor") || h.Contains("发明人")) inventorIdx = i;
+                    h = h.Strip(wxString::both);
+                    
+                    // GEKE Code - 格科代码
+                    if (h.Contains("geke") || h.Contains(wxT("格科")) || h.Contains(wxT("代码")) || 
+                        h.Contains(wxT("专利号")) || h.Contains("code") || h.Contains("专利编号")) {
+                        gekeIdx = i;
+                    }
+                    // Title - 标题
+                    else if (h.Contains("title") || h.Contains(wxT("标题")) || h.Contains(wxT("名称")) || 
+                             h.Contains(wxT("专利名称")) || h.Contains(wxT("专利标题")) || h.Contains("name")) {
+                        titleIdx = i;
+                    }
+                    // Type - 类型
+                    else if (h.Contains("type") || h.Contains(wxT("类型")) || h.Contains(wxT("专利类型")) || 
+                             h.Contains("patent type")) {
+                        typeIdx = i;
+                    }
+                    // Status - 状态
+                    else if (h.Contains("status") || h.Contains(wxT("状态")) || h.Contains(wxT("申请状态")) || 
+                             h.Contains(wxT("审查状态"))) {
+                        statusIdx = i;
+                    }
+                    // Level - 等级
+                    else if (h.Contains("level") || h.Contains(wxT("等级")) || h.Contains(wxT("级别")) || 
+                             h.Contains(wxT("重要程度")) || h.Contains("priority")) {
+                        levelIdx = i;
+                    }
+                    // Application No. - 申请号
+                    else if (h.Contains("app") || h.Contains(wxT("申请号")) || h.Contains("application") || 
+                             h.Contains(wxT("申请编号"))) {
+                        appNoIdx = i;
+                    }
+                    // Filing Date - 申请日
+                    else if (h.Contains("filing") || h.Contains(wxT("申请日")) || h.Contains("date") || 
+                             h.Contains(wxT("申请日期")) || h.Contains(wxT("提交日"))) {
+                        filingDateIdx = i;
+                    }
+                    // Handler - 处理人
+                    else if (h.Contains("handler") || h.Contains(wxT("处理人")) || h.Contains(wxT("代理人")) || 
+                             h.Contains(wxT("负责人")) || h.Contains("agent")) {
+                        handlerIdx = i;
+                    }
+                    // Inventor - 发明人
+                    else if (h.Contains("inventor") || h.Contains(wxT("发明人")) || h.Contains(wxT("设计人")) || 
+                             h.Contains("author")) {
+                        inventorIdx = i;
+                    }
+                }
+                
+                // 如果没有找到标题列，尝试使用第二列或第三列
+                if (titleIdx < 0 && headers.size() > 2) {
+                    // 常见格式：第一列是编号，第二列或第三列是标题
+                    if (gekeIdx == 0) {
+                        titleIdx = (headers.size() > 2) ? 2 : 1;
+                    }
+                }
+                
+                // 调试信息
+                wxString debugInfo = wxString::Format(
+                    "Column mapping:\nGEKE=%d, Title=%d, Type=%d, Status=%d, Level=%d\n"
+                    "AppNo=%d, Date=%d, Handler=%d, Inventor=%d\n\n"
+                    "Headers found: %zu",
+                    gekeIdx, titleIdx, typeIdx, statusIdx, levelIdx,
+                    appNoIdx, filingDateIdx, handlerIdx, inventorIdx, headers.size());
+                
+                // 如果关键字段未找到，显示警告
+                if (gekeIdx < 0 || titleIdx < 0) {
+                    wxMessageBox(debugInfo + "\n\n关键列未找到，请检查Excel列标题是否正确", 
+                        current_lang == 0 ? "Import Warning" : "导入警告", wxOK | wxICON_WARNING);
                 }
                 
                 // Parse data rows
