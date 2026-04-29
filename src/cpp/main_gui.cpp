@@ -972,11 +972,11 @@ private:
             return btn;
         };
 
-        add_btn("Undo", &PatXFrame::OnUndo);
-        add_btn("Sync", &PatXFrame::OnSync);
-        add_btn("Export", &PatXFrame::OnExport);
-        add_btn("Import", &PatXFrame::OnImport);
-        wxButton* refresh_btn = add_btn("Refresh", &PatXFrame::OnRefresh);
+        add_btn(current_lang == 0 ? "Undo" : "撤销", &PatXFrame::OnUndo);
+        add_btn(current_lang == 0 ? "Sync" : "同步", &PatXFrame::OnSync);
+        add_btn(current_lang == 0 ? "Export" : "导出", &PatXFrame::OnExport);
+        add_btn(current_lang == 0 ? "Import" : "导入", &PatXFrame::OnImport);
+        wxButton* refresh_btn = add_btn(current_lang == 0 ? "Refresh" : "刷新", &PatXFrame::OnRefresh);
         refresh_btn->SetToolTip("F5");
 
         main_sizer->Add(top_bar, 0, wxALL, 5);
