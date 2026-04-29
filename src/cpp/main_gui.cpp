@@ -2263,57 +2263,156 @@ private:
 
     // ============== Menu Handlers ==============
     void OnImport(wxCommandEvent&) {
-        wxFileDialog dlg(this, "Import Data", "", "",
-                         "Excel files (*.xlsx)|*.xlsx|CSV files (*.csv)|*.csv|All files (*.*)|*.*",
+        wxString filter = current_lang == 0 ? 
+            "Excel files (*.xlsx)|*.xlsx|CSV files (*.csv)|*.csv|All files (*.*)|*.*" :
+            "Excel文件 (*.xlsx)|*.xlsx|CSV文件 (*.csv)|*.csv|所有文件 (*.*)|*.*";
+        wxFileDialog dlg(this, current_lang == 0 ? "Import Data" : "导入数据", "", "", filter,
                          wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dlg.ShowModal() == wxID_OK) {
             wxString path = dlg.GetPath();
-
-            // Parse CSV/Excel and import
-            if (path.EndsWith(".csv")) {
-                wxTextFile file(path);
-                if (file.Open()) {
-                    int imported = 0;
-                    wxString line = file.GetFirstLine();
-                    std::vector<wxString> headers;
-                    // Parse headers
-                    for (size_t i = 0; i < line.length(); ) {
-                        size_t start = i;
-                        while (i < line.length() && line[i] != ',') i++;
-                        headers.push_back(line.SubString(start, i-1));
-                        if (i < line.length()) i++;
-                    }
-
-                    // Parse data rows
-                    for (line = file.GetNextLine(); !file.Eof(); line = file.GetNextLine()) {
-                        if (line.IsEmpty()) continue;
-                        std::vector<wxString> values;
-                        for (size_t i = 0; i < line.length(); ) {
-                            size_t start = i;
-                            while (i < line.length() && line[i] != ',') i++;
-                            values.push_back(line.SubString(start, i-1));
-                            if (i < line.length()) i++;
-                        }
-
-                        if (values.size() >= 3) {
-                            Patent p;
-                            p.geke_code = values[0].ToStdString();
-                            p.application_number = values.size() > 1 ? values[1].ToStdString() : "";
-                            p.title = values.size() > 2 ? values[2].ToStdString() : "";
-                            p.application_status = "pending";
-                            p.patent_level = "normal";
-                            if (!p.geke_code.empty() && !p.title.empty()) {
-                                db->InsertPatent(p);
-                                imported++;
-                            }
-                        }
-                    }
-                    file.Close();
-                    LoadAllData();
-                    wxMessageBox(wxString::Format("Imported %d records from CSV", imported), "Import", wxOK | wxICON_INFORMATION);
+            wxString csvPath = path;
+            
+            // If Excel file, convert to CSV using PowerShell
+            if (path.EndsWith(".xlsx") || path.EndsWith(".xls")) {
+                wxString title = current_lang == 0 ? "Converting Excel..." : "转换Excel...";
+                wxProgressDialog progress(title, current_lang == 0 ? 
+                    "Please wait while converting..." : "请等待转换...", 100, this);
+                progress.Pulse();
+                
+                // Generate temp CSV path
+                csvPath = wxFileName::CreateTempFileName("patx_import_") + ".csv";
+                
+                // PowerShell command to convert Excel to CSV
+                wxString psCmd = wxString::Format(
+                    "$excel = New-Object -ComObject Excel.Application; "
+                    "$excel.Visible = $false; "
+                    "$wb = $excel.Workbooks.Open('%s'); "
+                    "$ws = $wb.Sheets.Item(1); "
+                    "$ws.SaveAs('%s', 6); "
+                    "$wb.Close(); "
+                    "$excel.Quit(); "
+                    "[System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null",
+                    path, csvPath);
+                
+                // Execute PowerShell
+                wxArrayString output;
+                wxExecute(wxString("powershell -Command \"") + psCmd + "\"", output, wxEXEC_HIDE_CONSOLE);
+                
+                progress.Update(100);
+                progress.Close();
+            }
+            
+            // Parse CSV and import
+            wxTextFile file(csvPath);
+            if (file.Open()) {
+                int imported = 0;
+                wxString line = file.GetFirstLine();
+                
+                // Skip BOM if present
+                if (line.StartsWith("\xEF\xBB\xBF")) {
+                    line = line.Mid(3);
                 }
+                
+                std::vector<wxString> headers;
+                // Parse headers
+                bool inQuotes = false;
+                wxString field;
+                for (size_t i = 0; i < line.length(); i++) {
+                    wxChar c = line[i];
+                    if (c == '"') {
+                        inQuotes = !inQuotes;
+                    } else if (c == ',' && !inQuotes) {
+                        headers.push_back(field.Strip(wxString::both));
+                        field.Clear();
+                    } else {
+                        field += c;
+                    }
+                }
+                headers.push_back(field.Strip(wxString::both));
+                
+                // Find column indices
+                int gekeIdx = -1, titleIdx = -1, typeIdx = -1, statusIdx = -1, levelIdx = -1;
+                int appNoIdx = -1, filingDateIdx = -1, handlerIdx = -1, inventorIdx = -1;
+                for (size_t i = 0; i < headers.size(); i++) {
+                    wxString h = headers[i].Lower();
+                    if (h.Contains("geke") || h.Contains("格科") || h.Contains("代码")) gekeIdx = i;
+                    else if (h.Contains("title") || h.Contains("标题") || h.Contains("名称")) titleIdx = i;
+                    else if (h.Contains("type") || h.Contains("类型")) typeIdx = i;
+                    else if (h.Contains("status") || h.Contains("状态")) statusIdx = i;
+                    else if (h.Contains("level") || h.Contains("等级") || h.Contains("级别")) levelIdx = i;
+                    else if (h.Contains("app") || h.Contains("申请号")) appNoIdx = i;
+                    else if (h.Contains("filing") || h.Contains("申请日")) filingDateIdx = i;
+                    else if (h.Contains("handler") || h.Contains("处理人")) handlerIdx = i;
+                    else if (h.Contains("inventor") || h.Contains("发明人")) inventorIdx = i;
+                }
+                
+                // Parse data rows
+                for (line = file.GetNextLine(); !file.Eof(); line = file.GetNextLine()) {
+                    if (line.IsEmpty()) continue;
+                    
+                    // Parse CSV line with quote handling
+                    std::vector<wxString> values;
+                    field.Clear();
+                    inQuotes = false;
+                    for (size_t i = 0; i < line.length(); i++) {
+                        wxChar c = line[i];
+                        if (c == '"') {
+                            inQuotes = !inQuotes;
+                        } else if (c == ',' && !inQuotes) {
+                            values.push_back(field.Strip(wxString::both));
+                            field.Clear();
+                        } else {
+                            field += c;
+                        }
+                    }
+                    values.push_back(field.Strip(wxString::both));
+                    
+                    // Extract values
+                    Patent p;
+                    if (gekeIdx >= 0 && gekeIdx < (int)values.size()) 
+                        p.geke_code = values[gekeIdx].ToStdString();
+                    if (appNoIdx >= 0 && appNoIdx < (int)values.size()) 
+                        p.application_number = values[appNoIdx].ToStdString();
+                    if (titleIdx >= 0 && titleIdx < (int)values.size()) 
+                        p.title = values[titleIdx].ToStdString();
+                    if (typeIdx >= 0 && typeIdx < (int)values.size()) 
+                        p.patent_type = values[typeIdx].ToStdString();
+                    if (levelIdx >= 0 && levelIdx < (int)values.size()) 
+                        p.patent_level = values[levelIdx].ToStdString();
+                    if (statusIdx >= 0 && statusIdx < (int)values.size()) 
+                        p.application_status = values[statusIdx].ToStdString();
+                    if (filingDateIdx >= 0 && filingDateIdx < (int)values.size()) 
+                        p.application_date = values[filingDateIdx].ToStdString();
+                    if (handlerIdx >= 0 && handlerIdx < (int)values.size()) 
+                        p.geke_handler = values[handlerIdx].ToStdString();
+                    if (inventorIdx >= 0 && inventorIdx < (int)values.size()) 
+                        p.inventor = values[inventorIdx].ToStdString();
+                    
+                    // Set defaults
+                    if (p.patent_type.empty()) p.patent_type = "invention";
+                    if (p.patent_level.empty()) p.patent_level = "normal";
+                    if (p.application_status.empty()) p.application_status = "pending";
+                    
+                    if (!p.geke_code.empty() && !p.title.empty()) {
+                        db->InsertPatent(p);
+                        imported++;
+                    }
+                }
+                file.Close();
+                
+                // Clean up temp file if it was created from Excel
+                if (path.EndsWith(".xlsx") || path.EndsWith(".xls")) {
+                    wxRemoveFile(csvPath);
+                }
+                
+                LoadAllData();
+                wxString msg = current_lang == 0 ?
+                    wxString::Format("Imported %d records", imported) :
+                    wxString::Format("成功导入 %d 条记录", imported);
+                wxMessageBox(msg, current_lang == 0 ? "Import" : "导入", wxOK | wxICON_INFORMATION);
             } else {
-                wxMessageBox("Excel import requires additional library\nPlease convert to CSV format", "Info", wxOK | wxICON_INFORMATION);
+                wxString msg = current_lang == 0 ? "Failed to open file" : "无法打开文件";
+                wxMessageBox(msg, current_lang == 0 ? "Error" : "错误", wxOK | wxICON_ERROR);
             }
         }
     }
