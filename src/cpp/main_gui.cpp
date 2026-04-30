@@ -17,7 +17,113 @@
 #include <wx/spinctrl.h>
 #include <wx/filename.h>
 #include <memory>
+#include <fstream>
 #include "database.hpp"
+#include "excel_io.hpp"
+
+// Helper macros for UTF-8 Chinese strings on Windows
+// MSVC /utf-8 flag stores literals as UTF-8, but wxString(const char*) uses system locale (GBK)
+// Use FromUTF8() for proper conversion
+#define UTF8_STR(s) wxString::FromUTF8(s)
+
+// Language switch helper - returns wxString with proper UTF-8 handling for Chinese
+// Usage: LANG_STR("English text", "中文文本")
+#define LANG_STR(en, zh) (current_lang == 0 ? wxString(en) : wxString::FromUTF8(zh))
+
+// Same for when lang is a parameter not member variable
+#define LANG_STR_L(lang, en, zh) (lang == 0 ? wxString(en) : wxString::FromUTF8(zh))
+
+// Convert UTF-8 std::string from database to wxString
+#define DB_STR(s) wxString::FromUTF8(s.c_str())
+
+// Smart string comparison: tries numeric sort first, falls back to string
+static int SmartCompare(const wxString& a, const wxString& b, bool ascending) {
+    if (a.IsEmpty() && b.IsEmpty()) return 0;
+    if (a.IsEmpty()) return ascending ? 1 : -1;
+    if (b.IsEmpty()) return ascending ? -1 : 1;
+
+    // Try to parse both as numbers
+    double da = 0, db = 0;
+    bool a_num = a.ToDouble(&da);
+    bool b_num = b.ToDouble(&db);
+
+    if (a_num && b_num) {
+        return ascending ? (da < db ? -1 : da > db ? 1 : 0) : (da > db ? 1 : da < db ? -1 : 0);
+    }
+    return ascending ? a.Cmp(b) : b.Cmp(a);
+}
+
+// Generic sort helper for wxListCtrl - sorts by column text, preserves item data
+static void SortListCtrl(wxListCtrl* list, int col, bool asc) {
+    int count = list->GetItemCount();
+    if (count <= 1) return;
+    struct RowData { int orig_row; wxString text; wxIntPtr data; };
+    std::vector<RowData> rows(count);
+    int ncols = list->GetColumnCount();
+    for (int i = 0; i < count; i++) {
+        rows[i].orig_row = i;
+        rows[i].text = list->GetItemText(i, col);
+        rows[i].data = list->GetItemData(i);
+    }
+    std::stable_sort(rows.begin(), rows.end(), [asc](const RowData& a, const RowData& b) {
+        return SmartCompare(a.text, b.text, asc) < 0;
+    });
+    std::vector<std::vector<wxString>> texts(count, std::vector<wxString>(ncols));
+    for (int i = 0; i < count; i++)
+        for (int c = 0; c < ncols; c++)
+            texts[i][c] = list->GetItemText(i, c);
+    list->DeleteAllItems();
+    for (int i = 0; i < count; i++) {
+        int orig = rows[i].orig_row;
+        long idx = list->InsertItem(i, texts[orig][0]);
+        for (int c = 1; c < ncols; c++)
+            list->SetItem(idx, c, texts[orig][c]);
+        list->SetItemData(idx, rows[i].data);
+    }
+}
+
+// ============== NAS Configuration ==============
+struct NASConfig {
+    std::string nas_path;           // NAS共享路径
+    std::string username;           // 当前用户名
+    int auto_sync_minutes = 0;      // 自动同步间隔(分钟), 0=禁用
+    bool enabled = false;
+
+    void Save() {
+        std::ofstream f("nas_config.txt");
+        if (f.is_open()) {
+            f << nas_path << "\n";
+            f << username << "\n";
+            f << auto_sync_minutes << "\n";
+            f << (enabled ? "1" : "0") << "\n";
+            f.close();
+        }
+    }
+
+    void Load() {
+        std::ifstream f("nas_config.txt");
+        if (f.is_open()) {
+            std::getline(f, nas_path);
+            std::getline(f, username);
+            std::string line;
+            std::getline(f, line);
+            auto_sync_minutes = std::atoi(line.c_str());
+            std::getline(f, line);
+            enabled = (line == "1");
+            f.close();
+        }
+    }
+
+    static NASConfig& Get() {
+        static NASConfig instance;
+        static bool loaded = false;
+        if (!loaded) {
+            instance.Load();
+            loaded = true;
+        }
+        return instance;
+    }
+};
 
 // ============== Edit Dialog ==============
 class PatentEditDialog : public wxDialog {
@@ -45,7 +151,7 @@ private:
         // Basic info
         sizer->Add(new wxStaticText(scroll, wxID_ANY, "=== Basic Info ==="), 0, wxTOP, 10);
 
-        AddField(scroll, sizer, "geke_code", "GEKE Code");
+        AddField(scroll, sizer, "geke_code", "编号");
         AddField(scroll, sizer, "application_number", "Application No");
         AddField(scroll, sizer, "title", "Title", 300);
         AddField(scroll, sizer, "proposal_name", "Proposal Name", 200);
@@ -86,7 +192,7 @@ private:
         // People
         sizer->Add(new wxStaticText(scroll, wxID_ANY, "=== People ==="), 0, wxTOP, 10);
         wxBoxSizer* row3 = new wxBoxSizer(wxHORIZONTAL);
-        AddField(scroll, row3, "geke_handler", "Handler", 100);
+        AddField(scroll, row3, "geke_handler", UTF8_STR("处理人"), 100);
         AddField(scroll, row3, "inventor", "Inventor", 150);
         sizer->Add(row3, 0, wxEXPAND | wxALL, 5);
 
@@ -131,7 +237,7 @@ private:
     }
 
     void AddField(wxWindow* parent, wxSizer* sizer, const std::string& key,
-                  const std::string& label, int width = 150, bool multiline = false) {
+                  const wxString& label, int width = 150, bool multiline = false) {
         wxBoxSizer* row = new wxBoxSizer(wxHORIZONTAL);
         row->Add(new wxStaticText(parent, wxID_ANY, label + ":"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
         if (multiline) {
@@ -150,27 +256,27 @@ private:
 
     void LoadData() {
         Patent p = db_->GetPatentById(patent_id_);
-        if (fields_.count("geke_code")) fields_["geke_code"]->SetValue(wxString(p.geke_code));
-        if (fields_.count("application_number")) fields_["application_number"]->SetValue(wxString(p.application_number));
-        if (fields_.count("title")) fields_["title"]->SetValue(wxString(p.title));
-        if (fields_.count("proposal_name")) fields_["proposal_name"]->SetValue(wxString(p.proposal_name));
-        if (fields_.count("application_date")) fields_["application_date"]->SetValue(wxString(p.application_date));
-        if (fields_.count("authorization_date")) fields_["authorization_date"]->SetValue(wxString(p.authorization_date));
-        if (fields_.count("expiration_date")) fields_["expiration_date"]->SetValue(wxString(p.expiration_date));
-        if (fields_.count("geke_handler")) fields_["geke_handler"]->SetValue(wxString(p.geke_handler));
-        if (fields_.count("inventor")) fields_["inventor"]->SetValue(wxString(p.inventor));
-        if (fields_.count("rd_department")) fields_["rd_department"]->SetValue(wxString(p.rd_department));
-        if (fields_.count("agency_firm")) fields_["agency_firm"]->SetValue(wxString(p.agency_firm));
-        if (fields_.count("original_applicant")) fields_["original_applicant"]->SetValue(wxString(p.original_applicant));
-        if (fields_.count("current_applicant")) fields_["current_applicant"]->SetValue(wxString(p.current_applicant));
-        if (fields_.count("class_level1")) fields_["class_level1"]->SetValue(wxString(p.class_level1));
-        if (fields_.count("class_level2")) fields_["class_level2"]->SetValue(wxString(p.class_level2));
-        if (fields_.count("class_level3")) fields_["class_level3"]->SetValue(wxString(p.class_level3));
-        if (fields_.count("notes")) fields_["notes"]->SetValue(wxString(p.notes));
+        if (fields_.count("geke_code")) fields_["geke_code"]->SetValue(DB_STR(p.geke_code));
+        if (fields_.count("application_number")) fields_["application_number"]->SetValue(DB_STR(p.application_number));
+        if (fields_.count("title")) fields_["title"]->SetValue(DB_STR(p.title));
+        if (fields_.count("proposal_name")) fields_["proposal_name"]->SetValue(DB_STR(p.proposal_name));
+        if (fields_.count("application_date")) fields_["application_date"]->SetValue(DB_STR(p.application_date));
+        if (fields_.count("authorization_date")) fields_["authorization_date"]->SetValue(DB_STR(p.authorization_date));
+        if (fields_.count("expiration_date")) fields_["expiration_date"]->SetValue(DB_STR(p.expiration_date));
+        if (fields_.count("geke_handler")) fields_["geke_handler"]->SetValue(DB_STR(p.geke_handler));
+        if (fields_.count("inventor")) fields_["inventor"]->SetValue(DB_STR(p.inventor));
+        if (fields_.count("rd_department")) fields_["rd_department"]->SetValue(DB_STR(p.rd_department));
+        if (fields_.count("agency_firm")) fields_["agency_firm"]->SetValue(DB_STR(p.agency_firm));
+        if (fields_.count("original_applicant")) fields_["original_applicant"]->SetValue(DB_STR(p.original_applicant));
+        if (fields_.count("current_applicant")) fields_["current_applicant"]->SetValue(DB_STR(p.current_applicant));
+        if (fields_.count("class_level1")) fields_["class_level1"]->SetValue(DB_STR(p.class_level1));
+        if (fields_.count("class_level2")) fields_["class_level2"]->SetValue(DB_STR(p.class_level2));
+        if (fields_.count("class_level3")) fields_["class_level3"]->SetValue(DB_STR(p.class_level3));
+        if (fields_.count("notes")) fields_["notes"]->SetValue(DB_STR(p.notes));
 
-        type_combo_->SetValue(wxString(p.patent_type));
-        level_combo_->SetValue(wxString(p.patent_level));
-        status_combo_->SetValue(wxString(p.application_status));
+        type_combo_->SetValue(DB_STR(p.patent_type));
+        level_combo_->SetValue(DB_STR(p.patent_level));
+        status_combo_->SetValue(DB_STR(p.application_status));
     }
 
     void OnSave(wxCommandEvent&) {
@@ -200,7 +306,7 @@ private:
         p.application_status = status_combo_->GetValue().ToStdString();
 
         if (p.geke_code.empty()) {
-            wxMessageBox("GEKE Code is required", "Error", wxOK | wxICON_ERROR);
+            wxMessageBox(UTF8_STR("编号不能为空"), UTF8_STR("错误"), wxOK | wxICON_ERROR);
             return;
         }
         if (p.title.empty()) {
@@ -219,7 +325,7 @@ private:
         if (success) {
             EndModal(wxID_OK);
         } else {
-            wxMessageBox("Failed to save (duplicate GEKE code?)", "Error", wxOK | wxICON_ERROR);
+            wxMessageBox(UTF8_STR("保存失败（编号重复？）"), UTF8_STR("错误"), wxOK | wxICON_ERROR);
         }
     }
 };
@@ -252,7 +358,7 @@ private:
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 
         wxBoxSizer* row1 = new wxBoxSizer(wxHORIZONTAL);
-        row1->Add(new wxStaticText(panel, wxID_ANY, "GEKE Code:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        row1->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("编号:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
         geke_code_field_ = new wxTextCtrl(panel, wxID_ANY, "", wxDefaultPosition, wxSize(150, -1));
         row1->Add(geke_code_field_, 1);
         sizer->Add(row1, 0, wxEXPAND | wxALL, 5);
@@ -321,13 +427,13 @@ private:
 
     void LoadData() {
         OARecord oa = db_->GetOAById(oa_id_);
-        geke_code_field_->SetValue(wxString(oa.geke_code));
-        oa_type_combo_->SetValue(wxString(oa.oa_type));
-        deadline_field_->SetValue(wxString(oa.official_deadline));
-        issue_date_field_->SetValue(wxString(oa.issue_date));
-        handler_field_->SetValue(wxString(oa.handler));
-        writer_field_->SetValue(wxString(oa.writer));
-        progress_combo_->SetValue(wxString(oa.progress));
+        geke_code_field_->SetValue(DB_STR(oa.geke_code));
+        oa_type_combo_->SetValue(DB_STR(oa.oa_type));
+        deadline_field_->SetValue(DB_STR(oa.official_deadline));
+        issue_date_field_->SetValue(DB_STR(oa.issue_date));
+        handler_field_->SetValue(DB_STR(oa.handler));
+        writer_field_->SetValue(DB_STR(oa.writer));
+        progress_combo_->SetValue(DB_STR(oa.progress));
         extendable_check_->SetValue(oa.is_extendable);
         completed_check_->SetValue(oa.is_completed);
     }
@@ -346,7 +452,7 @@ private:
         oa.is_completed = completed_check_->GetValue();
 
         if (oa.geke_code.empty()) {
-            wxMessageBox("GEKE Code is required", "Error", wxOK | wxICON_ERROR);
+            wxMessageBox(UTF8_STR("编号不能为空"), UTF8_STR("错误"), wxOK | wxICON_ERROR);
             return;
         }
 
@@ -397,7 +503,7 @@ private:
             sizer->Add(row, 0, wxEXPAND | wxALL, 3);
         };
 
-        add_row("GEKE Code:", "geke_code", 120);
+        add_row(UTF8_STR("编号:"), "geke_code", 120);
         add_row("Domestic Source:", "domestic_source", 120);
         add_row("PCT Application No:", "application_no", 150);
         add_row("Country App No:", "country_app_no", 150);
@@ -441,9 +547,9 @@ private:
 
     void LoadData() {
         PCTPatent p = db_->GetPCTPatents()[0]; // TODO: implement GetPCTById
-        if (fields_.count("geke_code")) fields_["geke_code"]->SetValue(wxString(p.geke_code));
-        if (fields_.count("title")) fields_["title"]->SetValue(wxString(p.title));
-        status_combo_->SetValue(wxString(p.application_status));
+        if (fields_.count("geke_code")) fields_["geke_code"]->SetValue(DB_STR(p.geke_code));
+        if (fields_.count("title")) fields_["title"]->SetValue(DB_STR(p.title));
+        status_combo_->SetValue(DB_STR(p.application_status));
     }
 
     void OnSave(wxCommandEvent&) {
@@ -464,7 +570,7 @@ private:
         p.notes = fields_["notes"]->GetValue().ToStdString();
 
         if (p.geke_code.empty()) {
-            wxMessageBox("GEKE Code is required", "Error", wxOK | wxICON_ERROR);
+            wxMessageBox(UTF8_STR("编号不能为空"), UTF8_STR("错误"), wxOK | wxICON_ERROR);
             return;
         }
 
@@ -787,6 +893,9 @@ private:
     // Patent tab
     wxListCtrl* patent_list;
     wxTextCtrl* patent_search;
+    wxTextCtrl* common_search;
+    wxComboBox* common_status_filter;
+    wxComboBox* common_handler_filter;
     wxComboBox* patent_status_filter;
     wxComboBox* patent_level_filter;
     wxComboBox* patent_handler_filter;
@@ -814,57 +923,60 @@ private:
     // Deadline rules tab
     wxListCtrl* rule_list;
 
+    // Sorting state per list (column, ascending)
+    std::map<wxListCtrl*, std::pair<int, bool>> sort_state;
+
     void SetupMenu() {
         wxMenuBar* mb = new wxMenuBar;
 
         // File menu
         wxMenu* file_menu = new wxMenu;
-        file_menu->Append(wxID_NEW, current_lang == 0 ? "&New Patent\tCtrl+N" : "新建专利(&N)\tCtrl+N");
-        file_menu->Append(wxID_OPEN, current_lang == 0 ? "&Import..." : "导入(&I)...");
-        file_menu->Append(wxID_SAVE, current_lang == 0 ? "&Export..." : "导出(&E)...");
+        file_menu->Append(wxID_NEW, LANG_STR("&New Patent\tCtrl+N", "新建专利(&N)\tCtrl+N"));
+        file_menu->Append(wxID_OPEN, LANG_STR("&Import...", "导入(&I)..."));
+        file_menu->Append(wxID_SAVE, LANG_STR("&Export...", "导出(&E)..."));
         file_menu->AppendSeparator();
-        file_menu->Append(ID_SWITCH_DB, current_lang == 0 ? "Switch Database..." : "切换数据库...");
-        file_menu->Append(ID_AUTO_BACKUP, current_lang == 0 ? "Auto Backup Settings..." : "自动备份设置...");
+        file_menu->Append(ID_SWITCH_DB, LANG_STR("Switch Database...", "切换数据库..."));
+        file_menu->Append(ID_AUTO_BACKUP, LANG_STR("Auto Backup Settings...", "自动备份设置..."));
         file_menu->AppendSeparator();
-        file_menu->Append(wxID_EXIT, current_lang == 0 ? "E&xit\tAlt+F4" : "退出(&X)\tAlt+F4");
-        mb->Append(file_menu, current_lang == 0 ? "&File" : "文件(&F)");
+        file_menu->Append(wxID_EXIT, LANG_STR("E&xit\tAlt+F4", "退出(&X)\tAlt+F4"));
+        mb->Append(file_menu, LANG_STR("&File", "文件(&F)"));
 
         // Edit menu
         wxMenu* edit_menu = new wxMenu;
-        edit_menu->Append(wxID_UNDO, current_lang == 0 ? "&Undo\tCtrl+Z" : "撤销(&U)\tCtrl+Z");
-        edit_menu->Append(wxID_REDO, current_lang == 0 ? "&Redo\tCtrl+Y" : "重做(&R)\tCtrl+Y");
+        edit_menu->Append(wxID_UNDO, LANG_STR("&Undo\tCtrl+Z", "撤销(&U)\tCtrl+Z"));
+        edit_menu->Append(wxID_REDO, LANG_STR("&Redo\tCtrl+Y", "重做(&R)\tCtrl+Y"));
         edit_menu->AppendSeparator();
-        edit_menu->Append(wxID_EDIT, current_lang == 0 ? "&Edit Selected\tEnter" : "编辑(&E)\tEnter");
-        edit_menu->Append(wxID_DELETE, current_lang == 0 ? "&Delete\tDel" : "删除(&D)\tDel");
-        mb->Append(edit_menu, current_lang == 0 ? "&Edit" : "编辑(&E)");
+        edit_menu->Append(wxID_EDIT, LANG_STR("&Edit Selected\tEnter", "编辑(&E)\tEnter"));
+        edit_menu->Append(wxID_DELETE, LANG_STR("&Delete\tDel", "删除(&D)\tDel"));
+        mb->Append(edit_menu, LANG_STR("&Edit", "编辑(&E)"));
 
         // View menu
         wxMenu* view_menu = new wxMenu;
-        view_menu->Append(wxID_REFRESH, current_lang == 0 ? "&Refresh\tF5" : "刷新(&R)\tF5");
+        view_menu->Append(wxID_REFRESH, LANG_STR("&Refresh\tF5", "刷新(&R)\tF5"));
         view_menu->AppendSeparator();
-        view_menu->Append(ID_THEME_LIGHT, current_lang == 0 ? "Light Theme" : "浅色主题");
-        view_menu->Append(ID_THEME_DARK, current_lang == 0 ? "Dark Theme" : "深色主题");
-        view_menu->Append(ID_THEME_EYE, current_lang == 0 ? "Eye Protection Theme" : "护眼主题");
+        view_menu->Append(ID_THEME_LIGHT, LANG_STR("Light Theme", "浅色主题"));
+        view_menu->Append(ID_THEME_DARK, LANG_STR("Dark Theme", "深色主题"));
+        view_menu->Append(ID_THEME_EYE, LANG_STR("Eye Protection Theme", "护眼主题"));
         view_menu->AppendSeparator();
         view_menu->Append(ID_LANG_EN, "English");
-        view_menu->Append(ID_LANG_ZH, "中文");
-        mb->Append(view_menu, current_lang == 0 ? "&View" : "视图(&V)");
+        view_menu->Append(ID_LANG_ZH, UTF8_STR("中文"));
+        mb->Append(view_menu, LANG_STR("&View", "视图(&V)"));
 
         // Tools menu
         wxMenu* tools_menu = new wxMenu;
-        tools_menu->Append(ID_SYNC, current_lang == 0 ? "&Sync with NAS" : "NAS同步(&S)");
-        tools_menu->Append(ID_NAS_CONFIG, current_lang == 0 ? "NAS &Configuration..." : "NAS配置(&C)...");
+        tools_menu->Append(ID_SYNC, LANG_STR("&Sync with NAS", "NAS同步(&S)"));
+        tools_menu->Append(ID_NAS_CONFIG, LANG_STR("NAS &Configuration...", "NAS配置(&C)..."));
         tools_menu->AppendSeparator();
-        tools_menu->Append(ID_BACKUP, current_lang == 0 ? "&Backup Database" : "备份数据库(&B)");
-        tools_menu->Append(ID_RESTORE, current_lang == 0 ? "&Restore Backup..." : "恢复备份(&R)...");
+        tools_menu->Append(ID_BACKUP, LANG_STR("&Backup Database", "备份数据库(&B)"));
+        tools_menu->Append(ID_RESTORE, LANG_STR("&Restore Backup...", "恢复备份(&R)..."));
         tools_menu->AppendSeparator();
-        tools_menu->Append(ID_VALIDATE_DATA, current_lang == 0 ? "Validate Data" : "数据验证");
-        mb->Append(tools_menu, current_lang == 0 ? "&Tools" : "工具(&T)");
+        tools_menu->Append(ID_VALIDATE_DATA, LANG_STR("Validate Data", "数据验证"));
+        mb->Append(tools_menu, LANG_STR("&Tools", "工具(&T)"));
 
         // Help menu
         wxMenu* help_menu = new wxMenu;
-        help_menu->Append(wxID_ABOUT, current_lang == 0 ? "&About" : "关于(&A)");
-        mb->Append(help_menu, current_lang == 0 ? "&Help" : "帮助(&H)");
+        help_menu->Append(wxID_ABOUT, LANG_STR("&About", "关于(&A)"));
+        mb->Append(help_menu, LANG_STR("&Help", "帮助(&H)"));
 
         SetMenuBar(mb);
 
@@ -891,7 +1003,7 @@ private:
             // Check empty fields
             for (const auto& p : patents) {
                 if (p.geke_code.empty()) {
-                    report += "Empty GEKE Code in patent ID " + std::to_string(p.id) + "\n";
+                    report += UTF8_STR("专利ID ") + std::to_string(p.id) + UTF8_STR(" 编号为空\n");
                     issues++;
                 }
                 if (p.title.empty()) {
@@ -910,13 +1022,13 @@ private:
             }
             
             if (issues == 0) {
-                wxMessageBox(current_lang == 0 ? 
+                wxMessageBox(current_lang == 0 ?
                     "All data validated successfully!\nNo issues found." :
-                    "数据验证成功！\n未发现问题。", 
-                    current_lang == 0 ? "Data Validation" : "数据验证", wxOK | wxICON_INFORMATION);
+                    UTF8_STR("数据验证成功！\n未发现问题。"),
+                    current_lang == 0 ? "Data Validation" : UTF8_STR("数据验证"), wxOK | wxICON_INFORMATION);
             } else {
-                wxMessageBox(report, wxString::Format(current_lang == 0 ? 
-                    "Found %d issues:" : "发现 %d 个问题:", issues), wxOK | wxICON_WARNING);
+                wxMessageBox(report, wxString::Format(current_lang == 0 ?
+                    "Found %d issues:" : UTF8_STR("发现 %d 个问题:"), issues), wxOK | wxICON_WARNING);
             }
         }, ID_VALIDATE_DATA);
         Bind(wxEVT_MENU, &PatXFrame::OnSwitchDatabase, this, ID_SWITCH_DB);
@@ -940,6 +1052,7 @@ private:
         ID_SEARCH_PATENTS,
         ID_COPY_CODE,
         ID_COPY_TITLE,
+        ID_SET_LEVEL,
         ID_SWITCH_DB,
         ID_AUTO_BACKUP,
         ID_PRINT,
@@ -950,6 +1063,9 @@ private:
     };
     
     int current_lang = 0; // 0=English, 1=Chinese
+
+    // Toolbar buttons - stored for language switching
+    std::vector<wxButton*> toolbar_btns;
 
     void SetupUI() {
         wxPanel* main_panel = new wxPanel(this);
@@ -972,21 +1088,79 @@ private:
             return btn;
         };
 
-        add_btn(current_lang == 0 ? "Undo" : "撤销", &PatXFrame::OnUndo);
-        add_btn(current_lang == 0 ? "Sync" : "同步", &PatXFrame::OnSync);
-        add_btn(current_lang == 0 ? "Export" : "导出", &PatXFrame::OnExport);
-        add_btn(current_lang == 0 ? "Import" : "导入", &PatXFrame::OnImport);
-        wxButton* refresh_btn = add_btn(current_lang == 0 ? "Refresh" : "刷新", &PatXFrame::OnRefresh);
+        toolbar_btns.push_back(add_btn(LANG_STR("Undo", "撤销"), &PatXFrame::OnUndo));
+        toolbar_btns.push_back(add_btn(LANG_STR("Sync", "同步"), &PatXFrame::OnSync));
+        toolbar_btns.push_back(add_btn(LANG_STR("Export", "导出"), &PatXFrame::OnExport));
+        toolbar_btns.push_back(add_btn(LANG_STR("Import", "导入"), &PatXFrame::OnImport));
+        wxButton* refresh_btn = add_btn(LANG_STR("Refresh", "刷新"), &PatXFrame::OnRefresh);
+        toolbar_btns.push_back(refresh_btn);
         refresh_btn->SetToolTip("F5");
 
         main_sizer->Add(top_bar, 0, wxALL, 5);
 
         // Notebook with tabs - use simple wxNotebook
         notebook = new wxAuiNotebook(main_panel, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                                      wxAUI_NB_TOP | wxAUI_NB_TAB_SPLIT | wxAUI_NB_TAB_MOVE | wxAUI_NB_CLOSE_ON_ACTIVE_TAB);
+                                      wxAUI_NB_TOP | wxAUI_NB_TAB_SPLIT | wxAUI_NB_TAB_MOVE);
         
         // Make sure notebook has a proper size
         notebook->SetMinSize(wxSize(800, 600));
+
+        // ===== Common toolbar above notebook =====
+        wxPanel* toolbar_panel = new wxPanel(main_panel);
+        wxBoxSizer* toolbar_sizer = new wxBoxSizer(wxHORIZONTAL);
+
+        // Action buttons
+        wxButton* new_btn = new wxButton(toolbar_panel, wxID_ANY, LANG_STR("New", UTF8_STR("新建")));
+        new_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnNewByCurrentTab, this);
+        toolbar_sizer->Add(new_btn, 0, wxRIGHT | wxTOP | wxBOTTOM, 3);
+
+        wxButton* edit_btn = new wxButton(toolbar_panel, wxID_ANY, LANG_STR("Edit", UTF8_STR("编辑")));
+        edit_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnEditByCurrentTab, this);
+        toolbar_sizer->Add(edit_btn, 0, wxRIGHT | wxTOP | wxBOTTOM, 3);
+
+        wxButton* del_btn = new wxButton(toolbar_panel, wxID_ANY, LANG_STR("Delete", UTF8_STR("删除")));
+        del_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnDeleteByCurrentTab, this);
+        toolbar_sizer->Add(del_btn, 0, wxRIGHT | wxTOP | wxBOTTOM, 3);
+
+        toolbar_sizer->AddSpacer(15);
+
+        wxButton* stats_btn = new wxButton(toolbar_panel, wxID_ANY, LANG_STR("Statistics", UTF8_STR("统计")));
+        stats_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnStatistics, this);
+        toolbar_sizer->Add(stats_btn, 0, wxRIGHT | wxTOP | wxBOTTOM, 3);
+
+        wxButton* batch_btn = new wxButton(toolbar_panel, wxID_ANY, LANG_STR("Batch", UTF8_STR("批量")));
+        batch_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnBatchByCurrentTab, this);
+        toolbar_sizer->Add(batch_btn, 0, wxRIGHT | wxTOP | wxBOTTOM, 3);
+
+        toolbar_sizer->AddSpacer(20);
+
+        // Search and filters
+        toolbar_sizer->Add(new wxStaticText(toolbar_panel, wxID_ANY, LANG_STR("Search:", UTF8_STR("搜索:"))), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        common_search = new wxTextCtrl(toolbar_panel, wxID_ANY, "", wxDefaultPosition, wxSize(200, -1), wxTE_PROCESS_ENTER);
+        common_search->Bind(wxEVT_TEXT_ENTER, &PatXFrame::OnSearchByCurrentTab, this);
+        toolbar_sizer->Add(common_search, 0, wxRIGHT | wxTOP | wxBOTTOM, 3);
+
+        toolbar_sizer->AddSpacer(10);
+
+        toolbar_sizer->Add(new wxStaticText(toolbar_panel, wxID_ANY, LANG_STR("Status:", UTF8_STR("状态:"))), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        common_status_filter = new wxComboBox(toolbar_panel, wxID_ANY, LANG_STR("All", UTF8_STR("全部")), wxDefaultPosition, wxSize(100, -1));
+        common_status_filter->Append(LANG_STR("All", UTF8_STR("全部")));
+        common_status_filter->Append(LANG_STR("Pending", UTF8_STR("审查中")));
+        common_status_filter->Append(LANG_STR("Granted", UTF8_STR("已授权")));
+        common_status_filter->Append(LANG_STR("Rejected", UTF8_STR("已驳回")));
+        common_status_filter->Bind(wxEVT_COMBOBOX, &PatXFrame::OnFilterByCurrentTab, this);
+        toolbar_sizer->Add(common_status_filter, 0, wxRIGHT | wxTOP | wxBOTTOM, 3);
+
+        toolbar_sizer->AddSpacer(10);
+
+        toolbar_sizer->Add(new wxStaticText(toolbar_panel, wxID_ANY, LANG_STR("Handler:", UTF8_STR("处理人:"))), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        common_handler_filter = new wxComboBox(toolbar_panel, wxID_ANY, LANG_STR("All", UTF8_STR("全部")), wxDefaultPosition, wxSize(100, -1));
+        common_handler_filter->Append(LANG_STR("All", UTF8_STR("全部")));
+        common_handler_filter->Bind(wxEVT_COMBOBOX, &PatXFrame::OnFilterByCurrentTab, this);
+        toolbar_sizer->Add(common_handler_filter, 0, wxRIGHT | wxTOP | wxBOTTOM, 3);
+
+        toolbar_panel->SetSizer(toolbar_sizer);
+        main_sizer->Add(toolbar_panel, 0, wxEXPAND | wxLEFT | wxRIGHT, 5);
 
         SetupPatentTab();
         SetupOATab();
@@ -1017,41 +1191,41 @@ private:
 
         // Toolbar row 1: Search and filters
         wxBoxSizer* tb1 = new wxBoxSizer(wxHORIZONTAL);
-        tb1->Add(new wxStaticText(panel, wxID_ANY, "Search:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        tb1->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("搜索:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
         patent_search = new wxTextCtrl(panel, wxID_ANY, "", wxDefaultPosition, wxSize(250, -1), wxTE_PROCESS_ENTER);
         patent_search->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { SearchPatents(); });
         tb1->Add(patent_search, 0, wxRIGHT, 5);
 
-        wxButton* search_btn = new wxButton(panel, wxID_ANY, "Search");
+        wxButton* search_btn = new wxButton(panel, wxID_ANY, UTF8_STR("搜索"));
         search_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { SearchPatents(); });
         tb1->Add(search_btn, 0, wxRIGHT, 10);
 
-        tb1->Add(new wxStaticText(panel, wxID_ANY, "Status:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-        patent_status_filter = new wxComboBox(panel, wxID_ANY, "All", wxDefaultPosition, wxSize(100, -1));
-        patent_status_filter->Append("All");
-        patent_status_filter->Append("pending");
-        patent_status_filter->Append("granted");
-        patent_status_filter->Append("rejected");
-        patent_status_filter->Append("abandoned");
+        tb1->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("状态:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        patent_status_filter = new wxComboBox(panel, wxID_ANY, UTF8_STR("全部"), wxDefaultPosition, wxSize(100, -1));
+        patent_status_filter->Append(UTF8_STR("全部"));
+        patent_status_filter->Append(UTF8_STR("审查中"));
+        patent_status_filter->Append(UTF8_STR("已授权"));
+        patent_status_filter->Append(UTF8_STR("已驳回"));
+        patent_status_filter->Append(UTF8_STR("已放弃"));
         patent_status_filter->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { LoadPatents(); });
         tb1->Add(patent_status_filter, 0, wxRIGHT, 10);
 
-        tb1->Add(new wxStaticText(panel, wxID_ANY, "Level:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-        patent_level_filter = new wxComboBox(panel, wxID_ANY, "All", wxDefaultPosition, wxSize(100, -1));
-        patent_level_filter->Append("All");
-        patent_level_filter->Append("core");
-        patent_level_filter->Append("important");
-        patent_level_filter->Append("normal");
+        tb1->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("等级:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        patent_level_filter = new wxComboBox(panel, wxID_ANY, UTF8_STR("全部"), wxDefaultPosition, wxSize(100, -1));
+        patent_level_filter->Append(UTF8_STR("全部"));
+        patent_level_filter->Append(UTF8_STR("核心"));
+        patent_level_filter->Append(UTF8_STR("重要"));
+        patent_level_filter->Append(UTF8_STR("一般"));
         patent_level_filter->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { LoadPatents(); });
         tb1->Add(patent_level_filter, 0, wxRIGHT, 10);
 
-        tb1->Add(new wxStaticText(panel, wxID_ANY, "Handler:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-        patent_handler_filter = new wxComboBox(panel, wxID_ANY, "All", wxDefaultPosition, wxSize(100, -1));
-        patent_handler_filter->Append("All");
+        tb1->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("处理人:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        patent_handler_filter = new wxComboBox(panel, wxID_ANY, UTF8_STR("全部"), wxDefaultPosition, wxSize(100, -1));
+        patent_handler_filter->Append(UTF8_STR("全部"));
         patent_handler_filter->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { LoadPatents(); });
         tb1->Add(patent_handler_filter, 0, wxRIGHT, 10);
 
-        tb1->Add(new wxStaticText(panel, wxID_ANY, "Inventor:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        tb1->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("发明人:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
         wxComboBox* inventor_filter = new wxComboBox(panel, wxID_ANY, "All", wxDefaultPosition, wxSize(100, -1));
         inventor_filter->Append("All");
         inventor_filter->Bind(wxEVT_COMBOBOX, [this, inventor_filter](wxCommandEvent&) {
@@ -1080,16 +1254,16 @@ private:
 
             int row = 0;
             for (const auto& p : filtered) {
-                long idx = patent_list->InsertItem(row, wxString(p.geke_code));
-                patent_list->SetItem(idx, 1, wxString(p.application_number));
-                patent_list->SetItem(idx, 2, wxString(p.title));
-                patent_list->SetItem(idx, 3, wxString(p.patent_type));
-                patent_list->SetItem(idx, 4, wxString(p.patent_level));
-                patent_list->SetItem(idx, 5, wxString(p.application_status));
-                patent_list->SetItem(idx, 6, wxString(p.geke_handler));
-                patent_list->SetItem(idx, 7, wxString(p.inventor));
-                patent_list->SetItem(idx, 8, wxString(p.application_date));
-                patent_list->SetItem(idx, 9, wxString(p.expiration_date));
+                long idx = patent_list->InsertItem(row, DB_STR(p.geke_code));
+                patent_list->SetItem(idx, 1, DB_STR(p.application_number));
+                patent_list->SetItem(idx, 2, DB_STR(p.title));
+                patent_list->SetItem(idx, 3, DB_STR(p.patent_type));
+                patent_list->SetItem(idx, 4, DB_STR(p.patent_level));
+                patent_list->SetItem(idx, 5, DB_STR(p.application_status));
+                patent_list->SetItem(idx, 6, DB_STR(p.geke_handler));
+                patent_list->SetItem(idx, 7, DB_STR(p.inventor));
+                patent_list->SetItem(idx, 8, DB_STR(p.application_date));
+                patent_list->SetItem(idx, 9, DB_STR(p.expiration_date));
                 patent_list->SetItemData(idx, p.id);
                 if (p.patent_level == "core") patent_list->SetItemBackgroundColour(idx, wxColour(255, 210, 210));
                 else if (p.patent_level == "important") patent_list->SetItemBackgroundColour(idx, wxColour(255, 245, 200));
@@ -1126,7 +1300,7 @@ private:
 
         // Statistics
         tb2->Add(new wxStaticText(panel, wxID_ANY, "| Statistics:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
-        wxButton* stats_btn = new wxButton(panel, wxID_ANY, current_lang == 0 ? "Show Stats" : "显示统计");
+        wxButton* stats_btn = new wxButton(panel, wxID_ANY, LANG_STR("Show Stats", "显示统计"));
         stats_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             auto patents = db->GetPatents();
             int core = 0, important = 0, normal = 0;
@@ -1302,66 +1476,98 @@ private:
         wxSplitterWindow* splitter = new wxSplitterWindow(panel, wxID_ANY);
 
         patent_list = new wxListCtrl(splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                                      wxLC_REPORT | wxLC_SINGLE_SEL);
-        patent_list->AppendColumn(current_lang == 0 ? "GEKE Code" : "格科代码", wxLIST_FORMAT_LEFT, 90);
-        patent_list->AppendColumn("App No", wxLIST_FORMAT_LEFT, 130);
-        patent_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
-        patent_list->AppendColumn(current_lang == 0 ? "Type" : "类型", wxLIST_FORMAT_LEFT, 70);
-        patent_list->AppendColumn(current_lang == 0 ? "Level" : "等级", wxLIST_FORMAT_LEFT, 80);
-        patent_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 90);
-        patent_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 70);
-        patent_list->AppendColumn(current_lang == 0 ? "Inventor" : "发明人", wxLIST_FORMAT_LEFT, 100);
-        patent_list->AppendColumn("App Date", wxLIST_FORMAT_LEFT, 90);
-        patent_list->AppendColumn("Exp Date", wxLIST_FORMAT_LEFT, 90);
+                                      wxLC_REPORT);
+        patent_list->AppendColumn(UTF8_STR("格科编码"), wxLIST_FORMAT_LEFT, 90);
+        patent_list->AppendColumn(UTF8_STR("申请号"), wxLIST_FORMAT_LEFT, 130);
+        patent_list->AppendColumn(UTF8_STR("发明名称"), wxLIST_FORMAT_LEFT, 220);
+        patent_list->AppendColumn(UTF8_STR("类型"), wxLIST_FORMAT_LEFT, 70);
+        patent_list->AppendColumn(UTF8_STR("专利等级"), wxLIST_FORMAT_LEFT, 90);
+        patent_list->AppendColumn(UTF8_STR("申请状态"), wxLIST_FORMAT_LEFT, 80);
+        patent_list->AppendColumn(UTF8_STR("一级分类"), wxLIST_FORMAT_LEFT, 70);
+        patent_list->AppendColumn(UTF8_STR("二级分类"), wxLIST_FORMAT_LEFT, 70);
+        patent_list->AppendColumn(UTF8_STR("三级分类"), wxLIST_FORMAT_LEFT, 70);
+        patent_list->AppendColumn(UTF8_STR("处理人"), wxLIST_FORMAT_LEFT, 70);
+        patent_list->AppendColumn(UTF8_STR("发明人"), wxLIST_FORMAT_LEFT, 100);
+        patent_list->AppendColumn(UTF8_STR("申请日"), wxLIST_FORMAT_LEFT, 90);
+        patent_list->AppendColumn(UTF8_STR("授权日"), wxLIST_FORMAT_LEFT, 90);
+        patent_list->AppendColumn(UTF8_STR("到期日"), wxLIST_FORMAT_LEFT, 90);
+        patent_list->AppendColumn(UTF8_STR("事务所"), wxLIST_FORMAT_LEFT, 80);
+        patent_list->AppendColumn(UTF8_STR("备注"), wxLIST_FORMAT_LEFT, 150);
 
         patent_list->Bind(wxEVT_LIST_ITEM_SELECTED, &PatXFrame::OnPatentSelected, this);
         patent_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, &PatXFrame::OnEditPatent, this);
         patent_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
-            // Sort by column
             int col = e.GetColumn();
-            static int last_col = -1;
-            static bool asc = true;
-            if (col == last_col) asc = !asc;
-            else { asc = true; last_col = col; }
-            patent_list->SortItems([](wxIntPtr a, wxIntPtr b, wxIntPtr data) -> int {
-                auto* list = (wxListCtrl*)data;
-                int col = (int)(data >> 32);
-                bool asc = (data & 1);
-                wxString va = list->GetItemText((long)a, col);
-                wxString vb = list->GetItemText((long)b, col);
-                return asc ? va.Cmp(vb) : vb.Cmp(va);
-            }, ((wxIntPtr)col << 32) | (asc ? 1 : 0));
+            auto& state = sort_state[patent_list];
+            if (state.first == col) state.second = !state.second;
+            else { state.first = col; state.second = true; }
+            SortListCtrl(patent_list, col, state.second);
+        });
+        // Double-click on level column (col 4) to set level
+        patent_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent& e) {
+            // Check if click is near level column
+            // Actually use right-click menu for level
         });
         
         // Right-click context menu
         patent_list->Bind(wxEVT_CONTEXT_MENU, [this](wxContextMenuEvent& e) {
+            long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+
             wxMenu menu;
-            menu.Append(wxID_EDIT, "Edit\tEnter");
-            menu.Append(wxID_DELETE, "Delete\tDel");
+            menu.Append(wxID_EDIT, LANG_STR("Edit", UTF8_STR("编辑")));
+            menu.Append(wxID_DELETE, LANG_STR("Delete", UTF8_STR("删除")));
             menu.AppendSeparator();
-            menu.Append(wxID_NEW, "New Patent\tCtrl+N");
+            menu.Append(wxID_NEW, LANG_STR("New", UTF8_STR("新建")));
             menu.AppendSeparator();
-            menu.Append(ID_COPY_CODE, "Copy GEKE Code");
-            menu.Append(ID_COPY_TITLE, "Copy Title");
-            
+            menu.Append(ID_SET_LEVEL, UTF8_STR("设置等级"));
+            menu.Append(ID_COPY_CODE, UTF8_STR("复制编号"));
+            menu.Append(ID_COPY_TITLE, UTF8_STR("复制标题"));
+
             menu.Bind(wxEVT_MENU, &PatXFrame::OnEditPatent, this, wxID_EDIT);
             menu.Bind(wxEVT_MENU, &PatXFrame::OnDeletePatent, this, wxID_DELETE);
             menu.Bind(wxEVT_MENU, &PatXFrame::OnNewPatent, this, wxID_NEW);
             menu.Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+                // Set Level
+                long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+                if (idx < 0) return;
+                wxArrayString levels;
+                levels.Add(UTF8_STR("核心专利"));
+                levels.Add(UTF8_STR("重要专利"));
+                levels.Add(UTF8_STR("一般专利"));
+                int choice = wxGetSingleChoiceIndex(UTF8_STR("选择专利等级:"), UTF8_STR("设置等级"), levels, this);
+                if (choice >= 0) {
+                    int id = patent_list->GetItemData(idx);
+                    Patent p = db->GetPatentById(id);
+                    p.patent_level = levels[choice].ToUTF8().data();
+                    db->UpdatePatent(id, p);
+                    patent_list->SetItem(idx, 4, levels[choice]);
+                    // Update color
+                    if (choice == 0) patent_list->SetItemBackgroundColour(idx, wxColour(255, 210, 210));
+                    else if (choice == 1) patent_list->SetItemBackgroundColour(idx, wxColour(255, 245, 200));
+                    else patent_list->SetItemBackgroundColour(idx, *wxWHITE);
+                }
+            }, ID_SET_LEVEL);
+            menu.Bind(wxEVT_MENU, [this](wxCommandEvent&) {
                 long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
                 if (idx >= 0) {
                     wxString code = patent_list->GetItemText(idx, 0);
-                    wxClipboard::Get()->SetData(new wxTextDataObject(code));
+                    if (wxClipboard::Get()->Open()) {
+                        wxClipboard::Get()->SetData(new wxTextDataObject(code));
+                        wxClipboard::Get()->Close();
+                    }
                 }
             }, ID_COPY_CODE);
             menu.Bind(wxEVT_MENU, [this](wxCommandEvent&) {
                 long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
                 if (idx >= 0) {
                     wxString title = patent_list->GetItemText(idx, 2);
-                    wxClipboard::Get()->SetData(new wxTextDataObject(title));
+                    if (wxClipboard::Get()->Open()) {
+                        wxClipboard::Get()->SetData(new wxTextDataObject(title));
+                        wxClipboard::Get()->Close();
+                    }
                 }
             }, ID_COPY_TITLE);
-            
+
             PopupMenu(&menu);
         });
 
@@ -1410,7 +1616,7 @@ private:
         sizer->Add(splitter, 1, wxEXPAND | wxALL, 5);
 
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, current_lang == 0 ? "Domestic Patents" : "国内专利");
+        notebook->AddPage(panel, LANG_STR("Domestic Patents", "国内专利"));
     }
 
     void LoadPatents() {
@@ -1437,22 +1643,28 @@ private:
 
         int row = 0;
         for (const auto& p : patents) {
-            long idx = patent_list->InsertItem(row, wxString(p.geke_code));
-            patent_list->SetItem(idx, 1, wxString(p.application_number));
-            patent_list->SetItem(idx, 2, wxString(p.title));
-            patent_list->SetItem(idx, 3, wxString(p.patent_type));
-            patent_list->SetItem(idx, 4, wxString(p.patent_level));
-            patent_list->SetItem(idx, 5, wxString(p.application_status));
-            patent_list->SetItem(idx, 6, wxString(p.geke_handler));
-            patent_list->SetItem(idx, 7, wxString(p.inventor));
-            patent_list->SetItem(idx, 8, wxString(p.application_date));
-            patent_list->SetItem(idx, 9, wxString(p.expiration_date));
+            long idx = patent_list->InsertItem(row, DB_STR(p.geke_code));
+            patent_list->SetItem(idx, 1, DB_STR(p.application_number));
+            patent_list->SetItem(idx, 2, DB_STR(p.title));
+            patent_list->SetItem(idx, 3, DB_STR(p.patent_type));
+            patent_list->SetItem(idx, 4, DB_STR(p.patent_level));
+            patent_list->SetItem(idx, 5, DB_STR(p.application_status));
+            patent_list->SetItem(idx, 6, DB_STR(p.class_level1));
+            patent_list->SetItem(idx, 7, DB_STR(p.class_level2));
+            patent_list->SetItem(idx, 8, DB_STR(p.class_level3));
+            patent_list->SetItem(idx, 9, DB_STR(p.geke_handler));
+            patent_list->SetItem(idx, 10, DB_STR(p.inventor));
+            patent_list->SetItem(idx, 11, DB_STR(p.application_date));
+            patent_list->SetItem(idx, 12, DB_STR(p.authorization_date));
+            patent_list->SetItem(idx, 13, DB_STR(p.expiration_date));
+            patent_list->SetItem(idx, 14, DB_STR(p.agency_firm));
+            patent_list->SetItem(idx, 15, DB_STR(p.notes));
             patent_list->SetItemData(idx, p.id);
 
             // Color by level
-            if (p.patent_level == "core") {
+            if (p.patent_level.find("\xE6\xA0\xB8\xE5\xBF\x83") != std::string::npos) {
                 patent_list->SetItemBackgroundColour(idx, wxColour(255, 210, 210));
-            } else if (p.patent_level == "important") {
+            } else if (p.patent_level.find("\xE9\x87\x8D\xE8\xA6\x81") != std::string::npos) {
                 patent_list->SetItemBackgroundColour(idx, wxColour(255, 245, 200));
             }
             row++;
@@ -1469,16 +1681,32 @@ private:
 
         int row = 0;
         for (const auto& p : patents) {
-            long idx = patent_list->InsertItem(row, wxString(p.geke_code));
-            patent_list->SetItem(idx, 1, wxString(p.application_number));
-            patent_list->SetItem(idx, 2, wxString(p.title));
-            patent_list->SetItem(idx, 3, wxString(p.patent_type));
-            patent_list->SetItem(idx, 4, wxString(p.patent_level));
-            patent_list->SetItem(idx, 5, wxString(p.application_status));
+            long idx = patent_list->InsertItem(row, DB_STR(p.geke_code));
+            patent_list->SetItem(idx, 1, DB_STR(p.application_number));
+            patent_list->SetItem(idx, 2, DB_STR(p.title));
+            patent_list->SetItem(idx, 3, DB_STR(p.patent_type));
+            patent_list->SetItem(idx, 4, DB_STR(p.patent_level));
+            patent_list->SetItem(idx, 5, DB_STR(p.application_status));
+            patent_list->SetItem(idx, 6, DB_STR(p.class_level1));
+            patent_list->SetItem(idx, 7, DB_STR(p.class_level2));
+            patent_list->SetItem(idx, 8, DB_STR(p.class_level3));
+            patent_list->SetItem(idx, 9, DB_STR(p.geke_handler));
+            patent_list->SetItem(idx, 10, DB_STR(p.inventor));
+            patent_list->SetItem(idx, 11, DB_STR(p.application_date));
+            patent_list->SetItem(idx, 12, DB_STR(p.authorization_date));
+            patent_list->SetItem(idx, 13, DB_STR(p.expiration_date));
+            patent_list->SetItem(idx, 14, DB_STR(p.agency_firm));
+            patent_list->SetItem(idx, 15, DB_STR(p.notes));
             patent_list->SetItemData(idx, p.id);
+
+            if (p.patent_level.find("\xE6\xA0\xB8\xE5\xBF\x83") != std::string::npos) {
+                patent_list->SetItemBackgroundColour(idx, wxColour(255, 210, 210));
+            } else if (p.patent_level.find("\xE9\x87\x8D\xE8\xA6\x81") != std::string::npos) {
+                patent_list->SetItemBackgroundColour(idx, wxColour(255, 245, 200));
+            }
             row++;
         }
-        status_bar->SetStatusText(wxString::Format("Search Results: %d", row));
+        status_bar->SetStatusText(wxString::Format("Search: %d results", row));
     }
 
     void OnPatentSelected(wxListEvent& event) {
@@ -1495,9 +1723,9 @@ private:
         }
 
         patent_detail->SetValue(wxString::Format(
-            "GEKE Code: %s\nApplication No: %s\nTitle: %s\n\n"
-            "Type: %s | Level: %s | Status: %s\n\n"
-            "Handler: %s | Inventor: %s\n"
+            "编号: %s\n申请号: %s\n名称: %s\n\n"
+            "类型: %s | 等级: %s | 状态: %s\n\n"
+            "处理人: %s | 发明人: %s\n"
             "R&D Dept: %s | Agency: %s\n\n"
             "Application Date: %s\nAuthorization Date: %s\nExpiration Date: %s\n\n"
             "Classification: %s / %s / %s\n\n"
@@ -1557,29 +1785,191 @@ private:
             wxString code = patent_list->GetItemText(i, 0);
             if (wxMessageBox(wxString::Format("Delete patent %s?", code), "Confirm", wxYES_NO | wxICON_QUESTION) == wxYES) {
                 int id = patent_list->GetItemData(i);
-                deleted_patents_.push_back(db->GetPatentById(id));
                 db->DeletePatent(id);
-                undo_stack_.push_back([this]() {
-                    for (const auto& p : deleted_patents_) db->InsertPatent(p);
-                });
                 LoadPatents();
             }
         } else {
-            // Multi delete
+            // Multi delete - use batch for undo
             if (wxMessageBox(wxString::Format("Delete %zu patents?\n\n(Can be undone)", selected.size()),
                             "Confirm Delete", wxYES_NO | wxICON_QUESTION) == wxYES) {
-                deleted_patents_.clear();
+                db->BeginBatch();
                 for (long i : selected) {
                     int id = patent_list->GetItemData(i);
-                    deleted_patents_.push_back(db->GetPatentById(id));
                     db->DeletePatent(id);
                 }
-                undo_stack_.push_back([this]() {
-                    for (const auto& p : deleted_patents_) db->InsertPatent(p);
-                });
                 LoadPatents();
-                wxMessageBox(wxString::Format("Deleted %zu patents\nUse Undo to restore", selected.size()), "Deleted", wxOK | wxICON_INFORMATION);
+                wxMessageBox(wxString::Format("Deleted %zu patents\nUse Undo (Ctrl+Z) to restore", selected.size()), "Deleted", wxOK | wxICON_INFORMATION);
             }
+        }
+    }
+
+    // ============== Common Tab Actions ==============
+    int GetCurrentTab() { return notebook->GetSelection(); }
+
+    wxListCtrl* GetCurrentList() {
+        std::vector<wxListCtrl*> lists = {patent_list, oa_list, pct_list, sw_list,
+            ic_list, foreign_list, fee_list, rule_list};
+        int tab = GetCurrentTab();
+        if (tab >= 0 && tab < (int)lists.size()) return lists[tab];
+        return nullptr;
+    }
+
+    void OnNewByCurrentTab(wxCommandEvent&) {
+        int tab = GetCurrentTab();
+        switch (tab) {
+            case 0: OnNewPatent(); break;
+            default:
+                wxMessageBox(LANG_STR("New entry for this tab - coming soon", UTF8_STR("此页面新建功能即将推出")), "Info", wxOK);
+        }
+    }
+
+    void OnEditByCurrentTab(wxCommandEvent&) {
+        int tab = GetCurrentTab();
+        if (tab == 0) { OnEditPatent(); return; }
+        wxListCtrl* list = GetCurrentList();
+        if (!list) return;
+        long idx = list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+        if (idx < 0) {
+            wxMessageBox(LANG_STR("Please select an item", UTF8_STR("请先选择一条记录")), "Info", wxOK);
+            return;
+        }
+        switch (tab) {
+            case 1: wxMessageBox("Edit PCT - coming soon", "Info", wxOK); break;
+            case 2: wxMessageBox("Edit Software - coming soon", "Info", wxOK); break;
+            case 3: wxMessageBox("Edit IC - coming soon", "Info", wxOK); break;
+            case 4: wxMessageBox("Edit Foreign - coming soon", "Info", wxOK); break;
+            default: wxMessageBox("Edit - coming soon", "Info", wxOK);
+        }
+    }
+
+    void OnDeleteByCurrentTab(wxCommandEvent&) {
+        int tab = GetCurrentTab();
+        wxListCtrl* list = GetCurrentList();
+        if (!list) return;
+
+        std::vector<long> selected;
+        long idx = -1;
+        while ((idx = list->GetNextItem(idx, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) >= 0)
+            selected.push_back(idx);
+        if (selected.empty()) {
+            wxMessageBox(LANG_STR("Please select item(s) to delete", UTF8_STR("请先选择要删除的记录")), "Info", wxOK);
+            return;
+        }
+
+        wxString confirm_msg = wxString::Format("Delete %zu item(s)?", selected.size());
+        if (wxMessageBox(confirm_msg, LANG_STR("Confirm", UTF8_STR("确认")), wxYES_NO) != wxYES) return;
+
+        for (long i : selected) {
+            int id = list->GetItemData(i);
+            switch (tab) {
+                case 0: db->DeletePatent(id); break;
+                case 1: db->DeletePCT(id); break;
+                case 2: /* db->DeleteSoftware(id); */ break;
+                case 3: db->DeleteIC(id); break;
+                case 4: db->DeleteForeign(id); break;
+            }
+        }
+        // Reload current tab
+        switch (tab) {
+            case 0: LoadPatents(); break;
+            case 1: LoadPCT(); break;
+            case 2: LoadSoftware(); break;
+            case 3: LoadIC(); break;
+            case 4: LoadForeign(); break;
+            case 5: LoadAnnualFees(); break;
+        }
+    }
+
+    void OnStatistics(wxCommandEvent&) {
+        int tab = GetCurrentTab();
+        int total = 0, pending = 0, completed = 0;
+        wxListCtrl* list = GetCurrentList();
+        if (list) total = list->GetItemCount();
+        wxString msg = wxString::Format("Total: %d\n", total);
+        switch (tab) {
+            case 0: {
+                auto patents = db->GetPatents();
+                for (auto& p : patents) {
+                    if (p.application_status == "pending" || p.application_status == "审查中") pending++;
+                    if (p.application_status == "granted" || p.application_status == "已授权") completed++;
+                }
+                msg += wxString::Format("Pending: %d\nGranted: %d\nOther: %d",
+                    pending, completed, (int)patents.size() - pending - completed);
+                break;
+            }
+            case 1: {
+                for (int i = 0; i < total; i++) {
+                    wxString s = list->GetItemText(i, 8);
+                    if (s.Contains("Completed") || s.Contains("完成")) completed++;
+                    else pending++;
+                }
+                msg += wxString::Format("Pending: %d\nCompleted: %d", pending, completed);
+                break;
+            }
+            default:
+                msg += LANG_STR("Statistics for this tab", UTF8_STR("此页面统计"));
+        }
+        wxMessageBox(msg, LANG_STR("Statistics", UTF8_STR("统计")), wxOK | wxICON_INFORMATION);
+    }
+
+    void OnBatchByCurrentTab(wxCommandEvent&) {
+        int tab = GetCurrentTab();
+        wxListCtrl* list = GetCurrentList();
+        if (!list) return;
+
+        std::vector<long> selected;
+        long idx = -1;
+        while ((idx = list->GetNextItem(idx, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) >= 0)
+            selected.push_back(idx);
+        if (selected.empty()) {
+            wxMessageBox(LANG_STR("Select items first", UTF8_STR("请先选择要操作的记录")), "Info", wxOK);
+            return;
+        }
+
+        if (tab == 0) {
+            // Batch set status
+            wxArrayString statuses;
+            statuses.Add(UTF8_STR("审查中"));
+            statuses.Add(UTF8_STR("已授权"));
+            statuses.Add(UTF8_STR("已驳回"));
+            statuses.Add(UTF8_STR("已放弃"));
+            int ch = wxGetSingleChoiceIndex(UTF8_STR("选择状态:"), UTF8_STR("批量设置状态"), statuses, this);
+            if (ch >= 0) {
+                for (long i : selected) {
+                    Patent p = db->GetPatentById(list->GetItemData(i));
+                    p.application_status = statuses[ch].ToUTF8().data();
+                    db->UpdatePatent(list->GetItemData(i), p);
+                }
+                LoadPatents();
+                wxMessageBox(wxString::Format(UTF8_STR("已更新 %zu 条记录"), selected.size()), "Done", wxOK);
+            }
+        } else {
+            wxMessageBox(LANG_STR("Batch operation not supported for this tab yet", UTF8_STR("此页面暂不支持批量操作")), "Info", wxOK);
+        }
+    }
+
+    void OnSearchByCurrentTab(wxCommandEvent&) {
+        int tab = GetCurrentTab();
+        wxString keyword = common_search->GetValue();
+        switch (tab) {
+            case 0: SearchPatents(); break;
+            case 1: LoadOA(); break;
+            case 2: LoadPCT(); break;
+            case 3: LoadSoftware(); break;
+            case 4: LoadIC(); break;
+            case 5: LoadForeign(); break;
+        }
+    }
+
+    void OnFilterByCurrentTab(wxCommandEvent&) {
+        int tab = GetCurrentTab();
+        switch (tab) {
+            case 0: LoadPatents(); break;
+            case 1: LoadOA(); break;
+            case 2: LoadPCT(); break;
+            case 3: LoadSoftware(); break;
+            case 4: LoadIC(); break;
+            case 5: LoadForeign(); break;
         }
     }
 
@@ -1676,20 +2066,28 @@ private:
         sizer->Add(tb, 0, wxALL, 5);
 
         oa_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
-        oa_list->AppendColumn(current_lang == 0 ? "GEKE Code" : "格科代码", wxLIST_FORMAT_LEFT, 90);
-        oa_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 220);
-        oa_list->AppendColumn(current_lang == 0 ? "OA Type" : "OA类型", wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn(current_lang == 0 ? "Issue Date" : "发文日", wxLIST_FORMAT_LEFT, 90);
-        oa_list->AppendColumn(current_lang == 0 ? "Deadline" : "截止日", wxLIST_FORMAT_LEFT, 100);
-        oa_list->AppendColumn("Days Left", wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn("Writer", wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn(current_lang == 0 ? "Progress" : "进度", wxLIST_FORMAT_LEFT, 100);
-        oa_list->AppendColumn(current_lang == 0 ? "Level" : "等级", wxLIST_FORMAT_LEFT, 80);
+        oa_list->AppendColumn(UTF8_STR("编号"), wxLIST_FORMAT_LEFT, 90);
+        oa_list->AppendColumn(UTF8_STR("发明名称"), wxLIST_FORMAT_LEFT, 220);
+        oa_list->AppendColumn(UTF8_STR("OA类型"), wxLIST_FORMAT_LEFT, 80);
+        oa_list->AppendColumn(UTF8_STR("发文日"), wxLIST_FORMAT_LEFT, 90);
+        oa_list->AppendColumn(UTF8_STR("截止日"), wxLIST_FORMAT_LEFT, 100);
+        oa_list->AppendColumn(UTF8_STR("剩余天数"), wxLIST_FORMAT_LEFT, 80);
+        oa_list->AppendColumn(UTF8_STR("处理人"), wxLIST_FORMAT_LEFT, 80);
+        oa_list->AppendColumn(UTF8_STR("撰写人"), wxLIST_FORMAT_LEFT, 80);
+        oa_list->AppendColumn(UTF8_STR("进度"), wxLIST_FORMAT_LEFT, 100);
+        oa_list->AppendColumn(UTF8_STR("等级"), wxLIST_FORMAT_LEFT, 80);
+
+        oa_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
+            int col = e.GetColumn();
+            auto& state = sort_state[oa_list];
+            if (state.first == col) state.second = !state.second;
+            else { state.first = col; state.second = true; }
+            SortListCtrl(oa_list, col, state.second);
+        });
 
         sizer->Add(oa_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, current_lang == 0 ? "OA Processing" : "OA处理");
+        notebook->AddPage(panel, LANG_STR("OA Processing", "OA处理"));
     }
 
     void LoadOA() {
@@ -1711,11 +2109,11 @@ private:
         
         int row = 0;
         for (const auto& oa : records) {
-            long idx = oa_list->InsertItem(row, wxString(oa.geke_code));
-            oa_list->SetItem(idx, 1, wxString(oa.patent_title));
-            oa_list->SetItem(idx, 2, wxString(oa.oa_type));
-            oa_list->SetItem(idx, 3, wxString(oa.issue_date));
-            oa_list->SetItem(idx, 4, wxString(oa.official_deadline));
+            long idx = oa_list->InsertItem(row, DB_STR(oa.geke_code));
+            oa_list->SetItem(idx, 1, DB_STR(oa.patent_title));
+            oa_list->SetItem(idx, 2, DB_STR(oa.oa_type));
+            oa_list->SetItem(idx, 3, DB_STR(oa.issue_date));
+            oa_list->SetItem(idx, 4, DB_STR(oa.official_deadline));
             
             // Calculate days remaining
             wxString days_str = "-";
@@ -1755,9 +2153,9 @@ private:
             }
             
             oa_list->SetItem(idx, 5, days_str);
-            oa_list->SetItem(idx, 6, wxString(oa.handler));
-            oa_list->SetItem(idx, 7, wxString(oa.writer));
-            oa_list->SetItem(idx, 8, wxString(oa.progress));
+            oa_list->SetItem(idx, 6, DB_STR(oa.handler));
+            oa_list->SetItem(idx, 7, DB_STR(oa.writer));
+            oa_list->SetItem(idx, 8, DB_STR(oa.progress));
             
             // Patent level
             std::string level = level_map.count(oa.geke_code) ? level_map[oa.geke_code] : "";
@@ -1786,7 +2184,7 @@ private:
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 
         wxBoxSizer* tb1 = new wxBoxSizer(wxHORIZONTAL);
-        tb1->Add(new wxStaticText(panel, wxID_ANY, "Search:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        tb1->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("搜索:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
         pct_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
 
         wxBoxSizer* tb2 = new wxBoxSizer(wxHORIZONTAL);
@@ -1815,17 +2213,25 @@ private:
         tb2->AddStretchSpacer();
         sizer->Add(tb2, 0, wxALL, 5);
 
-        pct_list->AppendColumn(current_lang == 0 ? "GEKE Code" : "格科代码", wxLIST_FORMAT_LEFT, 90);
-        pct_list->AppendColumn("Source", wxLIST_FORMAT_LEFT, 90);
-        pct_list->AppendColumn("PCT No", wxLIST_FORMAT_LEFT, 140);
-        pct_list->AppendColumn("Country App No", wxLIST_FORMAT_LEFT, 140);
-        pct_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
-        pct_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 100);
-        pct_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
+        pct_list->AppendColumn(UTF8_STR("编号"), wxLIST_FORMAT_LEFT, 90);
+        pct_list->AppendColumn(UTF8_STR("国内同源"), wxLIST_FORMAT_LEFT, 90);
+        pct_list->AppendColumn(UTF8_STR("PCT申请号"), wxLIST_FORMAT_LEFT, 140);
+        pct_list->AppendColumn(UTF8_STR("国家申请号"), wxLIST_FORMAT_LEFT, 140);
+        pct_list->AppendColumn(UTF8_STR("发明名称"), wxLIST_FORMAT_LEFT, 280);
+        pct_list->AppendColumn(UTF8_STR("状态"), wxLIST_FORMAT_LEFT, 100);
+        pct_list->AppendColumn(UTF8_STR("处理人"), wxLIST_FORMAT_LEFT, 80);
+
+        pct_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
+            int col = e.GetColumn();
+            auto& state = sort_state[pct_list];
+            if (state.first == col) state.second = !state.second;
+            else { state.first = col; state.second = true; }
+            SortListCtrl(pct_list, col, state.second);
+        });
 
         sizer->Add(pct_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, current_lang == 0 ? "PCT" : "PCT申请");
+        notebook->AddPage(panel, LANG_STR("PCT Applications", "PCT申请"));
     }
 
     void LoadPCT() {
@@ -1834,13 +2240,13 @@ private:
         auto patents = db->GetPCTPatents();
         int row = 0;
         for (const auto& p : patents) {
-            long idx = pct_list->InsertItem(row, wxString(p.geke_code));
-            pct_list->SetItem(idx, 1, wxString(p.domestic_source));
-            pct_list->SetItem(idx, 2, wxString(p.application_no));
-            pct_list->SetItem(idx, 3, wxString(p.country_app_no));
-            pct_list->SetItem(idx, 4, wxString(p.title));
-            pct_list->SetItem(idx, 5, wxString(p.application_status));
-            pct_list->SetItem(idx, 6, wxString(p.handler));
+            long idx = pct_list->InsertItem(row, DB_STR(p.geke_code));
+            pct_list->SetItem(idx, 1, DB_STR(p.domestic_source));
+            pct_list->SetItem(idx, 2, DB_STR(p.application_no));
+            pct_list->SetItem(idx, 3, DB_STR(p.country_app_no));
+            pct_list->SetItem(idx, 4, DB_STR(p.title));
+            pct_list->SetItem(idx, 5, DB_STR(p.application_status));
+            pct_list->SetItem(idx, 6, DB_STR(p.handler));
             row++;
         }
     }
@@ -1877,16 +2283,24 @@ private:
         sizer->Add(tb, 0, wxALL, 5);
 
         sw_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
-        sw_list->AppendColumn("Case No", wxLIST_FORMAT_LEFT, 90);
-        sw_list->AppendColumn("Reg No", wxLIST_FORMAT_LEFT, 110);
-        sw_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
-        sw_list->AppendColumn("Owner", wxLIST_FORMAT_LEFT, 120);
-        sw_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 100);
-        sw_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
+        sw_list->AppendColumn(UTF8_STR("案号"), wxLIST_FORMAT_LEFT, 90);
+        sw_list->AppendColumn(UTF8_STR("登记号"), wxLIST_FORMAT_LEFT, 110);
+        sw_list->AppendColumn(UTF8_STR("名称"), wxLIST_FORMAT_LEFT, 280);
+        sw_list->AppendColumn(UTF8_STR("权利人"), wxLIST_FORMAT_LEFT, 120);
+        sw_list->AppendColumn(UTF8_STR("状态"), wxLIST_FORMAT_LEFT, 100);
+        sw_list->AppendColumn(UTF8_STR("处理人"), wxLIST_FORMAT_LEFT, 80);
+
+        sw_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
+            int col = e.GetColumn();
+            auto& state = sort_state[sw_list];
+            if (state.first == col) state.second = !state.second;
+            else { state.first = col; state.second = true; }
+            SortListCtrl(sw_list, col, state.second);
+        });
 
         sizer->Add(sw_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, current_lang == 0 ? "Software Copyright" : "软件著作权");
+        notebook->AddPage(panel, LANG_STR("Software Copyright", "软件著作权"));
     }
 
     void LoadSoftware() {
@@ -1895,12 +2309,12 @@ private:
         auto copyrights = db->GetSoftwareCopyrights();
         int row = 0;
         for (const auto& s : copyrights) {
-            long idx = sw_list->InsertItem(row, wxString(s.case_no));
-            sw_list->SetItem(idx, 1, wxString(s.reg_no));
-            sw_list->SetItem(idx, 2, wxString(s.title));
-            sw_list->SetItem(idx, 3, wxString(s.current_owner));
-            sw_list->SetItem(idx, 4, wxString(s.application_status));
-            sw_list->SetItem(idx, 5, wxString(s.handler));
+            long idx = sw_list->InsertItem(row, DB_STR(s.case_no));
+            sw_list->SetItem(idx, 1, DB_STR(s.reg_no));
+            sw_list->SetItem(idx, 2, DB_STR(s.title));
+            sw_list->SetItem(idx, 3, DB_STR(s.current_owner));
+            sw_list->SetItem(idx, 4, DB_STR(s.application_status));
+            sw_list->SetItem(idx, 5, DB_STR(s.handler));
             row++;
         }
     }
@@ -1926,16 +2340,24 @@ private:
         sizer->Add(tb, 0, wxALL, 5);
 
         ic_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
-        ic_list->AppendColumn("Case No", wxLIST_FORMAT_LEFT, 90);
-        ic_list->AppendColumn("Reg No", wxLIST_FORMAT_LEFT, 110);
-        ic_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
-        ic_list->AppendColumn("Owner", wxLIST_FORMAT_LEFT, 120);
-        ic_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 100);
-        ic_list->AppendColumn("Designer", wxLIST_FORMAT_LEFT, 80);
+        ic_list->AppendColumn(UTF8_STR("案号"), wxLIST_FORMAT_LEFT, 90);
+        ic_list->AppendColumn(UTF8_STR("登记号"), wxLIST_FORMAT_LEFT, 110);
+        ic_list->AppendColumn(UTF8_STR("名称"), wxLIST_FORMAT_LEFT, 280);
+        ic_list->AppendColumn(UTF8_STR("权利人"), wxLIST_FORMAT_LEFT, 120);
+        ic_list->AppendColumn(UTF8_STR("状态"), wxLIST_FORMAT_LEFT, 100);
+        ic_list->AppendColumn(UTF8_STR("设计人"), wxLIST_FORMAT_LEFT, 80);
+
+        ic_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
+            int col = e.GetColumn();
+            auto& state = sort_state[ic_list];
+            if (state.first == col) state.second = !state.second;
+            else { state.first = col; state.second = true; }
+            SortListCtrl(ic_list, col, state.second);
+        });
 
         sizer->Add(ic_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, current_lang == 0 ? "IC Layout" : "集成电路");
+        notebook->AddPage(panel, LANG_STR("IC Layout", "集成电路布图"));
     }
 
     void LoadIC() {
@@ -1944,12 +2366,12 @@ private:
         auto layouts = db->GetICLayouts();
         int row = 0;
         for (const auto& ic : layouts) {
-            long idx = ic_list->InsertItem(row, wxString(ic.case_no));
-            ic_list->SetItem(idx, 1, wxString(ic.reg_no));
-            ic_list->SetItem(idx, 2, wxString(ic.title));
-            ic_list->SetItem(idx, 3, wxString(ic.current_owner));
-            ic_list->SetItem(idx, 4, wxString(ic.application_status));
-            ic_list->SetItem(idx, 5, wxString(ic.designer));
+            long idx = ic_list->InsertItem(row, DB_STR(ic.case_no));
+            ic_list->SetItem(idx, 1, DB_STR(ic.reg_no));
+            ic_list->SetItem(idx, 2, DB_STR(ic.title));
+            ic_list->SetItem(idx, 3, DB_STR(ic.current_owner));
+            ic_list->SetItem(idx, 4, DB_STR(ic.application_status));
+            ic_list->SetItem(idx, 5, DB_STR(ic.designer));
             row++;
         }
     }
@@ -1975,17 +2397,25 @@ private:
         sizer->Add(tb, 0, wxALL, 5);
 
         foreign_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
-        foreign_list->AppendColumn("Case No", wxLIST_FORMAT_LEFT, 90);
-        foreign_list->AppendColumn("PCT No", wxLIST_FORMAT_LEFT, 140);
-        foreign_list->AppendColumn("Country", wxLIST_FORMAT_LEFT, 70);
-        foreign_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 280);
-        foreign_list->AppendColumn("Owner", wxLIST_FORMAT_LEFT, 120);
-        foreign_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 100);
-        foreign_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
+        foreign_list->AppendColumn(UTF8_STR("案号"), wxLIST_FORMAT_LEFT, 90);
+        foreign_list->AppendColumn(UTF8_STR("PCT号"), wxLIST_FORMAT_LEFT, 140);
+        foreign_list->AppendColumn(UTF8_STR("国家"), wxLIST_FORMAT_LEFT, 70);
+        foreign_list->AppendColumn(UTF8_STR("名称"), wxLIST_FORMAT_LEFT, 280);
+        foreign_list->AppendColumn(UTF8_STR("权利人"), wxLIST_FORMAT_LEFT, 120);
+        foreign_list->AppendColumn(UTF8_STR("状态"), wxLIST_FORMAT_LEFT, 100);
+        foreign_list->AppendColumn(UTF8_STR("处理人"), wxLIST_FORMAT_LEFT, 80);
+
+        foreign_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
+            int col = e.GetColumn();
+            auto& state = sort_state[foreign_list];
+            if (state.first == col) state.second = !state.second;
+            else { state.first = col; state.second = true; }
+            SortListCtrl(foreign_list, col, state.second);
+        });
 
         sizer->Add(foreign_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, current_lang == 0 ? "Foreign Patents" : "国外专利");
+        notebook->AddPage(panel, LANG_STR("Foreign Patents", "国外专利"));
     }
 
     void LoadForeign() {
@@ -1994,13 +2424,13 @@ private:
         auto patents = db->GetForeignPatents();
         int row = 0;
         for (const auto& f : patents) {
-            long idx = foreign_list->InsertItem(row, wxString(f.case_no));
-            foreign_list->SetItem(idx, 1, wxString(f.pct_no));
-            foreign_list->SetItem(idx, 2, wxString(f.country));
-            foreign_list->SetItem(idx, 3, wxString(f.title));
-            foreign_list->SetItem(idx, 4, wxString(f.owner));
-            foreign_list->SetItem(idx, 5, wxString(f.patent_status));
-            foreign_list->SetItem(idx, 6, wxString(f.handler));
+            long idx = foreign_list->InsertItem(row, DB_STR(f.case_no));
+            foreign_list->SetItem(idx, 1, DB_STR(f.pct_no));
+            foreign_list->SetItem(idx, 2, DB_STR(f.country));
+            foreign_list->SetItem(idx, 3, DB_STR(f.title));
+            foreign_list->SetItem(idx, 4, DB_STR(f.owner));
+            foreign_list->SetItem(idx, 5, DB_STR(f.patent_status));
+            foreign_list->SetItem(idx, 6, DB_STR(f.handler));
             row++;
         }
     }
@@ -2016,17 +2446,25 @@ private:
         sizer->Add(tb, 0, wxALL, 5);
 
         fee_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
-        fee_list->AppendColumn(current_lang == 0 ? "GEKE Code" : "格科代码", wxLIST_FORMAT_LEFT, 90);
-        fee_list->AppendColumn(current_lang == 0 ? "Title" : "标题", wxLIST_FORMAT_LEFT, 250);
-        fee_list->AppendColumn("Year", wxLIST_FORMAT_LEFT, 60);
-        fee_list->AppendColumn("Due Date", wxLIST_FORMAT_LEFT, 100);
-        fee_list->AppendColumn("Amount", wxLIST_FORMAT_LEFT, 80);
-        fee_list->AppendColumn(current_lang == 0 ? "Status" : "状态", wxLIST_FORMAT_LEFT, 90);
-        fee_list->AppendColumn(current_lang == 0 ? "Handler" : "处理人", wxLIST_FORMAT_LEFT, 80);
+        fee_list->AppendColumn(UTF8_STR("编号"), wxLIST_FORMAT_LEFT, 90);
+        fee_list->AppendColumn(UTF8_STR("名称"), wxLIST_FORMAT_LEFT, 250);
+        fee_list->AppendColumn(UTF8_STR("年度"), wxLIST_FORMAT_LEFT, 60);
+        fee_list->AppendColumn(UTF8_STR("截止日"), wxLIST_FORMAT_LEFT, 100);
+        fee_list->AppendColumn(UTF8_STR("金额"), wxLIST_FORMAT_LEFT, 80);
+        fee_list->AppendColumn(UTF8_STR("状态"), wxLIST_FORMAT_LEFT, 90);
+        fee_list->AppendColumn(UTF8_STR("处理人"), wxLIST_FORMAT_LEFT, 80);
+
+        fee_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
+            int col = e.GetColumn();
+            auto& state = sort_state[fee_list];
+            if (state.first == col) state.second = !state.second;
+            else { state.first = col; state.second = true; }
+            SortListCtrl(fee_list, col, state.second);
+        });
 
         sizer->Add(fee_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, current_lang == 0 ? "Annual Fees" : "年费管理");
+        notebook->AddPage(panel, LANG_STR("Annual Fees", "年费管理"));
     }
 
     void LoadAnnualFees() {
@@ -2037,13 +2475,13 @@ private:
         int row = 0;
         for (const auto& p : patents) {
             if (!p.expiration_date.empty() && p.application_status == "granted") {
-                long idx = fee_list->InsertItem(row, wxString(p.geke_code));
-                fee_list->SetItem(idx, 1, wxString(p.title));
+                long idx = fee_list->InsertItem(row, DB_STR(p.geke_code));
+                fee_list->SetItem(idx, 1, DB_STR(p.title));
                 fee_list->SetItem(idx, 2, wxString::Format("%d", 2026 - atoi(p.application_date.substr(0, 4).c_str())));
-                fee_list->SetItem(idx, 3, wxString(p.expiration_date));
+                fee_list->SetItem(idx, 3, DB_STR(p.expiration_date));
                 fee_list->SetItem(idx, 4, "900");
                 fee_list->SetItem(idx, 5, "pending");
-                fee_list->SetItem(idx, 6, wxString(p.geke_handler));
+                fee_list->SetItem(idx, 6, DB_STR(p.geke_handler));
                 row++;
                 if (row >= 50) break;
             }
@@ -2074,9 +2512,17 @@ private:
         rule_list->AppendColumn("Calculation", wxLIST_FORMAT_LEFT, 150);
         rule_list->AppendColumn("Days/Value", wxLIST_FORMAT_LEFT, 80);
 
+        rule_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
+            int col = e.GetColumn();
+            auto& state = sort_state[rule_list];
+            if (state.first == col) state.second = !state.second;
+            else { state.first = col; state.second = true; }
+            SortListCtrl(rule_list, col, state.second);
+        });
+
         sizer->Add(rule_list, 1, wxEXPAND | wxALL, 5);
         panel->SetSizer(sizer);
-        notebook->AddPage(panel, current_lang == 0 ? "Deadline Rules" : "期限规则");
+        notebook->AddPage(panel, LANG_STR("Deadline Rules", "期限规则"));
     }
 
     void LoadDeadlineRules() {
@@ -2103,56 +2549,87 @@ private:
     // ============== Theme ==============
     void SetTheme(int theme) {
         current_theme = theme;
-        wxColour bg, fg;
+        wxColour bg, fg, alt_bg;
         switch (theme) {
             case 1: // Dark
                 bg = wxColour(26, 26, 46);
                 fg = wxColour(212, 212, 212);
+                alt_bg = wxColour(40, 40, 60);  // alternating row
                 break;
             case 2: // Eye protection
                 bg = wxColour(199, 237, 204);
                 fg = wxColour(51, 51, 51);
+                alt_bg = wxColour(220, 240, 220);
                 break;
             default: // Light
                 bg = wxColour(255, 255, 255);
                 fg = wxColour(51, 51, 51);
+                alt_bg = wxColour(240, 240, 240);
         }
         SetBackgroundColour(bg);
         SetForegroundColour(fg);
+
+        // Update all list controls
+        std::vector<wxListCtrl*> lists = {patent_list, oa_list, pct_list, sw_list,
+                                          ic_list, foreign_list, fee_list, rule_list};
+        for (auto* list : lists) {
+            if (list) {
+                list->SetBackgroundColour(bg);
+                list->SetForegroundColour(fg);
+                list->Refresh();
+            }
+        }
+
+        // Update notebook tabs
+        if (notebook) {
+            notebook->SetBackgroundColour(bg);
+            notebook->Refresh();
+        }
+
         Refresh();
     }
     
     // ============== Language ==============
     void SetLanguage(int lang) {
         current_lang = lang;
-        
+
+        // Update toolbar buttons
+        {
+            const char* en_labels[] = {"Undo", "Sync", "Export", "Import", "Refresh"};
+            const char* zh_labels[] = {"撤销", "同步", "导出", "导入", "刷新"};
+            for (size_t i = 0; i < toolbar_btns.size() && i < 5; i++) {
+                toolbar_btns[i]->SetLabel(lang == 0 ? wxString(en_labels[i]) : UTF8_STR(zh_labels[i]));
+                toolbar_btns[i]->Refresh();
+            }
+            Layout();
+        }
+
         // Update window title
-        SetTitle(lang == 0 ? "patX - Patent Manager v1.0.0" : "patX - 专利管理系统 v1.0.0");
+        SetTitle(LANG_STR_L(lang, "patX - Patent Manager v1.0.0", "patX - 专利管理系统 v1.0.0"));
         
         // Update status bar
-        status_bar->SetStatusText(lang == 0 ? 
-            "patX v1.0.0 | Database: patents.db | Press F1 for help" :
-            "patX v1.0.0 | 数据库: patents.db | 按F1获取帮助");
+        status_bar->SetStatusText(lang == 0 ?
+            wxString("patX v1.0.0 | Database: patents.db | Press F1 for help") :
+            UTF8_STR("patX v1.0.0 | 数据库: patents.db | 按F1获取帮助"));
         
+        // Tab names and column headers always stay in Chinese - no update needed
+
         // Update notebook tab names
         for (size_t i = 0; i < notebook->GetPageCount(); i++) {
             wxString newName;
             switch (i) {
-                case 0: newName = lang == 0 ? "Domestic Patents" : "国内专利"; break;
-                case 1: newName = lang == 0 ? "OA Processing" : "OA处理"; break;
-                case 2: newName = lang == 0 ? "PCT" : "PCT申请"; break;
-                case 3: newName = lang == 0 ? "Software Copyright" : "软件著作权"; break;
-                case 4: newName = lang == 0 ? "IC Layout" : "集成电路"; break;
-                case 5: newName = lang == 0 ? "Foreign Patents" : "国外专利"; break;
-                case 6: newName = lang == 0 ? "Annual Fees" : "年费管理"; break;
-                case 7: newName = lang == 0 ? "Deadline Rules" : "期限规则"; break;
+                case 0: newName = LANG_STR_L(lang, "Domestic Patents", "国内专利"); break;
+                case 1: newName = LANG_STR_L(lang, "OA Processing", "OA处理"); break;
+                case 2: newName = LANG_STR_L(lang, "PCT Applications", "PCT申请"); break;
+                case 3: newName = LANG_STR_L(lang, "Software Copyright", "软件著作权"); break;
+                case 4: newName = LANG_STR_L(lang, "IC Layout", "集成电路布图"); break;
+                case 5: newName = LANG_STR_L(lang, "Foreign Patents", "国外专利"); break;
+                case 6: newName = LANG_STR_L(lang, "Annual Fees", "年费管理"); break;
+                case 7: newName = LANG_STR_L(lang, "Deadline Rules", "期限规则"); break;
             }
             notebook->SetPageText(i, newName);
         }
-        
-        // Update list column headers
-        UpdateColumnHeaders();
-        
+
         // Rebuild menu bar with new language
         wxMenuBar* oldMb = GetMenuBar();
         if (oldMb) {
@@ -2163,52 +2640,52 @@ private:
         
         // File menu
         wxMenu* file_menu = new wxMenu;
-        file_menu->Append(wxID_NEW, lang == 0 ? "&New Patent\tCtrl+N" : "新建专利(&N)\tCtrl+N");
-        file_menu->Append(wxID_OPEN, lang == 0 ? "&Import..." : "导入(&I)...");
-        file_menu->Append(wxID_SAVE, lang == 0 ? "&Export..." : "导出(&E)...");
+        file_menu->Append(wxID_NEW, LANG_STR_L(lang, "&New Patent\tCtrl+N", "新建专利(&N)\tCtrl+N"));
+        file_menu->Append(wxID_OPEN, LANG_STR_L(lang, "&Import...", "导入(&I)..."));
+        file_menu->Append(wxID_SAVE, LANG_STR_L(lang, "&Export...", "导出(&E)..."));
         file_menu->AppendSeparator();
-        file_menu->Append(ID_SWITCH_DB, lang == 0 ? "Switch Database..." : "切换数据库...");
-        file_menu->Append(ID_AUTO_BACKUP, lang == 0 ? "Auto Backup Settings..." : "自动备份设置...");
+        file_menu->Append(ID_SWITCH_DB, LANG_STR_L(lang, "Switch Database...", "切换数据库..."));
+        file_menu->Append(ID_AUTO_BACKUP, LANG_STR_L(lang, "Auto Backup Settings...", "自动备份设置..."));
         file_menu->AppendSeparator();
-        file_menu->Append(wxID_EXIT, lang == 0 ? "E&xit\tAlt+F4" : "退出(&X)\tAlt+F4");
-        newMb->Append(file_menu, lang == 0 ? "&File" : "文件(&F)");
+        file_menu->Append(wxID_EXIT, LANG_STR_L(lang, "E&xit\tAlt+F4", "退出(&X)\tAlt+F4"));
+        newMb->Append(file_menu, LANG_STR_L(lang, "&File", "文件(&F)"));
         
         // Edit menu
         wxMenu* edit_menu = new wxMenu;
-        edit_menu->Append(wxID_UNDO, lang == 0 ? "&Undo\tCtrl+Z" : "撤销(&U)\tCtrl+Z");
-        edit_menu->Append(wxID_REDO, lang == 0 ? "&Redo\tCtrl+Y" : "重做(&R)\tCtrl+Y");
+        edit_menu->Append(wxID_UNDO, LANG_STR_L(lang, "&Undo\tCtrl+Z", "撤销(&U)\tCtrl+Z"));
+        edit_menu->Append(wxID_REDO, LANG_STR_L(lang, "&Redo\tCtrl+Y", "重做(&R)\tCtrl+Y"));
         edit_menu->AppendSeparator();
-        edit_menu->Append(wxID_EDIT, lang == 0 ? "&Edit Selected\tEnter" : "编辑(&E)\tEnter");
-        edit_menu->Append(wxID_DELETE, lang == 0 ? "&Delete\tDel" : "删除(&D)\tDel");
-        newMb->Append(edit_menu, lang == 0 ? "&Edit" : "编辑(&E)");
+        edit_menu->Append(wxID_EDIT, LANG_STR_L(lang, "&Edit Selected\tEnter", "编辑(&E)\tEnter"));
+        edit_menu->Append(wxID_DELETE, LANG_STR_L(lang, "&Delete\tDel", "删除(&D)\tDel"));
+        newMb->Append(edit_menu, LANG_STR_L(lang, "&Edit", "编辑(&E)"));
         
         // View menu
         wxMenu* view_menu = new wxMenu;
-        view_menu->Append(wxID_REFRESH, lang == 0 ? "&Refresh\tF5" : "刷新(&R)\tF5");
+        view_menu->Append(wxID_REFRESH, LANG_STR_L(lang, "&Refresh\tF5", "刷新(&R)\tF5"));
         view_menu->AppendSeparator();
-        view_menu->Append(ID_THEME_LIGHT, lang == 0 ? "Light Theme" : "浅色主题");
-        view_menu->Append(ID_THEME_DARK, lang == 0 ? "Dark Theme" : "深色主题");
-        view_menu->Append(ID_THEME_EYE, lang == 0 ? "Eye Protection Theme" : "护眼主题");
+        view_menu->Append(ID_THEME_LIGHT, LANG_STR_L(lang, "Light Theme", "浅色主题"));
+        view_menu->Append(ID_THEME_DARK, LANG_STR_L(lang, "Dark Theme", "深色主题"));
+        view_menu->Append(ID_THEME_EYE, LANG_STR_L(lang, "Eye Protection Theme", "护眼主题"));
         view_menu->AppendSeparator();
         view_menu->Append(ID_LANG_EN, "English");
-        view_menu->Append(ID_LANG_ZH, "中文");
-        newMb->Append(view_menu, lang == 0 ? "&View" : "视图(&V)");
+        view_menu->Append(ID_LANG_ZH, UTF8_STR("中文"));
+        newMb->Append(view_menu, LANG_STR_L(lang, "&View", "视图(&V)"));
         
         // Tools menu
         wxMenu* tools_menu = new wxMenu;
-        tools_menu->Append(ID_SYNC, lang == 0 ? "&Sync with NAS" : "NAS同步(&S)");
-        tools_menu->Append(ID_NAS_CONFIG, lang == 0 ? "NAS &Configuration..." : "NAS配置(&C)...");
+        tools_menu->Append(ID_SYNC, LANG_STR_L(lang, "&Sync with NAS", "NAS同步(&S)"));
+        tools_menu->Append(ID_NAS_CONFIG, LANG_STR_L(lang, "NAS &Configuration...", "NAS配置(&C)..."));
         tools_menu->AppendSeparator();
-        tools_menu->Append(ID_BACKUP, lang == 0 ? "&Backup Database" : "备份数据库(&B)");
-        tools_menu->Append(ID_RESTORE, lang == 0 ? "&Restore Backup..." : "恢复备份(&R)...");
+        tools_menu->Append(ID_BACKUP, LANG_STR_L(lang, "&Backup Database", "备份数据库(&B)"));
+        tools_menu->Append(ID_RESTORE, LANG_STR_L(lang, "&Restore Backup...", "恢复备份(&R)..."));
         tools_menu->AppendSeparator();
-        tools_menu->Append(ID_VALIDATE_DATA, lang == 0 ? "Validate Data" : "数据验证");
-        newMb->Append(tools_menu, lang == 0 ? "&Tools" : "工具(&T)");
+        tools_menu->Append(ID_VALIDATE_DATA, LANG_STR_L(lang, "Validate Data", "数据验证"));
+        newMb->Append(tools_menu, LANG_STR_L(lang, "&Tools", "工具(&T)"));
         
         // Help menu
         wxMenu* help_menu = new wxMenu;
-        help_menu->Append(wxID_ABOUT, lang == 0 ? "&About" : "关于(&A)");
-        newMb->Append(help_menu, lang == 0 ? "&Help" : "帮助(&H)");
+        help_menu->Append(wxID_ABOUT, LANG_STR_L(lang, "&About", "关于(&A)"));
+        newMb->Append(help_menu, LANG_STR_L(lang, "&Help", "帮助(&H)"));
         
         SetMenuBar(newMb);
         
@@ -2217,320 +2694,486 @@ private:
         Update();
         
         // Show brief message
-        wxMessageBox(lang == 0 ? 
-            "Language changed to English" : 
-            "语言已切换为中文", 
-            lang == 0 ? "Language" : "语言", wxOK | wxICON_INFORMATION);
+        wxMessageBox(lang == 0 ?
+            wxString("Language changed to English") :
+            UTF8_STR("语言已切换为中文"),
+            LANG_STR_L(lang, "Language", "语言"), wxOK | wxICON_INFORMATION);
     }
     
-    void UpdateColumnHeaders() {
-        // Update patent list columns
-        if (patent_list) {
-            wxListItem item;
-            item.SetMask(wxLIST_MASK_TEXT);
-            
-            item.SetText(current_lang == 0 ? "GEKE Code" : "格科代码");
-            patent_list->SetColumn(0, item);
-            
-            item.SetText(current_lang == 0 ? "App. No." : "申请号");
-            patent_list->SetColumn(1, item);
-            
-            item.SetText(current_lang == 0 ? "Title" : "标题");
-            patent_list->SetColumn(2, item);
-            
-            item.SetText(current_lang == 0 ? "Type" : "类型");
-            patent_list->SetColumn(3, item);
-            
-            item.SetText(current_lang == 0 ? "Level" : "等级");
-            patent_list->SetColumn(4, item);
-            
-            item.SetText(current_lang == 0 ? "Status" : "状态");
-            patent_list->SetColumn(5, item);
-            
-            item.SetText(current_lang == 0 ? "Handler" : "处理人");
-            patent_list->SetColumn(6, item);
-            
-            item.SetText(current_lang == 0 ? "Inventor" : "发明人");
-            patent_list->SetColumn(7, item);
-            
-            item.SetText(current_lang == 0 ? "Filing Date" : "申请日");
-            patent_list->SetColumn(8, item);
-            
-            item.SetText(current_lang == 0 ? "Notes" : "备注");
-            patent_list->SetColumn(9, item);
-        }
-    }
-
     // ============== Menu Handlers ==============
     void OnImport(wxCommandEvent&) {
-        wxString filter = current_lang == 0 ? 
-            "Excel files (*.xlsx)|*.xlsx|CSV files (*.csv)|*.csv|All files (*.*)|*.*" :
-            "Excel文件 (*.xlsx)|*.xlsx|CSV文件 (*.csv)|*.csv|所有文件 (*.*)|*.*";
-        wxFileDialog dlg(this, current_lang == 0 ? "Import Data" : "导入数据", "", "", filter,
+        wxString filter = current_lang == 0 ?
+            wxString("Excel files (*.xlsx)|*.xlsx|CSV files (*.csv)|*.csv|All files (*.*)|*.*") :
+            UTF8_STR("Excel文件 (*.xlsx)|*.xlsx|CSV文件 (*.csv)|*.csv|所有文件 (*.*)|*.*");
+        wxFileDialog dlg(this, LANG_STR("Import Data", "导入数据"), "", "", filter,
                          wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dlg.ShowModal() == wxID_OK) {
-            wxString path = dlg.GetPath();
-            wxString csvPath = path;
-            
-            // If Excel file, convert to CSV using PowerShell
-            if (path.EndsWith(".xlsx") || path.EndsWith(".xls")) {
-                wxString title = current_lang == 0 ? "Converting Excel..." : "转换Excel...";
-                wxProgressDialog progress(title, current_lang == 0 ? 
-                    "Please wait while converting..." : "请等待转换...", 100, this);
-                progress.Pulse();
-                
-                // Generate temp CSV path
-                csvPath = wxFileName::CreateTempFileName("patx_import_") + ".csv";
-                
-                // PowerShell command to convert Excel to CSV
-                wxString psCmd = wxString::Format(
-                    "$excel = New-Object -ComObject Excel.Application; "
-                    "$excel.Visible = $false; "
-                    "$wb = $excel.Workbooks.Open('%s'); "
-                    "$ws = $wb.Sheets.Item(1); "
-                    "$ws.SaveAs('%s', 6); "
-                    "$wb.Close(); "
-                    "$excel.Quit(); "
-                    "[System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null",
-                    path, csvPath);
-                
-                // Execute PowerShell
-                wxArrayString output;
-                wxExecute(wxString("powershell -Command \"") + psCmd + "\"", output, wxEXEC_HIDE_CONSOLE);
-                
-                progress.Update(100);
-                progress.Close();
-            }
-            
-            // Parse CSV and import
-            wxTextFile file(csvPath);
-            if (file.Open()) {
-                int imported = 0;
-                wxString line = file.GetFirstLine();
-                
-                // Skip BOM if present
-                if (line.StartsWith("\xEF\xBB\xBF")) {
-                    line = line.Mid(3);
-                }
-                
-                std::vector<wxString> headers;
-                // Parse headers
-                bool inQuotes = false;
-                wxString field;
-                for (size_t i = 0; i < line.length(); i++) {
-                    wxChar c = line[i];
-                    if (c == '"') {
-                        inQuotes = !inQuotes;
-                    } else if (c == ',' && !inQuotes) {
-                        headers.push_back(field.Strip(wxString::both));
-                        field.Clear();
-                    } else {
-                        field += c;
-                    }
-                }
-                headers.push_back(field.Strip(wxString::both));
-                
-                // Find column indices - 改进的字段匹配
-                int gekeIdx = -1, titleIdx = -1, typeIdx = -1, statusIdx = -1, levelIdx = -1;
-                int appNoIdx = -1, filingDateIdx = -1, handlerIdx = -1, inventorIdx = -1;
-                
-                for (size_t i = 0; i < headers.size(); i++) {
-                    wxString h = headers[i].Lower();
-                    h = h.Strip(wxString::both);
-                    
-                    // GEKE Code - 格科代码
-                    if (h.Contains("geke") || h.Contains(wxT("格科")) || h.Contains(wxT("代码")) || 
-                        h.Contains(wxT("专利号")) || h.Contains("code") || h.Contains("专利编号")) {
-                        gekeIdx = i;
-                    }
-                    // Title - 标题
-                    else if (h.Contains("title") || h.Contains(wxT("标题")) || h.Contains(wxT("名称")) || 
-                             h.Contains(wxT("专利名称")) || h.Contains(wxT("专利标题")) || h.Contains("name")) {
-                        titleIdx = i;
-                    }
-                    // Type - 类型
-                    else if (h.Contains("type") || h.Contains(wxT("类型")) || h.Contains(wxT("专利类型")) || 
-                             h.Contains("patent type")) {
-                        typeIdx = i;
-                    }
-                    // Status - 状态
-                    else if (h.Contains("status") || h.Contains(wxT("状态")) || h.Contains(wxT("申请状态")) || 
-                             h.Contains(wxT("审查状态"))) {
-                        statusIdx = i;
-                    }
-                    // Level - 等级
-                    else if (h.Contains("level") || h.Contains(wxT("等级")) || h.Contains(wxT("级别")) || 
-                             h.Contains(wxT("重要程度")) || h.Contains("priority")) {
-                        levelIdx = i;
-                    }
-                    // Application No. - 申请号
-                    else if (h.Contains("app") || h.Contains(wxT("申请号")) || h.Contains("application") || 
-                             h.Contains(wxT("申请编号"))) {
-                        appNoIdx = i;
-                    }
-                    // Filing Date - 申请日
-                    else if (h.Contains("filing") || h.Contains(wxT("申请日")) || h.Contains("date") || 
-                             h.Contains(wxT("申请日期")) || h.Contains(wxT("提交日"))) {
-                        filingDateIdx = i;
-                    }
-                    // Handler - 处理人
-                    else if (h.Contains("handler") || h.Contains(wxT("处理人")) || h.Contains(wxT("代理人")) || 
-                             h.Contains(wxT("负责人")) || h.Contains("agent")) {
-                        handlerIdx = i;
-                    }
-                    // Inventor - 发明人
-                    else if (h.Contains("inventor") || h.Contains(wxT("发明人")) || h.Contains(wxT("设计人")) || 
-                             h.Contains("author")) {
-                        inventorIdx = i;
-                    }
-                }
-                
-                // 如果没有找到标题列，尝试使用第二列或第三列
-                if (titleIdx < 0 && headers.size() > 2) {
-                    // 常见格式：第一列是编号，第二列或第三列是标题
-                    if (gekeIdx == 0) {
-                        titleIdx = (headers.size() > 2) ? 2 : 1;
-                    }
-                }
-                
-                // 调试信息 - 显示所有列标题
-                wxString headersList = "Excel列标题:\n";
-                for (size_t i = 0; i < headers.size(); i++) {
-                    headersList += wxString::Format("[%zu]: %s\n", i, headers[i]);
-                }
-                
-                wxString debugInfo = wxString::Format(
-                    "\n列映射结果:\n"
-                    "GEKE Code(格科代码) = %d\n"
-                    "Title(标题) = %d\n"
-                    "Type(类型) = %d\n"
-                    "Status(状态) = %d\n"
-                    "Level(等级) = %d\n"
-                    "AppNo(申请号) = %d\n"
-                    "Date(申请日) = %d\n"
-                    "Handler(处理人) = %d\n"
-                    "Inventor(发明人) = %d\n"
-                    "总列数: %zu",
-                    gekeIdx, titleIdx, typeIdx, statusIdx, levelIdx,
-                    appNoIdx, filingDateIdx, handlerIdx, inventorIdx, headers.size());
-                
-                // 显示完整的匹配信息
-                wxMessageBox(headersList + debugInfo, 
-                    current_lang == 0 ? "Import Info" : "导入信息", wxOK | wxICON_INFORMATION);
-                
-                // 如果关键字段未找到，返回
-                if (gekeIdx < 0 || titleIdx < 0) {
-                    return;
-                }
-                // Parse data rows
-                for (line = file.GetNextLine(); !file.Eof(); line = file.GetNextLine()) {
-                    if (line.IsEmpty()) continue;
-                    
-                    // Parse CSV line with quote handling
-                    std::vector<wxString> values;
-                    field.Clear();
-                    inQuotes = false;
-                    for (size_t i = 0; i < line.length(); i++) {
-                        wxChar c = line[i];
-                        if (c == '"') {
-                            inQuotes = !inQuotes;
-                        } else if (c == ',' && !inQuotes) {
-                            values.push_back(field.Strip(wxString::both));
-                            field.Clear();
-                        } else {
-                            field += c;
-                        }
-                    }
-                    values.push_back(field.Strip(wxString::both));
-                    
-                    // Extract values
-                    Patent p;
-                    if (gekeIdx >= 0 && gekeIdx < (int)values.size()) 
-                        p.geke_code = values[gekeIdx].ToStdString();
-                    if (appNoIdx >= 0 && appNoIdx < (int)values.size()) 
-                        p.application_number = values[appNoIdx].ToStdString();
-                    if (titleIdx >= 0 && titleIdx < (int)values.size()) 
-                        p.title = values[titleIdx].ToStdString();
-                    if (typeIdx >= 0 && typeIdx < (int)values.size()) 
-                        p.patent_type = values[typeIdx].ToStdString();
-                    if (levelIdx >= 0 && levelIdx < (int)values.size()) 
-                        p.patent_level = values[levelIdx].ToStdString();
-                    if (statusIdx >= 0 && statusIdx < (int)values.size()) 
-                        p.application_status = values[statusIdx].ToStdString();
-                    if (filingDateIdx >= 0 && filingDateIdx < (int)values.size()) 
-                        p.application_date = values[filingDateIdx].ToStdString();
-                    if (handlerIdx >= 0 && handlerIdx < (int)values.size()) 
-                        p.geke_handler = values[handlerIdx].ToStdString();
-                    if (inventorIdx >= 0 && inventorIdx < (int)values.size()) 
-                        p.inventor = values[inventorIdx].ToStdString();
-                    
-                    // Set defaults
-                    if (p.patent_type.empty()) p.patent_type = "invention";
-                    if (p.patent_level.empty()) p.patent_level = "normal";
-                    if (p.application_status.empty()) p.application_status = "pending";
-                    
-                    if (!p.geke_code.empty() && !p.title.empty()) {
-                        db->InsertPatent(p);
-                        imported++;
-                    }
-                }
-                file.Close();
-                
-                // Clean up temp file if it was created from Excel
-                if (path.EndsWith(".xlsx") || path.EndsWith(".xls")) {
-                    wxRemoveFile(csvPath);
-                }
-                
-                LoadAllData();
+            // Use wx filesystem encoding for proper path handling on Windows
+            std::string path = dlg.GetPath().utf8_str().data();
+
+            wxString title = LANG_STR("Importing...", "导入中...");
+            wxProgressDialog progress(title, current_lang == 0 ?
+                wxString("Reading file...") : UTF8_STR("正在读取文件..."), 100, this);
+            progress.Pulse();
+
+            auto& excel = GetExcelIO();
+            auto result = excel.ImportPatents(path, *db, [&progress](int current, int total) -> bool {
+                progress.Update(std::min(current * 100 / std::max(total, 1), 99));
+                return !progress.WasCancelled();
+            });
+
+            progress.Update(100);
+            progress.Close();
+
+            if (result.added + result.updated + result.skipped == 0 && !excel.GetLastError().empty()) {
                 wxString msg = current_lang == 0 ?
-                    wxString::Format("Imported %d records", imported) :
-                    wxString::Format("成功导入 %d 条记录", imported);
-                wxMessageBox(msg, current_lang == 0 ? "Import" : "导入", wxOK | wxICON_INFORMATION);
-            } else {
-                wxString msg = current_lang == 0 ? "Failed to open file" : "无法打开文件";
-                wxMessageBox(msg, current_lang == 0 ? "Error" : "错误", wxOK | wxICON_ERROR);
+                    wxString("Import failed: ") + excel.GetLastError() :
+                    UTF8_STR("导入失败: ") + excel.GetLastError();
+                wxMessageBox(msg, LANG_STR("Error", "错误"), wxOK | wxICON_ERROR);
+                return;
             }
+
+            LoadAllData();
+            wxString msg;
+            if (current_lang == 0) {
+                msg = wxString::Format("Import complete:\n  Added: %d\n  Updated: %d\n  Skipped: %d\n  Errors: %d\n\nDetails: %s",
+                    result.added, result.updated, result.skipped, result.errors,
+                    wxString::FromUTF8(result.type_summary.c_str()));
+            } else {
+                msg = wxString::Format(UTF8_STR("导入完成:\n  新增: %d\n  更新: %d\n  跳过: %d\n  错误: %d\n\n详情: %s"),
+                    result.added, result.updated, result.skipped, result.errors,
+                    wxString::FromUTF8(result.type_summary.c_str()));
+            }
+            wxMessageBox(msg, LANG_STR("Import", "导入"), wxOK | wxICON_INFORMATION);
         }
     }
 
     void OnExport(wxCommandEvent&) {
-        wxFileDialog dlg(this, "Export Data", "", "patents_export.csv",
-                         "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
-                         wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-        if (dlg.ShowModal() == wxID_OK) {
-            wxString path = dlg.GetPath();
-            auto patents = db->GetPatents();
+        // Get current tab
+        int current_tab = notebook->GetSelection();
+        wxListCtrl* current_list = nullptr;
 
-            wxFile file(path, wxFile::write);
-            if (file.IsOpened()) {
-                // Header
-                file.Write("GEKE Code,Application No,Title,Type,Level,Status,Handler,Inventor,App Date,Exp Date\n");
+        switch (current_tab) {
+            case 0: current_list = patent_list; break;
+            case 1: current_list = oa_list; break;
+            case 2: current_list = pct_list; break;
+            case 3: current_list = sw_list; break;
+            case 4: current_list = ic_list; break;
+            case 5: current_list = foreign_list; break;
+            case 6: current_list = fee_list; break;
+            case 7: current_list = rule_list; break;
+        }
 
-                // Data
-                for (const auto& p : patents) {
-                    file.Write(wxString::Format("%s,%s,\"%s\",%s,%s,%s,%s,%s,%s,%s\n",
-                        p.geke_code, p.application_number, p.title,
-                        p.patent_type, p.patent_level, p.application_status,
-                        p.geke_handler, p.inventor, p.application_date, p.expiration_date));
+        if (!current_list) {
+            wxMessageBox(current_lang == 0 ?
+                wxString("No data to export") :
+                UTF8_STR("没有数据可导出"),
+                current_lang == 0 ? wxString("Export") : UTF8_STR("导出"), wxOK | wxICON_WARNING);
+            return;
+        }
+
+        // Get selected items
+        std::vector<int> selected_ids;
+        long item = -1;
+        while ((item = current_list->GetNextItem(item, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) != -1) {
+            selected_ids.push_back(static_cast<int>(current_list->GetItemData(item)));
+        }
+
+        if (selected_ids.empty()) {
+            wxMessageBox(current_lang == 0 ?
+                wxString("No items selected. Please select items to export.") :
+                UTF8_STR("未选中任何项目，请先选择要导出的项。"),
+                current_lang == 0 ? wxString("Export") : UTF8_STR("导出"), wxOK | wxICON_WARNING);
+            return;
+        }
+
+        wxFileDialog dlg(this,
+            current_lang == 0 ? wxString("Export Selected") : UTF8_STR("导出选中项"),
+            "", "export.csv",
+            UTF8_STR("CSV文件 (*.csv)|*.csv|Excel文件 (*.xlsx)|*.xlsx|所有文件 (*.*)|*.*"),
+            wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+
+        if (dlg.ShowModal() != wxID_OK) return;
+
+        wxString path = dlg.GetPath();
+        wxFile file(path, wxFile::write);
+        if (!file.IsOpened()) {
+            wxMessageBox(current_lang == 0 ?
+                wxString("Cannot create file") :
+                UTF8_STR("无法创建文件"),
+                current_lang == 0 ? wxString("Error") : UTF8_STR("错误"), wxOK | wxICON_ERROR);
+            return;
+        }
+
+        // Export based on tab type
+        if (current_tab == 0) {
+            // Patents
+            file.Write(UTF8_STR("编号,申请号,发明名称,类型,等级,状态,处理人,发明人,申请日,到期日\n"));
+
+            auto all_patents = db->GetPatents();
+            for (int id : selected_ids) {
+                for (const auto& p : all_patents) {
+                    if (p.id == id) {
+                        wxString line = wxString::Format("%s,%s,\"%s\",%s,%s,%s,%s,%s,%s,%s\n",
+                            DB_STR(p.geke_code), DB_STR(p.application_number), DB_STR(p.title),
+                            DB_STR(p.patent_type), DB_STR(p.patent_level), DB_STR(p.application_status),
+                            DB_STR(p.geke_handler), DB_STR(p.inventor),
+                            DB_STR(p.application_date), DB_STR(p.expiration_date));
+                        file.Write(line);
+                        break;
+                    }
                 }
-                file.Close();
-                wxMessageBox(wxString::Format("Exported %zu records to:\n%s", patents.size(), path), "Export", wxOK | wxICON_INFORMATION);
+            }
+        } else if (current_tab == 1) {
+            // OA
+            file.Write(UTF8_STR("编号,专利名称,OA类型,发文日,截止日,处理人,进度\n"));
+
+            auto all_oas = db->GetOARecords();
+            for (int id : selected_ids) {
+                for (const auto& oa : all_oas) {
+                    if (oa.id == id) {
+                        wxString line = wxString::Format("%s,\"%s\",%s,%s,%s,%s,%s\n",
+                            DB_STR(oa.geke_code), DB_STR(oa.patent_title), DB_STR(oa.oa_type),
+                            DB_STR(oa.issue_date), DB_STR(oa.official_deadline),
+                            DB_STR(oa.handler), DB_STR(oa.progress));
+                        file.Write(line);
+                        break;
+                    }
+                }
+            }
+        } else if (current_tab == 2) {
+            // PCT
+            file.Write(UTF8_STR("编号,国内同源,PCT申请号,国家申请号,发明名称,状态,处理人\n"));
+
+            auto all_pct = db->GetPCTPatents();
+            for (int id : selected_ids) {
+                for (const auto& p : all_pct) {
+                    if (p.id == id) {
+                        wxString line = wxString::Format("%s,%s,%s,%s,\"%s\",%s,%s\n",
+                            DB_STR(p.geke_code), DB_STR(p.domestic_source), DB_STR(p.application_no),
+                            DB_STR(p.country_app_no), DB_STR(p.title),
+                            DB_STR(p.application_status), DB_STR(p.handler));
+                        file.Write(line);
+                        break;
+                    }
+                }
+            }
+        } else if (current_tab == 3) {
+            // Software
+            file.Write(UTF8_STR("案号,登记号,名称,权利人,状态,处理人\n"));
+
+            auto all_sw = db->GetSoftwareCopyrights();
+            for (int id : selected_ids) {
+                for (const auto& s : all_sw) {
+                    if (s.id == id) {
+                        wxString line = wxString::Format("%s,%s,\"%s\",%s,%s,%s\n",
+                            DB_STR(s.case_no), DB_STR(s.reg_no), DB_STR(s.title),
+                            DB_STR(s.current_owner), DB_STR(s.application_status),
+                            DB_STR(s.handler));
+                        file.Write(line);
+                        break;
+                    }
+                }
+            }
+        } else if (current_tab == 4) {
+            // IC
+            file.Write(UTF8_STR("案号,登记号,名称,权利人,状态,处理人\n"));
+
+            auto all_ic = db->GetICLayouts();
+            for (int id : selected_ids) {
+                for (const auto& ic : all_ic) {
+                    if (ic.id == id) {
+                        wxString line = wxString::Format("%s,%s,\"%s\",%s,%s,%s\n",
+                            DB_STR(ic.case_no), DB_STR(ic.reg_no), DB_STR(ic.title),
+                            DB_STR(ic.current_owner), DB_STR(ic.application_status),
+                            DB_STR(ic.handler));
+                        file.Write(line);
+                        break;
+                    }
+                }
+            }
+        } else if (current_tab == 5) {
+            // Foreign
+            file.Write(UTF8_STR("案号,PCT号,国家,名称,权利人,状态,处理人\n"));
+
+            auto all_fp = db->GetForeignPatents();
+            for (int id : selected_ids) {
+                for (const auto& f : all_fp) {
+                    if (f.id == id) {
+                        wxString line = wxString::Format("%s,%s,%s,\"%s\",%s,%s,%s\n",
+                            DB_STR(f.case_no), DB_STR(f.pct_no), DB_STR(f.country),
+                            DB_STR(f.title), DB_STR(f.owner),
+                            DB_STR(f.patent_status), DB_STR(f.handler));
+                        file.Write(line);
+                        break;
+                    }
+                }
             }
         }
+
+        file.Close();
+        wxMessageBox(current_lang == 0 ?
+            wxString::Format("Exported %zu selected records", selected_ids.size()) :
+            wxString::Format(UTF8_STR("已导出 %zu 条选中记录"), selected_ids.size()),
+            current_lang == 0 ? wxString("Export") : UTF8_STR("导出"), wxOK | wxICON_INFORMATION);
+    }
+
+    // ===================== NAS Sync Functions =====================
+    static bool CheckNASAccessible(const std::string& path) {
+#ifdef _WIN32
+        // Windows: check if UNC path is accessible
+        std::wstring wpath(path.begin(), path.end());
+        DWORD attrs = GetFileAttributesW(wpath.c_str());
+        return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY));
+#else
+        struct stat st;
+        return (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+#endif
+    }
+
+    static bool CopyFileToNAS(const std::string& local_path, const std::string& nas_path) {
+#ifdef _WIN32
+        std::wstring wlocal(local_path.begin(), local_path.end());
+        std::wstring wnas(nas_path.begin(), nas_path.end());
+        return CopyFileW(wlocal.c_str(), wnas.c_str(), FALSE) != 0;
+#else
+        return std::filesystem::copy_file(local_path, nas_path,
+            std::filesystem::copy_options::overwrite_existing);
+#endif
     }
 
     void OnSync(wxCommandEvent&) {
-        wxProgressDialog dlg("Syncing", "Synchronizing with NAS...", 100, this, wxPD_APP_MODAL);
-        dlg.Update(50);
-        wxSleep(1);
+        auto& config = NASConfig::Get();
+        if (!config.enabled || config.nas_path.empty()) {
+            wxMessageBox(current_lang == 0 ?
+                wxString("NAS not configured. Please set up NAS first.") :
+                UTF8_STR("NAS未配置，请先设置NAS。"),
+                current_lang == 0 ? wxString("Sync") : UTF8_STR("同步"),
+                wxOK | wxICON_WARNING);
+            return;
+        }
+
+        // Check NAS accessibility
+        if (!CheckNASAccessible(config.nas_path)) {
+            wxMessageBox(current_lang == 0 ?
+                wxString("Cannot access NAS path. Please check network connection.") :
+                UTF8_STR("无法访问NAS路径，请检查网络连接。"),
+                current_lang == 0 ? wxString("Error") : UTF8_STR("错误"),
+                wxOK | wxICON_ERROR);
+            return;
+        }
+
+        wxProgressDialog dlg(
+            current_lang == 0 ? wxString("Syncing") : UTF8_STR("同步中"),
+            current_lang == 0 ? wxString("Synchronizing with NAS...") : UTF8_STR("正在与NAS同步..."),
+            100, this, wxPD_APP_MODAL | wxPD_AUTO_HIDE);
+
+        std::string nas_db = config.nas_path + "/patents.db";
+        std::string local_db = "patents.db";
+
+        // Step 1: Backup local database
+        dlg.Update(10, current_lang == 0 ? wxString("Backing up local database...") : UTF8_STR("备份本地数据库..."));
+        std::string backup_db = "patents_local_backup.db";
+        #ifdef _WIN32
+        CopyFileA(local_db.c_str(), backup_db.c_str(), FALSE);
+        #else
+        std::filesystem::copy_file(local_db, backup_db, std::filesystem::copy_options::overwrite_existing);
+        #endif
+
+        // Step 2: Check if NAS database exists
+        bool nas_has_data = false;
+        #ifdef _WIN32
+        DWORD attrs = GetFileAttributesA(nas_db.c_str());
+        nas_has_data = (attrs != INVALID_FILE_ATTRIBUTES);
+        #else
+        struct stat st;
+        nas_has_data = (stat(nas_db.c_str(), &st) == 0);
+        #endif
+
+        int added = 0, updated = 0, conflicts = 0;
+
+        if (nas_has_data) {
+            // Step 3: Download NAS database to temp
+            dlg.Update(30, current_lang == 0 ? wxString("Downloading NAS database...") : UTF8_STR("下载NAS数据库..."));
+            std::string temp_nas_db = "patents_nas_temp.db";
+            #ifdef _WIN32
+            CopyFileA(nas_db.c_str(), temp_nas_db.c_str(), FALSE);
+            #else
+            std::filesystem::copy_file(nas_db, temp_nas_db, std::filesystem::copy_options::overwrite_existing);
+            #endif
+
+            // Step 4: Open NAS database and merge
+            dlg.Update(50, current_lang == 0 ? wxString("Merging data...") : UTF8_STR("合并数据..."));
+            Database nas_db_obj(temp_nas_db);
+
+            // Merge patents
+            auto nas_patents = nas_db_obj.GetPatents();
+            for (const auto& np : nas_patents) {
+                Patent local = db->GetPatentByCode(np.geke_code);
+                if (local.id == 0) {
+                    // New record from NAS
+                    db->InsertPatent(np);
+                    added++;
+                } else if (np.updated_at > local.updated_at) {
+                    // NAS version is newer
+                    db->UpdatePatent(local.id, np);
+                    updated++;
+                } else if (np.updated_at < local.updated_at && local.updated_at > np.updated_at) {
+                    // Local is newer, conflict detected
+                    conflicts++;
+                }
+            }
+
+            // Clean up temp
+            #ifdef _WIN32
+            DeleteFileA(temp_nas_db.c_str());
+            #else
+            std::filesystem::remove(temp_nas_db);
+            #endif
+        }
+
+        // Step 5: Upload local database to NAS
+        dlg.Update(80, current_lang == 0 ? wxString("Uploading to NAS...") : UTF8_STR("上传到NAS..."));
+        #ifdef _WIN32
+        CopyFileA(local_db.c_str(), nas_db.c_str(), FALSE);
+        #else
+        std::filesystem::copy_file(local_db, nas_db, std::filesystem::copy_options::overwrite_existing);
+        #endif
+
         dlg.Update(100);
-        wxMessageBox("Sync completed successfully!", "Sync", wxOK | wxICON_INFORMATION);
+
+        // Mark current user in database
+        db->SetConfig("last_sync_user", config.username);
+        db->SetConfig("last_sync_time", std::to_string(std::time(nullptr)));
+
+        LoadAllData();
+
+        wxString msg;
+        if (current_lang == 0) {
+            msg = wxString::Format("Sync completed!\nAdded: %d\nUpdated: %d\nConflicts: %d",
+                added, updated, conflicts);
+        } else {
+            msg = wxString::Format(UTF8_STR("同步完成！\n新增: %d\n更新: %d\n冲突: %d"),
+                added, updated, conflicts);
+        }
+        wxMessageBox(msg, current_lang == 0 ? wxString("Sync") : UTF8_STR("同步"),
+            wxOK | wxICON_INFORMATION);
     }
 
     void OnNasConfig(wxCommandEvent&) {
-        wxTextEntryDialog dlg(this, "Enter NAS path:", "NAS Configuration", "\\\\NAS\\patents");
+        auto& config = NASConfig::Get();
+
+        wxDialog dlg(this, wxID_ANY,
+            current_lang == 0 ? wxString("NAS Configuration") : UTF8_STR("NAS配置"),
+            wxDefaultPosition, wxSize(500, 300));
+        wxBoxSizer* main_sizer = new wxBoxSizer(wxVERTICAL);
+        wxPanel* panel = new wxPanel(&dlg);
+        wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
+
+        // NAS Path
+        wxBoxSizer* row1 = new wxBoxSizer(wxHORIZONTAL);
+        row1->Add(new wxStaticText(panel, wxID_ANY,
+            current_lang == 0 ? wxString("NAS Path:") : UTF8_STR("NAS路径:")),
+            0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        wxTextCtrl* path_field = new wxTextCtrl(panel, wxID_ANY,
+            wxString::FromUTF8(config.nas_path.c_str()), wxDefaultPosition, wxSize(350, -1));
+        row1->Add(path_field, 1);
+        wxButton* browse_btn = new wxButton(panel, wxID_ANY,
+            current_lang == 0 ? wxString("Browse...") : UTF8_STR("浏览..."));
+        browse_btn->Bind(wxEVT_BUTTON, [&dlg, path_field](wxCommandEvent&) {
+            wxDirDialog dir_dlg(&dlg,
+                wxString::FromUTF8("选择NAS目录"),
+                path_field->GetValue());
+            if (dir_dlg.ShowModal() == wxID_OK) {
+                path_field->SetValue(dir_dlg.GetPath());
+            }
+        });
+        row1->Add(browse_btn, 0, wxLEFT, 5);
+        sizer->Add(row1, 0, wxEXPAND | wxALL, 10);
+
+        // Username
+        wxBoxSizer* row2 = new wxBoxSizer(wxHORIZONTAL);
+        row2->Add(new wxStaticText(panel, wxID_ANY,
+            current_lang == 0 ? wxString("Username:") : UTF8_STR("用户名:")),
+            0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        wxTextCtrl* user_field = new wxTextCtrl(panel, wxID_ANY,
+            wxString::FromUTF8(config.username.c_str()));
+        row2->Add(user_field, 1);
+        sizer->Add(row2, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        // Auto sync interval
+        wxBoxSizer* row3 = new wxBoxSizer(wxHORIZONTAL);
+        row3->Add(new wxStaticText(panel, wxID_ANY,
+            current_lang == 0 ? wxString("Auto Sync (minutes):") : UTF8_STR("自动同步(分钟):")),
+            0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        wxSpinCtrl* sync_spin = new wxSpinCtrl(panel, wxID_ANY,
+            wxString::Format("%d", config.auto_sync_minutes),
+            wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, 60, config.auto_sync_minutes);
+        row3->Add(sync_spin, 0);
+        row3->Add(new wxStaticText(panel, wxID_ANY,
+            current_lang == 0 ? wxString("(0=disabled)") : UTF8_STR("(0=禁用)")),
+            0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
+        sizer->Add(row3, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        // Enable checkbox
+        wxCheckBox* enable_cb = new wxCheckBox(panel, wxID_ANY,
+            current_lang == 0 ? wxString("Enable NAS Sync") : UTF8_STR("启用NAS同步"));
+        enable_cb->SetValue(config.enabled);
+        sizer->Add(enable_cb, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        // Status
+        wxString status;
+        if (config.enabled && !config.nas_path.empty()) {
+            bool accessible = CheckNASAccessible(config.nas_path);
+            status = current_lang == 0 ?
+                wxString::Format("Status: %s", accessible ? "Connected" : "Disconnected") :
+                wxString::Format(UTF8_STR("状态: %s"), accessible ? UTF8_STR("已连接") : UTF8_STR("未连接"));
+        } else {
+            status = current_lang == 0 ? wxString("Status: Not configured") : UTF8_STR("状态: 未配置");
+        }
+        sizer->Add(new wxStaticText(panel, wxID_ANY, status), 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        panel->SetSizer(sizer);
+
+        // Buttons
+        wxBoxSizer* btn_sizer = new wxBoxSizer(wxHORIZONTAL);
+        wxButton* test_btn = new wxButton(&dlg, wxID_ANY,
+            current_lang == 0 ? wxString("Test Connection") : UTF8_STR("测试连接"));
+        test_btn->Bind(wxEVT_BUTTON, [path_field](wxCommandEvent&) {
+            std::string path = path_field->GetValue().ToStdString();
+            bool ok = CheckNASAccessible(path);
+            wxMessageBox(ok ?
+                wxString::FromUTF8("连接成功！") :
+                wxString::FromUTF8("连接失败，请检查路径和网络。"),
+                wxString::FromUTF8("测试结果"), wxOK | (ok ? wxICON_INFORMATION : wxICON_ERROR));
+        });
+        btn_sizer->Add(test_btn, 0, wxRIGHT, 10);
+
+        wxButton* ok_btn = new wxButton(&dlg, wxID_OK,
+            current_lang == 0 ? wxString("Save") : UTF8_STR("保存"));
+        wxButton* cancel_btn = new wxButton(&dlg, wxID_CANCEL,
+            current_lang == 0 ? wxString("Cancel") : UTF8_STR("取消"));
+        btn_sizer->AddStretchSpacer();
+        btn_sizer->Add(ok_btn, 0, wxRIGHT, 10);
+        btn_sizer->Add(cancel_btn, 0);
+        main_sizer->Add(panel, 1, wxEXPAND);
+        main_sizer->Add(btn_sizer, 0, wxEXPAND | wxALL, 10);
+
+        dlg.SetSizer(main_sizer);
+        dlg.Centre();
+
         if (dlg.ShowModal() == wxID_OK) {
-            wxMessageBox(wxString::Format("NAS path set to: %s", dlg.GetValue()), "Config", wxOK | wxICON_INFORMATION);
+            config.nas_path = path_field->GetValue().ToStdString();
+            config.username = user_field->GetValue().ToStdString();
+            config.auto_sync_minutes = sync_spin->GetValue();
+            config.enabled = enable_cb->GetValue();
+            config.Save();
+
+            wxMessageBox(current_lang == 0 ?
+                wxString("NAS configuration saved.") :
+                UTF8_STR("NAS配置已保存。"),
+                current_lang == 0 ? wxString("Success") : UTF8_STR("成功"),
+                wxOK | wxICON_INFORMATION);
         }
     }
 
@@ -2606,21 +3249,21 @@ private:
         }
     }
 
-    // Batch operation stack for undo
-    std::vector<std::function<void()>> undo_stack_;
-    std::vector<Patent> deleted_patents_;
+    // Undo using database undo manager
 
     void OnUndo(wxCommandEvent&) {
-        if (undo_stack_.empty()) {
-            wxMessageBox("No operations to undo", "Undo", wxOK | wxICON_INFORMATION);
+        if (!db->CanUndo()) {
+            wxMessageBox(LANG_STR("No operations to undo", "没有可撤销的操作"),
+                         LANG_STR("Undo", "撤销"), wxOK | wxICON_INFORMATION);
             return;
         }
 
-        auto& undo_fn = undo_stack_.back();
-        undo_fn();
-        undo_stack_.pop_back();
+        int count = db->Undo();
         LoadAllData();
-        wxMessageBox("Last operation undone", "Undo", wxOK | wxICON_INFORMATION);
+        wxString msg = current_lang == 0 ?
+            wxString::Format("Undone %d operations", count) :
+            wxString::Format(UTF8_STR("已撤销 %d 个操作"), count);
+        wxMessageBox(msg, LANG_STR("Undo", "撤销"), wxOK | wxICON_INFORMATION);
     }
 
     void OnRefresh(wxCommandEvent&) {

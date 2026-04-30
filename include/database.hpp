@@ -30,6 +30,7 @@ struct Patent {
     std::string class_level1;
     std::string class_level2;
     std::string class_level3;
+    long long updated_at = 0; // timestamp for sync conflict detection
 };
 
 struct OARecord {
@@ -127,62 +128,77 @@ class Database {
 public:
     Database(const std::string& db_path);
     ~Database();
-    
+
     bool IsOpen() const { return db_ != nullptr; }
-    
+    sqlite3* GetHandle() { return db_; }
+
     // Patents
     std::vector<Patent> GetPatents(const std::string& status_filter = "",
                                     const std::string& level_filter = "",
                                     const std::string& handler_filter = "");
     Patent GetPatentById(int id);
     Patent GetPatentByCode(const std::string& geke_code);
-    int InsertPatent(const Patent& p);
-    bool UpdatePatent(int id, const Patent& p);
-    bool DeletePatent(int id);
+    int InsertPatent(const Patent& p, bool log_undo = true);
+    bool UpdatePatent(int id, const Patent& p, bool log_undo = true);
+    bool DeletePatent(int id, bool log_undo = true);
     std::vector<Patent> SearchPatents(const std::string& keyword);
-    
+
     // OA Records
     std::vector<OARecord> GetOARecords(const std::string& filter_type = "",
                                         const std::string& handler_filter = "",
                                         const std::string& writer_filter = "");
     OARecord GetOAById(int id);
     std::vector<OARecord> GetOAByPatent(const std::string& geke_code);
-    int InsertOA(const OARecord& oa);
-    bool UpdateOA(int id, const OARecord& oa);
-    bool DeleteOA(int id);
+    int InsertOA(const OARecord& oa, bool log_undo = true);
+    bool UpdateOA(int id, const OARecord& oa, bool log_undo = true);
+    bool DeleteOA(int id, bool log_undo = true);
     bool MarkOACompleted(int id);
-    
+
     // PCT
     std::vector<PCTPatent> GetPCTPatents(const std::string& handler_filter = "");
     int InsertPCT(const PCTPatent& p);
     bool UpdatePCT(int id, const PCTPatent& p);
     bool DeletePCT(int id);
-    
+
     // Software
     std::vector<SoftwareCopyright> GetSoftwareCopyrights(const std::string& handler_filter = "");
     int InsertSoftware(const SoftwareCopyright& s);
-    bool UpdateSoftware(int id, const SoftwareCopyright& s);
     bool DeleteSoftware(int id);
-    
+
     // IC Layouts
     std::vector<ICLayout> GetICLayouts();
     int InsertIC(const ICLayout& ic);
-    bool UpdateIC(int id, const ICLayout& ic);
     bool DeleteIC(int id);
-    
+
     // Foreign
     std::vector<ForeignPatent> GetForeignPatents();
     int InsertForeign(const ForeignPatent& f);
-    bool UpdateForeign(int id, const ForeignPatent& f);
     bool DeleteForeign(int id);
-    
+
     // Utility
     std::vector<std::string> GetDistinctValues(const std::string& table, const std::string& column);
-    
+    void SetConfig(const std::string& key, const std::string& value);
+    std::string GetConfig(const std::string& key);
+
+    // Undo support
+    void BeginBatch();
+    int Undo();
+    bool CanUndo() const;
+
 private:
     sqlite3* db_ = nullptr;
-    
+
+    void InitTables();
+    void MigrateTables();
     bool Execute(const std::string& sql);
     std::string EscapeString(const std::string& s);
     std::string GetCurrentDate();
+
+    // JSON serialization for undo
+    std::string PatentToJson(const Patent& p);
+    std::string OAToJson(const OARecord& oa);
 };
+
+// Global undo manager accessor
+class UndoManager;
+UndoManager& GetUndoManager();
