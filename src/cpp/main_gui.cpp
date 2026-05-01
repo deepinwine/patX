@@ -550,9 +550,19 @@ private:
     }
 
     void LoadData() {
-        PCTPatent p = db_->GetPCTPatents()[0]; // TODO: implement GetPCTById
+        PCTPatent p = db_->GetPCTById(pct_id_);
         if (fields_.count("geke_code")) fields_["geke_code"]->SetValue(DB_STR(p.geke_code));
+        if (fields_.count("domestic_source")) fields_["domestic_source"]->SetValue(DB_STR(p.domestic_source));
+        if (fields_.count("application_no")) fields_["application_no"]->SetValue(DB_STR(p.application_no));
+        if (fields_.count("country_app_no")) fields_["country_app_no"]->SetValue(DB_STR(p.country_app_no));
         if (fields_.count("title")) fields_["title"]->SetValue(DB_STR(p.title));
+        if (fields_.count("handler")) fields_["handler"]->SetValue(DB_STR(p.handler));
+        if (fields_.count("inventor")) fields_["inventor"]->SetValue(DB_STR(p.inventor));
+        if (fields_.count("filing_date")) fields_["filing_date"]->SetValue(DB_STR(p.filing_date));
+        if (fields_.count("application_date")) fields_["application_date"]->SetValue(DB_STR(p.application_date));
+        if (fields_.count("priority_date")) fields_["priority_date"]->SetValue(DB_STR(p.priority_date));
+        if (fields_.count("country")) fields_["country"]->SetValue(DB_STR(p.country));
+        if (fields_.count("notes")) fields_["notes"]->SetValue(DB_STR(p.notes));
         status_combo_->SetValue(DB_STR(p.application_status));
     }
 
@@ -601,6 +611,7 @@ public:
         : wxDialog(parent, wxID_ANY, sw_id ? "Edit Software Copyright" : "New Software Copyright", wxDefaultPosition, wxSize(550, 400)),
           db_(db), sw_id_(sw_id) {
         SetupUI();
+        if (sw_id) LoadData();
     }
 private:
     Database* db_;
@@ -661,6 +672,23 @@ private:
         Bind(wxEVT_BUTTON, &SoftwareEditDialog::OnSave, this, wxID_OK);
     }
 
+    void LoadData() {
+        SoftwareCopyright s = db_->GetSoftwareById(sw_id_);
+        if (fields_.count("case_no")) fields_["case_no"]->SetValue(DB_STR(s.case_no));
+        if (fields_.count("reg_no")) fields_["reg_no"]->SetValue(DB_STR(s.reg_no));
+        if (fields_.count("title")) fields_["title"]->SetValue(DB_STR(s.title));
+        if (fields_.count("original_owner")) fields_["original_owner"]->SetValue(DB_STR(s.original_owner));
+        if (fields_.count("current_owner")) fields_["current_owner"]->SetValue(DB_STR(s.current_owner));
+        if (fields_.count("handler")) fields_["handler"]->SetValue(DB_STR(s.handler));
+        if (fields_.count("developer")) fields_["developer"]->SetValue(DB_STR(s.developer));
+        if (fields_.count("inventor")) fields_["inventor"]->SetValue(DB_STR(s.inventor));
+        if (fields_.count("dev_complete_date")) fields_["dev_complete_date"]->SetValue(DB_STR(s.dev_complete_date));
+        if (fields_.count("application_date")) fields_["application_date"]->SetValue(DB_STR(s.application_date));
+        if (fields_.count("reg_date")) fields_["reg_date"]->SetValue(DB_STR(s.reg_date));
+        if (fields_.count("version")) fields_["version"]->SetValue(DB_STR(s.version));
+        status_combo_->SetValue(DB_STR(s.application_status));
+    }
+
     void OnSave(wxCommandEvent&) {
         SoftwareCopyright s;
         s.id = sw_id_;
@@ -695,6 +723,7 @@ public:
         : wxDialog(parent, wxID_ANY, ic_id ? "Edit IC Layout" : "New IC Layout", wxDefaultPosition, wxSize(500, 400)),
           db_(db), ic_id_(ic_id) {
         SetupUI();
+        if (ic_id) LoadData();
     }
 private:
     Database* db_;
@@ -754,6 +783,23 @@ private:
         Bind(wxEVT_BUTTON, &ICEditDialog::OnSave, this, wxID_OK);
     }
 
+    void LoadData() {
+        ICLayout ic = db_->GetICById(ic_id_);
+        if (fields_.count("case_no")) fields_["case_no"]->SetValue(DB_STR(ic.case_no));
+        if (fields_.count("reg_no")) fields_["reg_no"]->SetValue(DB_STR(ic.reg_no));
+        if (fields_.count("title")) fields_["title"]->SetValue(DB_STR(ic.title));
+        if (fields_.count("original_owner")) fields_["original_owner"]->SetValue(DB_STR(ic.original_owner));
+        if (fields_.count("current_owner")) fields_["current_owner"]->SetValue(DB_STR(ic.current_owner));
+        if (fields_.count("handler")) fields_["handler"]->SetValue(DB_STR(ic.handler));
+        if (fields_.count("designer")) fields_["designer"]->SetValue(DB_STR(ic.designer));
+        if (fields_.count("inventor")) fields_["inventor"]->SetValue(DB_STR(ic.inventor));
+        if (fields_.count("application_date")) fields_["application_date"]->SetValue(DB_STR(ic.application_date));
+        if (fields_.count("creation_date")) fields_["creation_date"]->SetValue(DB_STR(ic.creation_date));
+        if (fields_.count("cert_date")) fields_["cert_date"]->SetValue(DB_STR(ic.cert_date));
+        if (fields_.count("notes")) fields_["notes"]->SetValue(DB_STR(ic.notes));
+        status_combo_->SetValue(DB_STR(ic.application_status));
+    }
+
     void OnSave(wxCommandEvent&) {
         ICLayout ic;
         ic.id = ic_id_;
@@ -788,6 +834,7 @@ public:
         : wxDialog(parent, wxID_ANY, fp_id ? "Edit Foreign Patent" : "New Foreign Patent", wxDefaultPosition, wxSize(550, 400)),
           db_(db), fp_id_(fp_id) {
         SetupUI();
+        if (fp_id) LoadData();
     }
 private:
     Database* db_;
@@ -846,6 +893,23 @@ private:
         SetSizer(main_sizer);
         Centre();
         Bind(wxEVT_BUTTON, &ForeignEditDialog::OnSave, this, wxID_OK);
+    }
+
+    void LoadData() {
+        ForeignPatent f = db_->GetForeignById(fp_id_);
+        if (fields_.count("case_no")) fields_["case_no"]->SetValue(DB_STR(f.case_no));
+        if (fields_.count("pct_no")) fields_["pct_no"]->SetValue(DB_STR(f.pct_no));
+        if (fields_.count("country_app_no")) fields_["country_app_no"]->SetValue(DB_STR(f.country_app_no));
+        if (fields_.count("title")) fields_["title"]->SetValue(DB_STR(f.title));
+        if (fields_.count("owner")) fields_["owner"]->SetValue(DB_STR(f.owner));
+        if (fields_.count("handler")) fields_["handler"]->SetValue(DB_STR(f.handler));
+        if (fields_.count("inventor")) fields_["inventor"]->SetValue(DB_STR(f.inventor));
+        if (fields_.count("country")) fields_["country"]->SetValue(DB_STR(f.country));
+        if (fields_.count("application_no")) fields_["application_no"]->SetValue(DB_STR(f.application_no));
+        if (fields_.count("application_date")) fields_["application_date"]->SetValue(DB_STR(f.application_date));
+        if (fields_.count("authorization_date")) fields_["authorization_date"]->SetValue(DB_STR(f.authorization_date));
+        if (fields_.count("notes")) fields_["notes"]->SetValue(DB_STR(f.notes));
+        status_combo_->SetValue(DB_STR(f.patent_status));
     }
 
     void OnSave(wxCommandEvent&) {

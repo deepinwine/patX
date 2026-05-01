@@ -725,6 +725,35 @@ bool Database::DeletePCT(int id) {
     return Execute("DELETE FROM pct_patents WHERE id = " + std::to_string(id));
 }
 
+PCTPatent Database::GetPCTById(int id) {
+    PCTPatent p;
+    std::string sql = "SELECT * FROM pct_patents WHERE id = " + std::to_string(id);
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            p.id = sqlite3_column_int(stmt, 0);
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
+            p.geke_code = cs(1);
+            p.domestic_source = cs(2);
+            p.application_no = cs(3);
+            p.country_app_no = cs(4);
+            p.title = cs(5);
+            p.application_status = cs(6);
+            p.handler = cs(7);
+            p.inventor = cs(8);
+            p.filing_date = cs(9);
+            p.application_date = cs(10);
+            p.priority_date = cs(11);
+            p.country = cs(12);
+            p.notes = cs(13);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return p;
+}
+
 // ============== Software ==============
 std::vector<SoftwareCopyright> Database::GetSoftwareCopyrights(const std::string& handler_filter) {
     std::vector<SoftwareCopyright> results;
@@ -772,6 +801,28 @@ bool Database::DeleteSoftware(int id) {
     return Execute("DELETE FROM software_copyrights WHERE id = " + std::to_string(id));
 }
 
+SoftwareCopyright Database::GetSoftwareById(int id) {
+    SoftwareCopyright s;
+    std::string sql = "SELECT * FROM software_copyrights WHERE id = " + std::to_string(id);
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            s.id = sqlite3_column_int(stmt, 0);
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
+            s.case_no = cs(1); s.reg_no = cs(2); s.title = cs(3);
+            s.original_owner = cs(4); s.current_owner = cs(5);
+            s.application_status = cs(6); s.handler = cs(7);
+            s.developer = cs(8); s.inventor = cs(9);
+            s.dev_complete_date = cs(10); s.application_date = cs(11);
+            s.reg_date = cs(12); s.version = cs(13); s.notes = cs(14);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return s;
+}
+
 // ============== IC Layouts ==============
 std::vector<ICLayout> Database::GetICLayouts() {
     std::vector<ICLayout> results;
@@ -814,6 +865,28 @@ bool Database::DeleteIC(int id) {
     return Execute("DELETE FROM ic_layouts WHERE id = " + std::to_string(id));
 }
 
+ICLayout Database::GetICById(int id) {
+    ICLayout ic;
+    std::string sql = "SELECT * FROM ic_layouts WHERE id = " + std::to_string(id);
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            ic.id = sqlite3_column_int(stmt, 0);
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
+            ic.case_no = cs(1); ic.reg_no = cs(2); ic.title = cs(3);
+            ic.original_owner = cs(4); ic.current_owner = cs(5);
+            ic.application_status = cs(6); ic.handler = cs(7);
+            ic.designer = cs(8); ic.inventor = cs(9);
+            ic.application_date = cs(10); ic.creation_date = cs(11);
+            ic.cert_date = cs(12); ic.notes = cs(13);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return ic;
+}
+
 // ============== Foreign Patents ==============
 std::vector<ForeignPatent> Database::GetForeignPatents() {
     std::vector<ForeignPatent> results;
@@ -854,6 +927,27 @@ int Database::InsertForeign(const ForeignPatent& f) {
 
 bool Database::DeleteForeign(int id) {
     return Execute("DELETE FROM foreign_patents WHERE id = " + std::to_string(id));
+}
+
+ForeignPatent Database::GetForeignById(int id) {
+    ForeignPatent f;
+    std::string sql = "SELECT * FROM foreign_patents WHERE id = " + std::to_string(id);
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            f.id = sqlite3_column_int(stmt, 0);
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
+            f.case_no = cs(1); f.pct_no = cs(2); f.country_app_no = cs(3);
+            f.title = cs(4); f.owner = cs(5); f.patent_status = cs(6);
+            f.handler = cs(7); f.inventor = cs(8);
+            f.application_date = cs(9); f.authorization_date = cs(10);
+            f.country = cs(11); f.application_no = cs(12); f.notes = cs(13);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return f;
 }
 
 // ============== Utility ==============

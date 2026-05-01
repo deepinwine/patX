@@ -156,22 +156,26 @@ public:
 
     // PCT
     std::vector<PCTPatent> GetPCTPatents(const std::string& handler_filter = "");
+    PCTPatent GetPCTById(int id);
     int InsertPCT(const PCTPatent& p);
     bool UpdatePCT(int id, const PCTPatent& p);
     bool DeletePCT(int id);
 
     // Software
     std::vector<SoftwareCopyright> GetSoftwareCopyrights(const std::string& handler_filter = "");
+    SoftwareCopyright GetSoftwareById(int id);
     int InsertSoftware(const SoftwareCopyright& s);
     bool DeleteSoftware(int id);
 
     // IC Layouts
     std::vector<ICLayout> GetICLayouts();
+    ICLayout GetICById(int id);
     int InsertIC(const ICLayout& ic);
     bool DeleteIC(int id);
 
     // Foreign
     std::vector<ForeignPatent> GetForeignPatents();
+    ForeignPatent GetForeignById(int id);
     int InsertForeign(const ForeignPatent& f);
     bool DeleteForeign(int id);
 
