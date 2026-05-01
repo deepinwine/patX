@@ -82,6 +82,10 @@ static void SortListCtrl(wxListCtrl* list, int col, bool asc) {
     }
 }
 
+// Column header right-click to show filter popup
+// Maps: list -> column -> filter value
+static std::map<wxListCtrl*, std::map<int, std::string>> g_column_filters;
+
 // ============== NAS Configuration ==============
 struct NASConfig {
     std::string nas_path;           // NAS共享路径
@@ -1238,16 +1242,21 @@ private:
             wxString handler_f = patent_handler_filter->GetValue();
             wxString inv_f = inventor_filter->GetValue();
 
+            // Helper: check if filter is "All" (English or Chinese)
+            auto isAll = [](const wxString& s) {
+                return s == "All" || s == UTF8_STR("全部") || s.IsEmpty();
+            };
+
             auto patents = db->GetPatents(
-                status_f == "All" ? "" : status_f.ToStdString(),
-                level_f == "All" ? "" : level_f.ToStdString(),
-                handler_f == "All" ? "" : handler_f.ToStdString()
+                isAll(status_f) ? "" : status_f.ToStdString(),
+                isAll(level_f) ? "" : level_f.ToStdString(),
+                isAll(handler_f) ? "" : handler_f.ToStdString()
             );
 
             // Filter by inventor
             std::vector<Patent> filtered;
             for (const auto& p : patents) {
-                if (inv_f == "All" || p.inventor.find(inv_f.ToStdString()) != std::string::npos) {
+                if (isAll(inv_f) || p.inventor.find(inv_f.ToStdString()) != std::string::npos) {
                     filtered.push_back(p);
                 }
             }
@@ -1286,17 +1295,8 @@ private:
         tb1->AddStretchSpacer();
         sizer->Add(tb1, 0, wxALL, 5);
 
-        // Toolbar row 2: Action buttons
+        // Toolbar row 2: Statistics, Batch, Report (New/Edit/Delete在通用工具栏)
         wxBoxSizer* tb2 = new wxBoxSizer(wxHORIZONTAL);
-        wxButton* new_btn = new wxButton(panel, wxID_ANY, "New Patent");
-        new_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnNewPatent, this);
-        wxButton* edit_btn = new wxButton(panel, wxID_ANY, "Edit");
-        edit_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnEditPatent, this);
-        wxButton* del_btn = new wxButton(panel, wxID_ANY, "Delete");
-        del_btn->Bind(wxEVT_BUTTON, &PatXFrame::OnDeletePatent, this);
-        tb2->Add(new_btn, 0, wxRIGHT, 5);
-        tb2->Add(edit_btn, 0, wxRIGHT, 5);
-        tb2->Add(del_btn, 0, wxRIGHT, 15);
 
         // Statistics
         tb2->Add(new wxStaticText(panel, wxID_ANY, "| Statistics:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
@@ -1503,12 +1503,46 @@ private:
             else { state.first = col; state.second = true; }
             SortListCtrl(patent_list, col, state.second);
         });
-        // Double-click on level column (col 4) to set level
-        patent_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent& e) {
-            // Check if click is near level column
-            // Actually use right-click menu for level
+
+        // 列标题右键筛选
+        patent_list->Bind(wxEVT_LIST_COL_RIGHT_CLICK, [this](wxListEvent& e) {
+            int col = e.GetColumn();
+            // 列到数据库字段的映射
+            std::vector<std::string> col_to_field = {
+                "geke_code", "application_number", "title", "patent_type",
+                "patent_level", "application_status", "class_level1", "class_level2",
+                "class_level3", "geke_handler", "inventor", "application_date",
+                "authorization_date", "expiration_date", "agency_firm", "notes"
+            };
+            if (col < 0 || col >= (int)col_to_field.size()) return;
+
+            wxMenu menu;
+            menu.Append(10000, UTF8_STR("(全部)"));
+            menu.AppendSeparator();
+
+            auto values = db->GetDistinctValues("patents", col_to_field[col]);
+            for (size_t i = 0; i < values.size() && i < 30; i++) {
+                if (!values[i].empty()) {
+                    menu.Append(10001 + i, wxString(values[i]));
+                }
+            }
+
+            menu.Bind(wxEVT_MENU, [this, col, values](wxCommandEvent& ev) {
+                int id = ev.GetId();
+                if (id == 10000) {
+                    g_column_filters[patent_list][col] = "";
+                } else {
+                    size_t idx = id - 10001;
+                    if (idx < values.size()) {
+                        g_column_filters[patent_list][col] = values[idx];
+                    }
+                }
+                LoadPatents();
+            });
+
+            PopupMenu(&menu);
         });
-        
+
         // Right-click context menu
         patent_list->Bind(wxEVT_CONTEXT_MENU, [this](wxContextMenuEvent& e) {
             long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
@@ -1627,18 +1661,23 @@ private:
         auto handlers = db->GetDistinctValues("patents", "geke_handler");
         wxString current = patent_handler_filter->GetValue();
         patent_handler_filter->Clear();
-        patent_handler_filter->Append("All");
+        patent_handler_filter->Append(UTF8_STR("全部"));
         for (const auto& h : handlers) patent_handler_filter->Append(wxString(h));
-        patent_handler_filter->SetValue(current.IsEmpty() ? "All" : current);
+        patent_handler_filter->SetValue(current.IsEmpty() ? UTF8_STR("全部") : current);
 
         wxString status_f = patent_status_filter->GetValue();
         wxString level_f = patent_level_filter->GetValue();
         wxString handler_f = patent_handler_filter->GetValue();
 
+        // Helper: check if filter is "All" (English or Chinese)
+        auto isAll = [](const wxString& s) {
+            return s == "All" || s == UTF8_STR("全部") || s.IsEmpty();
+        };
+
         auto patents = db->GetPatents(
-            status_f == "All" ? "" : status_f.ToStdString(),
-            level_f == "All" ? "" : level_f.ToStdString(),
-            handler_f == "All" ? "" : handler_f.ToStdString()
+            isAll(status_f) ? "" : status_f.ToStdString(),
+            isAll(level_f) ? "" : level_f.ToStdString(),
+            isAll(handler_f) ? "" : handler_f.ToStdString()
         );
 
         int row = 0;
@@ -1825,7 +1864,6 @@ private:
 
     void OnEditByCurrentTab(wxCommandEvent&) {
         int tab = GetCurrentTab();
-        if (tab == 0) { OnEditPatent(); return; }
         wxListCtrl* list = GetCurrentList();
         if (!list) return;
         long idx = list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
@@ -1834,10 +1872,17 @@ private:
             return;
         }
         switch (tab) {
-            case 1: wxMessageBox("Edit PCT - coming soon", "Info", wxOK); break;
-            case 2: wxMessageBox("Edit Software - coming soon", "Info", wxOK); break;
-            case 3: wxMessageBox("Edit IC - coming soon", "Info", wxOK); break;
-            case 4: wxMessageBox("Edit Foreign - coming soon", "Info", wxOK); break;
+            case 0: OnEditPatent(); break;  // 国内专利
+            case 1: {  // OA处理
+                int oa_id = oa_list->GetItemData(idx);
+                OAEditDialog dlg(this, db.get(), oa_id);
+                if (dlg.ShowModal() == wxID_OK) LoadOA();
+                break;
+            }
+            case 2: wxMessageBox("Edit PCT - coming soon", "Info", wxOK); break;
+            case 3: wxMessageBox("Edit Software - coming soon", "Info", wxOK); break;
+            case 4: wxMessageBox("Edit IC - coming soon", "Info", wxOK); break;
+            case 5: wxMessageBox("Edit Foreign - coming soon", "Info", wxOK); break;
             default: wxMessageBox("Edit - coming soon", "Info", wxOK);
         }
     }
@@ -1963,6 +2008,29 @@ private:
 
     void OnFilterByCurrentTab(wxCommandEvent&) {
         int tab = GetCurrentTab();
+
+        // Update handler filter with values from current tab's table
+        wxString current_handler = common_handler_filter->GetValue();
+        common_handler_filter->Clear();
+        common_handler_filter->Append(LANG_STR("All", UTF8_STR("全部")));
+
+        std::string table_name;
+        std::string col_name;
+        switch (tab) {
+            case 0: table_name = "patents"; col_name = "geke_handler"; break;
+            case 1: table_name = "oa_records"; col_name = "handler"; break;
+            case 2: table_name = "pct"; col_name = "handler"; break;
+            case 3: table_name = "software_copyright"; col_name = "handler"; break;
+            case 4: table_name = "ic_layouts"; col_name = "handler"; break;
+            case 5: table_name = "foreign_patents"; col_name = "handler"; break;
+            default: table_name = "patents"; col_name = "geke_handler"; break;
+        }
+        auto handlers = db->GetDistinctValues(table_name, col_name);
+        for (const auto& h : handlers) {
+            if (!h.empty()) common_handler_filter->Append(wxString(h));
+        }
+        common_handler_filter->SetValue(current_handler);
+
         switch (tab) {
             case 0: LoadPatents(); break;
             case 1: LoadOA(); break;
@@ -1979,12 +2047,13 @@ private:
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 
         wxBoxSizer* tb = new wxBoxSizer(wxHORIZONTAL);
-        tb->Add(new wxStaticText(panel, wxID_ANY, "Filter:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-        oa_filter = new wxComboBox(panel, wxID_ANY, "All incomplete", wxDefaultPosition, wxSize(150, -1));
-        oa_filter->Append("All incomplete");
-        oa_filter->Append("Within 5 days");
-        oa_filter->Append("Within 30 days");
-        oa_filter->Append("All");
+        tb->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("筛选:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        oa_filter = new wxComboBox(panel, wxID_ANY, UTF8_STR("全部未完成"), wxDefaultPosition, wxSize(150, -1));
+        oa_filter->Append(UTF8_STR("全部未完成"));
+        oa_filter->Append(UTF8_STR("5天内到期"));
+        oa_filter->Append(UTF8_STR("30天内到期"));
+        oa_filter->Append(UTF8_STR("全部"));
+        oa_filter->Append(UTF8_STR("已完成"));
         oa_filter->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { LoadOA(); });
         tb->Add(oa_filter, 0, wxRIGHT, 15);
 
@@ -1998,15 +2067,6 @@ private:
                 db->MarkOACompleted(id);
                 LoadOA();
                 wxMessageBox("Marked as completed", "Success", wxOK | wxICON_INFORMATION);
-            }
-        });
-        wxButton* edit_oa_btn = new wxButton(panel, wxID_ANY, "Edit");
-        edit_oa_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            long idx = oa_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-            if (idx >= 0) {
-                int id = oa_list->GetItemData(idx);
-                OAEditDialog dlg(this, db.get(), id);
-                if (dlg.ShowModal() == wxID_OK) LoadOA();
             }
         });
         wxButton* extend_btn = new wxButton(panel, wxID_ANY, "Request Extension");
@@ -2040,28 +2100,8 @@ private:
             }
         });
         tb->Add(complete_btn, 0, wxRIGHT, 5);
-        tb->Add(edit_oa_btn, 0, wxRIGHT, 5);
         tb->Add(extend_btn, 0, wxRIGHT, 5);
         tb->Add(urgent_btn, 0);
-
-        wxButton* new_oa_btn = new wxButton(panel, wxID_ANY, "New OA");
-        new_oa_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            wxTextEntryDialog dlg(this, "Enter OA details (format: GEKE_CODE|OA_TYPE|DEADLINE)", "New OA Record");
-            if (dlg.ShowModal() == wxID_OK) {
-                wxString val = dlg.GetValue();
-                wxArrayString parts = wxSplit(val, '|');
-                if (parts.size() >= 3) {
-                    OARecord oa;
-                    oa.geke_code = parts[0].ToStdString();
-                    oa.oa_type = parts[1].ToStdString();
-                    oa.official_deadline = parts[2].ToStdString();
-                    oa.progress = "pending";
-                    db->InsertOA(oa);
-                    LoadOA();
-                }
-            }
-        });
-        tb->Add(new_oa_btn, 0);
 
         sizer->Add(tb, 0, wxALL, 5);
 
@@ -2076,6 +2116,15 @@ private:
         oa_list->AppendColumn(UTF8_STR("撰写人"), wxLIST_FORMAT_LEFT, 80);
         oa_list->AppendColumn(UTF8_STR("进度"), wxLIST_FORMAT_LEFT, 100);
         oa_list->AppendColumn(UTF8_STR("等级"), wxLIST_FORMAT_LEFT, 80);
+
+        oa_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
+            long idx = oa_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+            if (idx >= 0) {
+                int oa_id = oa_list->GetItemData(idx);
+                OAEditDialog dlg(this, db.get(), oa_id);
+                if (dlg.ShowModal() == wxID_OK) LoadOA();
+            }
+        });
 
         oa_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
             int col = e.GetColumn();
@@ -2094,8 +2143,17 @@ private:
         if (!db || !db->IsOpen()) return;
         oa_list->DeleteAllItems();
 
-        auto records = db->GetOARecords(oa_filter->GetValue().ToStdString());
-        
+        std::string filter_type = oa_filter->GetValue().ToStdString();
+        std::string handler_filter = common_handler_filter->GetValue().ToStdString();
+
+        // Check for "All" or "全部" or empty
+        if (handler_filter == "All" || handler_filter == "全部" || handler_filter.empty()) {
+            handler_filter = "";
+        }
+
+        std::string writer_filter;
+        auto records = db->GetOARecords(filter_type, handler_filter, writer_filter);
+
         // Get current date for deadline calculation
         wxDateTime now = wxDateTime::Now();
         int urgent_count = 0;
@@ -2187,31 +2245,7 @@ private:
         tb1->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("搜索:")), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
         pct_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
 
-        wxBoxSizer* tb2 = new wxBoxSizer(wxHORIZONTAL);
-        wxButton* new_btn = new wxButton(panel, wxID_ANY, "New");
-        new_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            PCTEditDialog dlg(this, db.get());
-            if (dlg.ShowModal() == wxID_OK) LoadPCT();
-        });
-        wxButton* edit_btn = new wxButton(panel, wxID_ANY, "Edit");
-        edit_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            wxMessageBox("Edit PCT - coming soon", "Info", wxOK);
-        });
-        wxButton* del_btn = new wxButton(panel, wxID_ANY, "Delete");
-        del_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            long idx = pct_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-            if (idx >= 0) {
-                if (wxMessageBox("Delete selected?", "Confirm", wxYES_NO) == wxYES) {
-                    db->DeletePCT(pct_list->GetItemData(idx));
-                    LoadPCT();
-                }
-            }
-        });
-        tb2->Add(new_btn, 0, wxRIGHT, 5);
-        tb2->Add(edit_btn, 0, wxRIGHT, 5);
-        tb2->Add(del_btn, 0);
-        tb2->AddStretchSpacer();
-        sizer->Add(tb2, 0, wxALL, 5);
+        sizer->Add(tb1, 0, wxALL, 5);
 
         pct_list->AppendColumn(UTF8_STR("编号"), wxLIST_FORMAT_LEFT, 90);
         pct_list->AppendColumn(UTF8_STR("国内同源"), wxLIST_FORMAT_LEFT, 90);
@@ -2227,6 +2261,14 @@ private:
             if (state.first == col) state.second = !state.second;
             else { state.first = col; state.second = true; }
             SortListCtrl(pct_list, col, state.second);
+        });
+        pct_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
+            long idx = pct_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+            if (idx >= 0) {
+                PCTEditDialog dlg(this, db.get());
+                dlg.ShowModal();
+                LoadPCT();
+            }
         });
 
         sizer->Add(pct_list, 1, wxEXPAND | wxALL, 5);
@@ -2257,28 +2299,6 @@ private:
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 
         wxBoxSizer* tb = new wxBoxSizer(wxHORIZONTAL);
-        wxButton* new_btn = new wxButton(panel, wxID_ANY, "New");
-        new_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            SoftwareEditDialog dlg(this, db.get());
-            if (dlg.ShowModal() == wxID_OK) LoadSoftware();
-        });
-        wxButton* edit_btn = new wxButton(panel, wxID_ANY, "Edit");
-        edit_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            wxMessageBox("Edit Software - coming soon", "Info", wxOK);
-        });
-        wxButton* del_btn = new wxButton(panel, wxID_ANY, "Delete");
-        del_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            long idx = sw_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-            if (idx >= 0) {
-                if (wxMessageBox("Delete selected?", "Confirm", wxYES_NO) == wxYES) {
-                    // db->DeleteSoftware(sw_list->GetItemData(idx));
-                    LoadSoftware();
-                }
-            }
-        });
-        tb->Add(new_btn, 0, wxRIGHT, 5);
-        tb->Add(edit_btn, 0, wxRIGHT, 5);
-        tb->Add(del_btn, 0);
         tb->AddStretchSpacer();
         sizer->Add(tb, 0, wxALL, 5);
 
@@ -2296,6 +2316,14 @@ private:
             if (state.first == col) state.second = !state.second;
             else { state.first = col; state.second = true; }
             SortListCtrl(sw_list, col, state.second);
+        });
+        sw_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
+            long idx = sw_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+            if (idx >= 0) {
+                SoftwareEditDialog dlg(this, db.get());
+                dlg.ShowModal();
+                LoadSoftware();
+            }
         });
 
         sizer->Add(sw_list, 1, wxEXPAND | wxALL, 5);
@@ -2325,17 +2353,6 @@ private:
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 
         wxBoxSizer* tb = new wxBoxSizer(wxHORIZONTAL);
-        wxButton* new_btn = new wxButton(panel, wxID_ANY, "New");
-        new_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            ICEditDialog dlg(this, db.get());
-            if (dlg.ShowModal() == wxID_OK) LoadIC();
-        });
-        wxButton* del_btn = new wxButton(panel, wxID_ANY, "Delete");
-        del_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            wxMessageBox("Delete IC - coming soon", "Info", wxOK);
-        });
-        tb->Add(new_btn, 0, wxRIGHT, 5);
-        tb->Add(del_btn, 0);
         tb->AddStretchSpacer();
         sizer->Add(tb, 0, wxALL, 5);
 
@@ -2353,6 +2370,14 @@ private:
             if (state.first == col) state.second = !state.second;
             else { state.first = col; state.second = true; }
             SortListCtrl(ic_list, col, state.second);
+        });
+        ic_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
+            long idx = ic_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+            if (idx >= 0) {
+                ICEditDialog dlg(this, db.get());
+                dlg.ShowModal();
+                LoadIC();
+            }
         });
 
         sizer->Add(ic_list, 1, wxEXPAND | wxALL, 5);
@@ -2382,17 +2407,6 @@ private:
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 
         wxBoxSizer* tb = new wxBoxSizer(wxHORIZONTAL);
-        wxButton* new_btn = new wxButton(panel, wxID_ANY, "New");
-        new_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            ForeignEditDialog dlg(this, db.get());
-            if (dlg.ShowModal() == wxID_OK) LoadForeign();
-        });
-        wxButton* del_btn = new wxButton(panel, wxID_ANY, "Delete");
-        del_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            wxMessageBox("Delete Foreign - coming soon", "Info", wxOK);
-        });
-        tb->Add(new_btn, 0, wxRIGHT, 5);
-        tb->Add(del_btn, 0);
         tb->AddStretchSpacer();
         sizer->Add(tb, 0, wxALL, 5);
 
@@ -2411,6 +2425,14 @@ private:
             if (state.first == col) state.second = !state.second;
             else { state.first = col; state.second = true; }
             SortListCtrl(foreign_list, col, state.second);
+        });
+        foreign_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
+            long idx = foreign_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+            if (idx >= 0) {
+                ForeignEditDialog dlg(this, db.get());
+                dlg.ShowModal();
+                LoadForeign();
+            }
         });
 
         sizer->Add(foreign_list, 1, wxEXPAND | wxALL, 5);

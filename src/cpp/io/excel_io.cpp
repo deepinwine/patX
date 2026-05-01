@@ -19,6 +19,17 @@
 #include <windows.h>
 #endif
 
+// Debug log file
+static std::ofstream debug_log;
+static void DebugLog(const std::string& msg) {
+    if (!debug_log.is_open()) {
+        debug_log.open("patx_import_debug.txt", std::ios::out | std::ios::app);
+    }
+    debug_log << msg << std::endl;
+    debug_log.flush();
+    std::cerr << msg << std::endl;
+}
+
 ExcelIO::ExcelIO() = default;
 ExcelIO::~ExcelIO() = default;
 
@@ -58,53 +69,53 @@ bool ExcelIO::IsCsvFile(const std::string& file_path) {
 // ===================== Sheet Type Detection =====================
 
 SheetType ExcelIO::DetectSheetType(const std::string& sheet_name, const std::vector<std::string>& headers) {
-    // Python version logic: compare OA hits vs Patent hits
-    std::string oa_keywords[] = {"审查意见", "审通", "OA", "通知书", "官方期限", "绝限",
-        "答复期限", "发文日", "审查意见通知书", "OA性质", "我司编号"};
-    std::string patent_keywords[] = {"格科编码", "申请号", "发明名称", "专利类型"};
+    // 简单逻辑：默认专利，匹配专利列→专利，否则匹配OA列→OA
 
-    int oa_hits = 0, patent_hits = 0;
+    // 专利列关键词（中英文）
+    std::vector<std::string> patent_cols = {
+        "格科编码", "格科", "申请号", "发明名称", "提案名称", "授权日", "到期日",
+        "geke_code", "geke", "application_number", "title", "proposal", "authorization", "expiration"
+    };
 
+    // OA列关键词（中英文）
+    std::vector<std::string> oa_cols = {
+        "OA性质", "审查意见摘要", "官方期限", "绝限", "审通", "通知书", "OA类型",
+        "oa_type", "deadline", "official_deadline", "审查意见"
+    };
+
+    // Sheet名检测（优先级最高）
+    std::string lower_sheet = sheet_name;
+    std::transform(lower_sheet.begin(), lower_sheet.end(), lower_sheet.begin(), ::tolower);
+
+    if (lower_sheet.find("pct") != std::string::npos) return SheetType::PCT;
+    if (sheet_name.find("软著") != std::string::npos || sheet_name.find("软件") != std::string::npos || lower_sheet.find("software") != std::string::npos) return SheetType::Software;
+    if (sheet_name.find("集成电路") != std::string::npos || lower_sheet.find("ic") != std::string::npos) return SheetType::IC;
+    if (sheet_name.find("国外") != std::string::npos || sheet_name.find("海外") != std::string::npos || lower_sheet.find("foreign") != std::string::npos) return SheetType::Foreign;
+
+    // 检查专利列（优先级高于OA）
     for (const auto& h : headers) {
-        for (const auto& kw : oa_keywords) {
-            if (h.find(kw) != std::string::npos) { oa_hits++; break; }
-        }
-        for (const auto& kw : patent_keywords) {
-            if (h.find(kw) != std::string::npos) { patent_hits++; break; }
+        std::string lower_h = h;
+        std::transform(lower_h.begin(), lower_h.end(), lower_h.begin(), ::tolower);
+        for (const auto& kw : patent_cols) {
+            std::string lower_kw = kw;
+            std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
+            if (lower_h.find(lower_kw) != std::string::npos) return SheetType::Patent;
         }
     }
 
-    // OA detection: oa_hits >= 2 AND oa_hits > patent_hits
-    bool is_oa = (oa_hits >= 2 && oa_hits > patent_hits);
-
-    // Also check sheet name for OA
-    std::string sn_lower = sheet_name;
-    std::transform(sn_lower.begin(), sn_lower.end(), sn_lower.begin(), ::tolower);
-    if (sn_lower.find("审查意见通知书") != std::string::npos ||
-        sn_lower.find("审通处理") != std::string::npos ||
-        sn_lower.find("oa记录") != std::string::npos ||
-        sn_lower.find("审查意见") != std::string::npos ||
-        (sn_lower.find("oa") != std::string::npos && oa_hits >= 1)) {
-        is_oa = true;
+    // 检查OA列
+    for (const auto& h : headers) {
+        std::string lower_h = h;
+        std::transform(lower_h.begin(), lower_h.end(), lower_h.begin(), ::tolower);
+        for (const auto& kw : oa_cols) {
+            std::string lower_kw = kw;
+            std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
+            if (lower_h.find(lower_kw) != std::string::npos) return SheetType::OA;
+        }
     }
 
-    if (is_oa) return SheetType::OA;
-
-    // Check other types by sheet name
-    if (sheet_name.find("PCT") != std::string::npos || sheet_name.find("pct") != std::string::npos)
-        return SheetType::PCT;
-    if (sheet_name.find("软著") != std::string::npos || sheet_name.find("软件") != std::string::npos)
-        return SheetType::Software;
-    if (sheet_name.find("集成电路") != std::string::npos || sheet_name.find("IC") != std::string::npos)
-        return SheetType::IC;
-    if (sheet_name.find("国外") != std::string::npos || sheet_name.find("海外") != std::string::npos ||
-        sheet_name.find("台湾") != std::string::npos)
-        return SheetType::Foreign;
-
-    // Default: if has 格科编码, it's a patent
-    if (patent_hits >= 1) return SheetType::Patent;
-
-    return SheetType::Patent;  // default fallback
+    // 默认专利
+    return SheetType::Patent;
 }
 
 // ===================== Column Mapping =====================
@@ -469,6 +480,23 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
 
             SheetType type = DetectSheetType(sheet_name, headers);
 
+            // Debug输出
+            std::string type_str;
+            switch (type) {
+                case SheetType::Patent: type_str = "PATENT"; break;
+                case SheetType::OA: type_str = "OA"; break;
+                case SheetType::PCT: type_str = "PCT"; break;
+                case SheetType::Software: type_str = "Software"; break;
+                case SheetType::IC: type_str = "IC"; break;
+                case SheetType::Foreign: type_str = "Foreign"; break;
+                default: type_str = "Unknown"; break;
+            }
+            DebugLog("\n[Import] Sheet '" + sheet_name + "' detected as: " + type_str);
+
+            std::string hdr_str = "Headers: ";
+            for (size_t i = 0; i < headers.size() && i < 10; i++) hdr_str += "[" + headers[i] + "] ";
+            DebugLog(hdr_str);
+
             // Count for this sheet
             int sheet_added = 0, sheet_updated = 0, sheet_skipped = 0;
 
@@ -668,15 +696,35 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                     int field = MapColumnToField(headers[col]);
                     field_map.push_back(field);
                     if (field == 1) code_col = col;  // field 1 = geke_code
+                    DebugLog("  Col " + std::to_string(col) + " [" + headers[col] + "] -> field " + std::to_string(field));
                 }
 
                 // If no geke_code column found, use first column
-                if (code_col < 0) code_col = 0;
+                if (code_col < 0) {
+                    code_col = 0;
+                    DebugLog("  No geke_code column found, using col 0");
+                } else {
+                    DebugLog("  geke_code column = " + std::to_string(code_col) + " (header: " + headers[code_col] + ")");
+                }
 
                 db.BeginBatch();
+                int valid_count = 0, invalid_count = 0;
+                for (uint32_t row = 2; row <= rowCount && row <= 10; row++) {  // debug first 10 rows
+                    std::string geke_code = CleanValue(CellToString(ws.cell(row, code_col + 1).value()));
+                    bool valid = IsValidGekeCode(geke_code);
+                    DebugLog("  Row " + std::to_string(row) + ": geke_code=[" + geke_code + "] valid=" + (valid ? "true" : "false"));
+                    if (valid) valid_count++; else invalid_count++;
+                }
+                DebugLog("  Summary: valid=" + std::to_string(valid_count) + " invalid=" + std::to_string(invalid_count) + " total_rows=" + std::to_string(rowCount));
+
                 for (uint32_t row = 2; row <= rowCount; row++) {
                     std::string geke_code = CleanValue(CellToString(ws.cell(row, code_col + 1).value()));
                     if (!IsValidGekeCode(geke_code)) continue;
+
+                    // Debug first 3 insertions
+                    if (sheet_added < 3) {
+                        DebugLog("  Inserting row " + std::to_string(row) + ": geke_code=" + geke_code);
+                    }
 
                     Patent p;
                     p.geke_code = geke_code;

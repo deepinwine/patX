@@ -456,14 +456,17 @@ int Database::InsertPatent(const Patent& p, bool log_undo) {
         EscapeString(p.class_level2) + "','" +
         EscapeString(p.class_level3) + "')";
 
+    std::cerr << "[InsertPatent] SQL: " << sql.substr(0, 200) << "..." << std::endl;
     if (Execute(sql)) {
         int id = sqlite3_last_insert_rowid(db_);
+        std::cerr << "[InsertPatent] SUCCESS, id=" << id << std::endl;
         if (log_undo && g_undo_manager) {
             // Log for undo - store the data we just inserted
             g_undo_manager->LogOperation("delete", "patents", id, PatentToJson(p), "");
         }
         return id;
     }
+    std::cerr << "[InsertPatent] FAILED" << std::endl;
     return 0;
 }
 
@@ -530,11 +533,20 @@ std::vector<OARecord> Database::GetOARecords(const std::string& filter_type,
     std::vector<OARecord> results;
     std::string sql = "SELECT * FROM oa_records WHERE 1=1";
 
-    if (filter_type == "All incomplete") {
+    // 日期过滤
+    std::string date_filter;
+    if (filter_type.find("5") != std::string::npos || filter_type.find("五") != std::string::npos) {
+        date_filter = " AND is_completed = 0 AND date(official_deadline) BETWEEN date('now') AND date('now', '+5 days')";
+    } else if (filter_type.find("30") != std::string::npos || filter_type.find("三十") != std::string::npos) {
+        date_filter = " AND is_completed = 0 AND date(official_deadline) BETWEEN date('now') AND date('now', '+30 days')";
+    } else if (filter_type == "All incomplete" || filter_type == "全部未完成" || filter_type.find("incomplete") != std::string::npos) {
         sql += " AND is_completed = 0";
-    } else if (filter_type == "Completed") {
+    } else if (filter_type == "Completed" || filter_type == "已完成") {
         sql += " AND is_completed = 1";
+    } else if (filter_type == "All" || filter_type == "全部" || filter_type.empty()) {
+        // 无过滤
     }
+    sql += date_filter;
 
     if (!handler_filter.empty()) {
         sql += " AND handler = '" + EscapeString(handler_filter) + "'";
