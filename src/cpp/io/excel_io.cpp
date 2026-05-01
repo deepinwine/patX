@@ -27,7 +27,6 @@ static void DebugLog(const std::string& msg) {
     }
     debug_log << msg << std::endl;
     debug_log.flush();
-    std::cerr << msg << std::endl;
 }
 
 ExcelIO::ExcelIO() = default;

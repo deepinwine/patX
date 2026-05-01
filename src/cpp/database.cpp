@@ -456,17 +456,13 @@ int Database::InsertPatent(const Patent& p, bool log_undo) {
         EscapeString(p.class_level2) + "','" +
         EscapeString(p.class_level3) + "')";
 
-    std::cerr << "[InsertPatent] SQL: " << sql.substr(0, 200) << "..." << std::endl;
     if (Execute(sql)) {
         int id = sqlite3_last_insert_rowid(db_);
-        std::cerr << "[InsertPatent] SUCCESS, id=" << id << std::endl;
         if (log_undo && g_undo_manager) {
-            // Log for undo - store the data we just inserted
             g_undo_manager->LogOperation("delete", "patents", id, PatentToJson(p), "");
         }
         return id;
     }
-    std::cerr << "[InsertPatent] FAILED" << std::endl;
     return 0;
 }
 
