@@ -2265,7 +2265,8 @@ private:
         pct_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
             long idx = pct_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
-                PCTEditDialog dlg(this, db.get());
+                int pct_id = pct_list->GetItemData(idx);
+                PCTEditDialog dlg(this, db.get(), pct_id);
                 dlg.ShowModal();
                 LoadPCT();
             }
@@ -2289,6 +2290,7 @@ private:
             pct_list->SetItem(idx, 4, DB_STR(p.title));
             pct_list->SetItem(idx, 5, DB_STR(p.application_status));
             pct_list->SetItem(idx, 6, DB_STR(p.handler));
+            pct_list->SetItemData(idx, p.id);
             row++;
         }
     }
@@ -2320,7 +2322,8 @@ private:
         sw_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
             long idx = sw_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
-                SoftwareEditDialog dlg(this, db.get());
+                int sw_id = sw_list->GetItemData(idx);
+                SoftwareEditDialog dlg(this, db.get(), sw_id);
                 dlg.ShowModal();
                 LoadSoftware();
             }
@@ -2343,6 +2346,7 @@ private:
             sw_list->SetItem(idx, 3, DB_STR(s.current_owner));
             sw_list->SetItem(idx, 4, DB_STR(s.application_status));
             sw_list->SetItem(idx, 5, DB_STR(s.handler));
+            sw_list->SetItemData(idx, s.id);
             row++;
         }
     }
@@ -2374,7 +2378,8 @@ private:
         ic_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
             long idx = ic_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
-                ICEditDialog dlg(this, db.get());
+                int ic_id = ic_list->GetItemData(idx);
+                ICEditDialog dlg(this, db.get(), ic_id);
                 dlg.ShowModal();
                 LoadIC();
             }
@@ -2397,6 +2402,7 @@ private:
             ic_list->SetItem(idx, 3, DB_STR(ic.current_owner));
             ic_list->SetItem(idx, 4, DB_STR(ic.application_status));
             ic_list->SetItem(idx, 5, DB_STR(ic.designer));
+            ic_list->SetItemData(idx, ic.id);
             row++;
         }
     }
@@ -2429,7 +2435,8 @@ private:
         foreign_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
             long idx = foreign_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
-                ForeignEditDialog dlg(this, db.get());
+                int foreign_id = foreign_list->GetItemData(idx);
+                ForeignEditDialog dlg(this, db.get(), foreign_id);
                 dlg.ShowModal();
                 LoadForeign();
             }
@@ -2453,6 +2460,7 @@ private:
             foreign_list->SetItem(idx, 4, DB_STR(f.owner));
             foreign_list->SetItem(idx, 5, DB_STR(f.patent_status));
             foreign_list->SetItem(idx, 6, DB_STR(f.handler));
+            foreign_list->SetItemData(idx, f.id);
             row++;
         }
     }
