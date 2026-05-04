@@ -34,6 +34,7 @@ struct ParsedOaInfo {
     std::string issue_date;          // 发文日期
     std::string official_deadline;   // 绝限日期
     OaType oa_type;                  // 通知书类型
+    int oa_number;                   // 第几次OA (1, 2, 3...)
     std::string geke_code;           // 格科编码
     std::string patent_title;        // 专利名称
     std::string applicant;           // 申请人
@@ -136,7 +137,24 @@ public:
         for (int i = 0; i < doc->pages(); ++i) {
             std::unique_ptr<poppler::page> page(doc->create_page(i));
             if (page) {
-                full_text += page->text().to_latin1();
+                // Use to_utf8() for proper Chinese character handling
+                auto ustr = page->text();
+                for (size_t j = 0; j < ustr.length(); ++j) {
+                    auto ch = ustr[j];
+                    if (ch < 128) {
+                        full_text += static_cast<char>(ch);
+                    } else {
+                        // UTF-8 encoding for Unicode characters
+                        if (ch < 0x800) {
+                            full_text += static_cast<char>(0xC0 | (ch >> 6));
+                            full_text += static_cast<char>(0x80 | (ch & 0x3F));
+                        } else {
+                            full_text += static_cast<char>(0xE0 | (ch >> 12));
+                            full_text += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+                            full_text += static_cast<char>(0x80 | (ch & 0x3F));
+                        }
+                    }
+                }
                 full_text += "\n";
             }
         }
@@ -173,29 +191,64 @@ private:
     bool ParseOaContent(const std::string& text, ParsedOaInfo& info) {
         // 判断通知书类型
         info.oa_type = DetectOaType(text);
-        
+        info.oa_number = 0;
+
+        // 提取OA次数 (第几次审查意见)
+        if (info.oa_type == OaType::OFFICE_ACTION) {
+            info.oa_number = ExtractOaNumber(text);
+        }
+
         // 提取申请号
         info.application_no = ExtractApplicationNo(text);
         if (info.application_no.empty()) {
             info.error_message = "未找到申请号";
             return false;
         }
-        
+
         // 提取发文日期
         info.issue_date = ExtractIssueDate(text);
         if (info.issue_date.empty()) {
             info.error_message = "未找到发文日期";
             return false;
         }
-        
+
         // 计算绝限日期
         info.official_deadline = CalculateDeadline(text, info.issue_date, info.oa_type);
-        
+
         // 提取其他信息
         info.patent_title = ExtractTitle(text);
         info.applicant = ExtractApplicant(text);
-        
+
         return true;
+    }
+
+    // 中文数字映射
+    int ChineseNumToInt(const std::string& chinese) {
+        static const std::map<std::string, int> num_map = {
+            {"一", 1}, {"二", 2}, {"三", 3}, {"四", 4}, {"五", 5},
+            {"六", 6}, {"七", 7}, {"八", 8}, {"九", 9}, {"十", 10}
+        };
+        auto it = num_map.find(chinese);
+        return it != num_map.end() ? it->second : 0;
+    }
+
+    // 提取 OA 次数 (第几次审查意见)
+    int ExtractOaNumber(const std::string& text) {
+        // Pattern: 第X次审查意见
+        std::regex chinese_pattern("第\s*(一|二|三|四|五|六|七|八|九|十)\s*次\s*审\s*查\s*意\s*见");
+        std::smatch match;
+        if (std::regex_search(text, match, chinese_pattern)) {
+            return ChineseNumToInt(match[1].str());
+        }
+
+        // Pattern: 第N次审查意见 (数字)
+        std::regex digit_pattern("第\s*(\d+)\s*次\s*审\s*查\s*意\s*见");
+        if (std::regex_search(text, match, digit_pattern)) {
+            return std::stoi(match[1].str());
+        }
+
+        // 默认第一次
+        return 1;
     }
     
     // 检测 OA 类型

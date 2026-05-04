@@ -68,20 +68,6 @@ bool ExcelIO::IsCsvFile(const std::string& file_path) {
 // ===================== Sheet Type Detection =====================
 
 SheetType ExcelIO::DetectSheetType(const std::string& sheet_name, const std::vector<std::string>& headers) {
-    // 简单逻辑：默认专利，匹配专利列→专利，否则匹配OA列→OA
-
-    // 专利列关键词（中英文）
-    std::vector<std::string> patent_cols = {
-        "格科编码", "格科", "申请号", "发明名称", "提案名称", "授权日", "到期日",
-        "geke_code", "geke", "application_number", "title", "proposal", "authorization", "expiration"
-    };
-
-    // OA列关键词（中英文）
-    std::vector<std::string> oa_cols = {
-        "OA性质", "审查意见摘要", "官方期限", "绝限", "审通", "通知书", "OA类型",
-        "oa_type", "deadline", "official_deadline", "审查意见"
-    };
-
     // Sheet名检测（优先级最高）
     std::string lower_sheet = sheet_name;
     std::transform(lower_sheet.begin(), lower_sheet.end(), lower_sheet.begin(), ::tolower);
@@ -90,28 +76,46 @@ SheetType ExcelIO::DetectSheetType(const std::string& sheet_name, const std::vec
     if (sheet_name.find("软著") != std::string::npos || sheet_name.find("软件") != std::string::npos || lower_sheet.find("software") != std::string::npos) return SheetType::Software;
     if (sheet_name.find("集成电路") != std::string::npos || lower_sheet.find("ic") != std::string::npos) return SheetType::IC;
     if (sheet_name.find("国外") != std::string::npos || sheet_name.find("海外") != std::string::npos || lower_sheet.find("foreign") != std::string::npos) return SheetType::Foreign;
+    if (sheet_name.find("OA") != std::string::npos || sheet_name.find("oa") != std::string::npos || lower_sheet.find("审查意见") != std::string::npos) return SheetType::OA;
 
-    // 检查专利列（优先级高于OA）
+    // 计算专利和OA的匹配分数（而非优先级）
+    int patent_hits = 0;
+    int oa_hits = 0;
+
+    // OA专有关键词（权重高，表示一定是OA表）
+    std::vector<std::string> oa_strong = {"OA性质", "审查意见摘要", "官方期限", "绝限", "审通", "通知书",
+        "oa_type", "official_deadline", "审查意见", "发文日", "答复", "期限"};
+    // 专利专有关键词
+    std::vector<std::string> patent_strong = {"格科编码", "申请号", "发明名称", "提案名称", "授权日", "到期日",
+        "geke_code", "application_number", "proposal", "authorization", "expiration"};
+    // 通用关键词（两边都可能匹配）
+    std::vector<std::string> common_cols = {"名称", "处理人", "状态", "备注", "类型",
+        "title", "handler", "status", "note", "type"};
+
     for (const auto& h : headers) {
         std::string lower_h = h;
         std::transform(lower_h.begin(), lower_h.end(), lower_h.begin(), ::tolower);
-        for (const auto& kw : patent_cols) {
+
+        for (const auto& kw : oa_strong) {
             std::string lower_kw = kw;
             std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
-            if (lower_h.find(lower_kw) != std::string::npos) return SheetType::Patent;
+            if (lower_h.find(lower_kw) != std::string::npos) { oa_hits += 3; break; }
+        }
+        for (const auto& kw : patent_strong) {
+            std::string lower_kw = kw;
+            std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
+            if (lower_h.find(lower_kw) != std::string::npos) { patent_hits += 2; break; }
+        }
+        for (const auto& kw : common_cols) {
+            std::string lower_kw = kw;
+            std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
+            if (lower_h.find(lower_kw) != std::string::npos) { patent_hits++; oa_hits++; break; }
         }
     }
 
-    // 检查OA列
-    for (const auto& h : headers) {
-        std::string lower_h = h;
-        std::transform(lower_h.begin(), lower_h.end(), lower_h.begin(), ::tolower);
-        for (const auto& kw : oa_cols) {
-            std::string lower_kw = kw;
-            std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
-            if (lower_h.find(lower_kw) != std::string::npos) return SheetType::OA;
-        }
-    }
+    if (oa_hits > patent_hits) return SheetType::OA;
+    if (patent_hits > 0) return SheetType::Patent;
+    if (oa_hits > 0) return SheetType::OA;
 
     // 默认专利
     return SheetType::Patent;
@@ -183,7 +187,10 @@ int ExcelIO::MapOAColumnToField(const std::string& column_name) {
     if (column_name.find("我司编号") != std::string::npos || column_name.find("格科编码") != std::string::npos ||
         column_name == "编号") return 1;
     if (column_name.find("专利名称") != std::string::npos) return 2;
-    if (column_name.find("OA性质") != std::string::npos || column_name.find("性质") != std::string::npos) return 3;
+    // OA性质 = OA类型 (5-OA, 驳回, 授权等)
+    if (column_name == "OA性质" || column_name.find("OA类型") != std::string::npos) return 3;
+    // 答辩性质/答复性质 = 进度状态
+    if (column_name.find("答辩性质") != std::string::npos || column_name.find("答复性质") != std::string::npos) return 6;
     if (column_name.find("官方期限") != std::string::npos || column_name.find("期限") != std::string::npos) return 4;
     if (column_name.find("处理人") != std::string::npos) return 5;
     if (column_name.find("进度") != std::string::npos || column_name.find("状态") != std::string::npos) return 6;
