@@ -74,7 +74,7 @@ private:
         patents.reserve(count);
         
         const std::vector<std::string> applicants = {
-            "格科微电子", "华为", "小米", "OPPO", "vivo", 
+            "科技公司A", "华为", "小米", "OPPO", "vivo", 
             "中兴", "联想", "阿里巴巴", "腾讯", "百度"
         };
         
@@ -90,7 +90,7 @@ private:
             patx::Patent p;
             memset(&p, 0, sizeof(p));
             
-            // 格科编码: GK + 年份 + 序号
+            // 编码: GK + 年份 + 序号
             char geke[16];
             snprintf(geke, sizeof(geke), "GK%04d%05d", 2020 + (i % 6), i);
             strncpy(p.geke_code, geke, sizeof(p.geke_code) - 1);
@@ -378,7 +378,7 @@ private:
             
             for (int i = 0; i < searches; ++i) {
                 index.SearchMulti(
-                    "格科微电子",
+                    "科技公司A",
                     "发明专利",
                     "2020-01-01",
                     "2025-12-31",
@@ -418,7 +418,7 @@ private:
         
         // 2. 执行搜索
         for (int i = 0; i < 100; ++i) {
-            index.SearchMulti("格科微电子", "发明专利", "", "", "");
+            index.SearchMulti("科技公司A", "发明专利", "", "", "");
         }
         
         // 3. 更新记录

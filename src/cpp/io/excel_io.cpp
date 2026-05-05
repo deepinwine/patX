@@ -86,7 +86,7 @@ SheetType ExcelIO::DetectSheetType(const std::string& sheet_name, const std::vec
     std::vector<std::string> oa_strong = {"OA性质", "审查意见摘要", "官方期限", "绝限", "审通", "通知书",
         "oa_type", "official_deadline", "审查意见", "发文日", "答复", "期限"};
     // 专利专有关键词
-    std::vector<std::string> patent_strong = {"格科编码", "申请号", "发明名称", "提案名称", "授权日", "到期日",
+    std::vector<std::string> patent_strong = {"我司编码", "内部编码", "申请号", "发明名称", "提案名称", "授权日", "到期日",
         "geke_code", "application_number", "proposal", "authorization", "expiration"};
     // 通用关键词（两边都可能匹配）
     std::vector<std::string> common_cols = {"名称", "处理人", "状态", "备注", "类型",
@@ -125,9 +125,9 @@ SheetType ExcelIO::DetectSheetType(const std::string& sheet_name, const std::vec
 
 int ExcelIO::MapColumnToField(const std::string& column_name) {
     // Patent columns (matching Python version)
-    // 格科编码 申请号 提案名称 发明名称 原申请人 现申请人 申请状态 关联案信息 缴费状态
+    // 我司编码 申请号 提案名称 发明名称 原申请人 现申请人 申请状态 关联案信息 缴费状态
     // 研发项目 一级（新） 二级（新） 三级（新） 四级（新） 标签 具体内容 重要级 立案日
-    // 申请日 授权日 技术交底书撰写人 研发部门 发明人 格科处理人 类型 事务所
+    // 申请日 授权日 技术交底书撰写人 研发部门 发明人 处理人 类型 事务所
     // 代理人编码 代理人 备注 无形资产评估 内部研发项目 技术路线 项目ID
     // 1st OA 2nd OA 3rd OA 4th OA 5OA 复审 浦东资助情况 PCT提醒
 
@@ -137,7 +137,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 15=proposal_name, 16=original_applicant, 17=authorization_date,
     // 18=expiration_date, 19=rd_department, 20=agency_firm
 
-    if (column_name.find("格科编码") != std::string::npos) return 1;
+    if (column_name.find("我司编码") != std::string::npos || column_name.find("内部编码") != std::string::npos ||
+        column_name.find("格科编码") != std::string::npos) return 1;
     if (column_name.find("申请号") != std::string::npos && column_name.find("PCT") == std::string::npos &&
         column_name.find("国家") == std::string::npos && column_name.find("国内") == std::string::npos) return 2;
     if (column_name.find("提案名称") != std::string::npos) return 15;
@@ -158,9 +159,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     if (column_name.find("一级") != std::string::npos && column_name.find("分类") != std::string::npos) return 9;
     if (column_name.find("二级") != std::string::npos && column_name.find("分类") != std::string::npos) return 10;
     if (column_name.find("三级") != std::string::npos && column_name.find("分类") != std::string::npos) return 11;
-    if (column_name.find("处理人") != std::string::npos || column_name.find("格科处理人") != std::string::npos ||
-        column_name.find("负责人") != std::string::npos || column_name.find("IPR") != std::string::npos ||
-        column_name.find("经办人") != std::string::npos) return 13;
+    if (column_name.find("处理人") != std::string::npos || column_name.find("负责人") != std::string::npos ||
+        column_name.find("IPR") != std::string::npos || column_name.find("经办人") != std::string::npos) return 13;
     if (column_name.find("研发部门") != std::string::npos) return 19;
     if (column_name.find("事务所") != std::string::npos || column_name.find("代理") != std::string::npos) return 20;
     if (column_name.find("备注") != std::string::npos || column_name.find("具体内容") != std::string::npos) return 14;
@@ -168,7 +168,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // English fallback
     std::string lower = column_name;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (lower.find("geke") != std::string::npos) return 1;
+    if (lower.find("code") != std::string::npos || lower.find("geke") != std::string::npos) return 1;
     if (lower.find("application") != std::string::npos && lower.find("number") != std::string::npos) return 2;
     if (lower.find("title") != std::string::npos || lower.find("name") != std::string::npos) return 3;
     if (lower.find("applicant") != std::string::npos) return 4;
@@ -184,8 +184,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
 }
 
 int ExcelIO::MapOAColumnToField(const std::string& column_name) {
-    if (column_name.find("我司编号") != std::string::npos || column_name.find("格科编码") != std::string::npos ||
-        column_name == "编号") return 1;
+    if (column_name.find("我司编号") != std::string::npos || column_name.find("我司编码") != std::string::npos ||
+        column_name.find("内部编码") != std::string::npos || column_name == "编号") return 1;
     if (column_name.find("专利名称") != std::string::npos) return 2;
     // OA性质 = OA类型 (5-OA, 驳回, 授权等)
     if (column_name == "OA性质" || column_name.find("OA类型") != std::string::npos) return 3;
@@ -200,7 +200,7 @@ int ExcelIO::MapOAColumnToField(const std::string& column_name) {
 
     std::string lower = column_name;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (lower.find("geke") != std::string::npos) return 1;
+    if (lower.find("code") != std::string::npos || lower.find("geke") != std::string::npos) return 1;
     if (lower.find("title") != std::string::npos) return 2;
     if (lower.find("deadline") != std::string::npos) return 4;
     if (lower.find("handler") != std::string::npos) return 5;
@@ -214,7 +214,8 @@ int ExcelIO::MapOAColumnToField(const std::string& column_name) {
 //   5=title, 6=application_status, 7=filing_date, 8=application_date, 9=priority_date,
 //   10=inventor, 11=handler
 int ExcelIO::MapPCTColumnToField(const std::string& column_name) {
-    if (column_name.find("格科编码") != std::string::npos) return 1;
+    if (column_name.find("我司编码") != std::string::npos || column_name.find("内部编码") != std::string::npos ||
+        column_name.find("格科编码") != std::string::npos) return 1;
     if (column_name.find("国内同源") != std::string::npos) return 2;
     if (column_name.find("国内申请号") != std::string::npos) return 2; // also domestic source
     if (column_name.find("申请号") != std::string::npos && column_name.find("国家") == std::string::npos) return 3;
@@ -231,7 +232,7 @@ int ExcelIO::MapPCTColumnToField(const std::string& column_name) {
 
     std::string lower = column_name;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (lower.find("geke") != std::string::npos) return 1;
+    if (lower.find("code") != std::string::npos || lower.find("geke") != std::string::npos) return 1;
     if (lower.find("priority") != std::string::npos) return 9;
     if (lower.find("inventor") != std::string::npos) return 10;
     if (lower.find("handler") != std::string::npos) return 11;

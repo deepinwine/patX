@@ -23,7 +23,7 @@ impl ValidationResult {
     }
 }
 
-/// 校验格科编码
+/// 校验编码
 pub fn validate_geke_code(code: &[u8]) -> bool {
     if code.is_empty() || code.len() > 16 {
         return false;

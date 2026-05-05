@@ -1723,6 +1723,9 @@ private:
             }
             row++;
         }
+        // Default sort by geke_code (column 0) ascending with smart numeric comparison
+        sort_state[patent_list] = {0, true};
+        SortListCtrl(patent_list, 0, true);
         status_bar->SetStatusText(wxString::Format("Domestic Patents: %d records", row));
     }
 
@@ -1772,6 +1775,8 @@ private:
             }
             row++;
         }
+        sort_state[patent_list] = {0, true};
+        SortListCtrl(patent_list, 0, true);
         status_bar->SetStatusText(wxString::Format("Domestic Patents: %d records", row));
     }
 
@@ -1809,6 +1814,8 @@ private:
             }
             row++;
         }
+        sort_state[patent_list] = {0, true};
+        SortListCtrl(patent_list, 0, true);
         status_bar->SetStatusText(wxString::Format("Search: %d results", row));
     }
 
@@ -3000,7 +3007,7 @@ private:
                         wxString::FromUTF8(oa.oa_type.c_str()),
                         wxString::FromUTF8(info.issue_date.c_str()),
                         wxString::FromUTF8(info.official_deadline.c_str())) :
-                    wxString::Format(UTF8_STR("检测到OA通知书:\n\n格科编码: %s\n申请号: %s\nOA类型: %s\n发文日: %s\n绝限日: %s\n\n是否创建OA记录?"),
+                    wxString::Format(UTF8_STR("检测到OA通知书:\n\n编码: %s\n申请号: %s\nOA类型: %s\n发文日: %s\n绝限日: %s\n\n是否创建OA记录?"),
                         wxString::FromUTF8(geke_code.c_str()),
                         wxString::FromUTF8(info.application_no.c_str()),
                         wxString::FromUTF8(oa.oa_type.c_str()),
@@ -3133,7 +3140,7 @@ private:
                 wxString::FromUTF8(app_no.c_str()),
                 wxString::FromUTF8(issue_date.c_str()),
                 geke_code.empty() ? "(not found)" : wxString::FromUTF8(geke_code.c_str())) :
-            wxString::Format(UTF8_STR("检测到OA通知书。\n\n申请号: %s\n发文日: %s\n格科编码: %s\n\n是否创建OA记录?"),
+            wxString::Format(UTF8_STR("检测到OA通知书。\n\n申请号: %s\n发文日: %s\n编码: %s\n\n是否创建OA记录?"),
                 wxString::FromUTF8(app_no.c_str()),
                 wxString::FromUTF8(issue_date.c_str()),
                 geke_code.empty() ? UTF8_STR("(未找到)") : wxString::FromUTF8(geke_code.c_str()));

@@ -35,7 +35,7 @@ struct ParsedOaInfo {
     std::string official_deadline;   // 绝限日期
     OaType oa_type;                  // 通知书类型
     int oa_number;                   // 第几次OA (1, 2, 3...)
-    std::string geke_code;           // 格科编码
+    std::string geke_code;           // 我司编码
     std::string patent_title;        // 专利名称
     std::string applicant;           // 申请人
     std::string full_text;           // 全文内容

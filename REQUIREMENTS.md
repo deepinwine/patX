@@ -44,7 +44,7 @@
 ### 1. 专利数据结构 (C++)
 ```cpp
 struct Patent {
-    char geke_code[16];        // 格科编码
+    char geke_code[16];        // 编码
     char application_no[32];   // 申请号
     char title[256];           // 发明名称
     char applicant[128];       // 申请人

@@ -363,7 +363,7 @@ std::vector<Patent> Database::GetPatents(const std::string& status_filter,
     if (!handler_filter.empty()) {
         sql += " AND geke_handler = '" + EscapeString(handler_filter) + "'";
     }
-    sql += " ORDER BY id DESC";
+    sql += " ORDER BY geke_code COLLATE NOCASE";
 
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {

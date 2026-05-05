@@ -125,7 +125,7 @@ patx import <文件路径> [--format excel|csv|json]
 patx export <输出路径> [--format excel|csv|json] [--filter <条件>]
 
 # 检索专利
-patx search --geke <格课编码>
+patx search --geke <编码>
 patx search --applicant <申请人>
 patx search --keyword <关键词>
 
@@ -148,7 +148,7 @@ patx import data/patents_2024.xlsx
 # 导入 CSV 数据
 patx import data/patents.csv --format csv
 
-# 按格课编码检索
+# 按编码检索
 patx search --geke GC-0001
 
 # 按申请人检索
@@ -195,7 +195,7 @@ void patx_free_string(char* s);
 | 操作 | Python 版本 | patX 版本 | 提升倍数 |
 |------|------------|-----------|----------|
 | 精确检索 (申请号) | 15ms | 0.15ms | 100x |
-| 前缀检索 (格课编码) | 25ms | 0.3ms | 83x |
+| 前缀检索 (编码) | 25ms | 0.3ms | 83x |
 | 模糊检索 (标题) | 150ms | 5ms | 30x |
 | 组合条件检索 | 200ms | 3ms | 67x |
 
