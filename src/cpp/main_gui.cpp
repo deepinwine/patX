@@ -44,21 +44,48 @@ using patx::OaType;
 // Convert UTF-8 std::string from database to wxString
 #define DB_STR(s) wxString::FromUTF8(s.c_str())
 
-// Smart string comparison: tries numeric sort first, falls back to string
-static int SmartCompare(const wxString& a, const wxString& b, bool ascending) {
+// Natural sort comparison: splits into letter + digit segments,
+// sorts letter parts lexicographically, digit parts numerically.
+// e.g. GC-156 < GC-1560 < GK-001 < GK-2
+static int NaturalCompare(const wxString& a, const wxString& b) {
     if (a.IsEmpty() && b.IsEmpty()) return 0;
-    if (a.IsEmpty()) return ascending ? 1 : -1;
-    if (b.IsEmpty()) return ascending ? -1 : 1;
+    if (a.IsEmpty()) return 1;
+    if (b.IsEmpty()) return -1;
 
-    // Try to parse both as numbers
-    double da = 0, db = 0;
-    bool a_num = a.ToDouble(&da);
-    bool b_num = b.ToDouble(&db);
+    size_t ia = 0, ib = 0;
+    while (ia < (size_t)a.Len() && ib < (size_t)b.Len()) {
+        wxChar ca = a[ia], cb = b[ib];
+        bool a_digit = (ca >= '0' && ca <= '9');
+        bool b_digit = (cb >= '0' && cb <= '9');
 
-    if (a_num && b_num) {
-        return ascending ? (da < db ? -1 : da > db ? 1 : 0) : (da > db ? 1 : da < db ? -1 : 0);
+        if (a_digit && b_digit) {
+            // Both digits: parse full numbers and compare numerically
+            long na = 0, nb = 0;
+            while (ia < (size_t)a.Len() && a[ia] >= '0' && a[ia] <= '9')
+                na = na * 10 + (a[ia++] - '0');
+            while (ib < (size_t)b.Len() && b[ib] >= '0' && b[ib] <= '9')
+                nb = nb * 10 + (b[ib++] - '0');
+            if (na != nb) return na < nb ? -1 : 1;
+        } else if (a_digit != b_digit) {
+            // Digit vs letter: letter comes first
+            return b_digit ? 1 : -1;
+        } else {
+            // Both letters: case-insensitive compare
+            if (ca != cb) {
+                wxChar la = wxTolower(ca), lb = wxTolower(cb);
+                if (la != lb) return la < lb ? -1 : 1;
+            }
+            ia++; ib++;
+        }
     }
-    return ascending ? a.Cmp(b) : b.Cmp(a);
+    // One string is a prefix of the other
+    return (ia >= (size_t)a.Len() && ib >= (size_t)b.Len()) ? 0 :
+           (ia >= (size_t)a.Len()) ? -1 : 1;
+}
+
+static int SmartCompare(const wxString& a, const wxString& b, bool ascending) {
+    int cmp = NaturalCompare(a, b);
+    return ascending ? cmp : -cmp;
 }
 
 // Generic sort helper for wxListCtrl - sorts by column text, preserves item data
