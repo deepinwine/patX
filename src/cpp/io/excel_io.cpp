@@ -214,7 +214,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
         column_name.find("四级(新)") != std::string::npos ||
         (column_name.find("四级") != std::string::npos && column_name.find("分类") != std::string::npos)) return 24;
     if (column_name == "标签" || column_name.find("标签") != std::string::npos) return 25;
-    if (column_name.find("处理人") != std::string::npos || column_name.find("负责人") != std::string::npos ||
+    if (column_name.find("格科处理人") != std::string::npos ||
+        column_name.find("处理人") != std::string::npos || column_name.find("负责人") != std::string::npos ||
         column_name.find("IPR") != std::string::npos || column_name.find("经办人") != std::string::npos) return 13;
     if (column_name.find("研发部门") != std::string::npos) return 19;
     if (column_name.find("事务所") != std::string::npos || column_name.find("代理") != std::string::npos) return 20;
