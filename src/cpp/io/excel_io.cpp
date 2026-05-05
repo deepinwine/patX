@@ -162,7 +162,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 5=application_date, 6=patent_type, 7=application_status, 8=inventor,
     // 9-11=class_level1-3, 12=patent_level, 13=geke_handler, 14=notes,
     // 15=proposal_name, 16=original_applicant, 17=authorization_date,
-    // 18=expiration_date, 19=rd_department, 20=agency_firm, 21=related_case_info, 22=fee_status, 23=rd_project, 24=class_level4
+    // 18=expiration_date, 19=rd_department, 20=agency_firm, 21=related_case_info,
+    // 22=fee_status, 23=rd_project, 24=class_level4, 25=tag
 
     // 公司内部编号列。格科场景中 Excel 的“格科编码”就是 app 里的“编号”。
     // 代理所/代理人编码不能映射到 geke_code，否则会覆盖公司编号。
@@ -209,6 +210,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     if (column_name.find("四级（新）") != std::string::npos ||
         column_name.find("四级(新)") != std::string::npos ||
         (column_name.find("四级") != std::string::npos && column_name.find("分类") != std::string::npos)) return 24;
+    if (column_name == "标签" || column_name.find("标签") != std::string::npos) return 25;
     if (column_name.find("处理人") != std::string::npos || column_name.find("负责人") != std::string::npos ||
         column_name.find("IPR") != std::string::npos || column_name.find("经办人") != std::string::npos) return 13;
     if (column_name.find("研发部门") != std::string::npos) return 19;
@@ -488,6 +490,10 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 24:
                     if (p.notes.empty()) p.notes = "四级（新）: " + value;
                     else p.notes += "; 四级（新）: " + value;
+                    break;
+                case 25:
+                    if (p.notes.empty()) p.notes = "标签: " + value;
+                    else p.notes += "; 标签: " + value;
                     break;
             }
         }
@@ -885,6 +891,10 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 24:
                                 if (p.notes.empty()) p.notes = "四级（新）: " + value;
                                 else p.notes += "; 四级（新）: " + value;
+                                break;
+                            case 25:
+                                if (p.notes.empty()) p.notes = "标签: " + value;
+                                else p.notes += "; 标签: " + value;
                                 break;
                         }
                     }
