@@ -151,11 +151,21 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 18=expiration_date, 19=rd_department, 20=agency_firm
 
     // 编码列识别：支持任意公司（华为编码、小米编码等）及通用名称
-    if (column_name == "编码" || column_name == "编号" || column_name == "专利编号" ||
+    // 优先匹配明确关键词，排除"事务所编号"等干扰列
+    if (column_name == "我司编码" || column_name == "内部编码" || column_name == "专利编号" ||
         column_name.find("我司编码") != std::string::npos ||
         column_name.find("内部编码") != std::string::npos ||
-        column_name.find("格科编码") != std::string::npos ||
-        (column_name.find("编码") != std::string::npos && column_name.find("分类编码") == std::string::npos)) return 1;
+        column_name.find("格科编码") != std::string::npos) return 1;
+    // 通用"编号"匹配，排除事务所编号等干扰列
+    if (column_name == "编号" ||
+        (column_name.find("编号") != std::string::npos &&
+         column_name.find("事务所编号") == std::string::npos &&
+         column_name.find("代理编号") == std::string::npos &&
+         column_name.find("案件编号") == std::string::npos)) return 1;
+    // 编码通用匹配
+    if (column_name.find("编码") != std::string::npos &&
+        column_name.find("分类编码") == std::string::npos &&
+        column_name.find("事务所编码") == std::string::npos) return 1;
     if (column_name.find("申请号") != std::string::npos && column_name.find("PCT") == std::string::npos &&
         column_name.find("国家") == std::string::npos && column_name.find("国内") == std::string::npos) return 2;
     if (column_name.find("提案名称") != std::string::npos) return 15;
@@ -201,11 +211,21 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
 }
 
 int ExcelIO::MapOAColumnToField(const std::string& column_name) {
-    if (column_name == "编码" || column_name == "编号" || column_name == "专利编号" ||
-        column_name.find("我司编号") != std::string::npos ||
-        column_name.find("我司编码") != std::string::npos ||
-        column_name.find("内部编码") != std::string::npos ||
-        (column_name.find("编码") != std::string::npos && column_name.find("分类编码") == std::string::npos)) return 1;
+    // 编码列识别：优先精确匹配，排除事务所编号等
+    if (column_name == "我司编号" || column_name == "我司编码" || column_name == "内部编码" ||
+        column_name == "编码" || column_name == "专利编号" ||
+        (column_name.find("我司编号") != std::string::npos) ||
+        (column_name.find("我司编码") != std::string::npos) ||
+        (column_name.find("内部编码") != std::string::npos)) return 1;
+    // 通用"编号"匹配，但排除"事务所编号"等
+    if (column_name == "编号" ||
+        (column_name.find("编号") != std::string::npos &&
+         column_name.find("事务所编号") == std::string::npos &&
+         column_name.find("代理编号") == std::string::npos)) return 1;
+    // 编码通用匹配，排除分类编码
+    if (column_name.find("编码") != std::string::npos &&
+        column_name.find("分类编码") == std::string::npos &&
+        column_name.find("事务所编码") == std::string::npos) return 1;
     if (column_name.find("专利名称") != std::string::npos) return 2;
     // OA性质 = OA类型 (5-OA, 驳回, 授权等)
     if (column_name == "OA性质" || column_name.find("OA类型") != std::string::npos) return 3;
@@ -234,12 +254,18 @@ int ExcelIO::MapOAColumnToField(const std::string& column_name) {
 //   5=title, 6=application_status, 7=filing_date, 8=application_date, 9=priority_date,
 //   10=inventor, 11=handler
 int ExcelIO::MapPCTColumnToField(const std::string& column_name) {
-    // 编码列识别：支持任意公司及通用名称
-    if (column_name == "编码" || column_name == "编号" || column_name == "专利编号" ||
+    // 编码列识别：优先明确关键词，排除事务所编号等
+    if (column_name == "我司编码" || column_name == "内部编码" || column_name == "专利编号" ||
         column_name.find("我司编码") != std::string::npos ||
         column_name.find("内部编码") != std::string::npos ||
-        column_name.find("格科编码") != std::string::npos ||
-        (column_name.find("编码") != std::string::npos && column_name.find("分类编码") == std::string::npos)) return 1;
+        column_name.find("格科编码") != std::string::npos) return 1;
+    if (column_name == "编号" ||
+        (column_name.find("编号") != std::string::npos &&
+         column_name.find("事务所编号") == std::string::npos &&
+         column_name.find("代理编号") == std::string::npos)) return 1;
+    if (column_name.find("编码") != std::string::npos &&
+        column_name.find("分类编码") == std::string::npos &&
+        column_name.find("事务所编码") == std::string::npos) return 1;
     if (column_name.find("国内同源") != std::string::npos) return 2;
     if (column_name.find("国内申请号") != std::string::npos) return 2; // also domestic source
     if (column_name.find("申请号") != std::string::npos && column_name.find("国家") == std::string::npos) return 3;
