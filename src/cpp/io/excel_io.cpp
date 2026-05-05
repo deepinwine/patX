@@ -163,7 +163,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 9-11=class_level1-3, 12=patent_level, 13=geke_handler, 14=notes,
     // 15=proposal_name, 16=original_applicant, 17=authorization_date,
     // 18=expiration_date, 19=rd_department, 20=agency_firm, 21=related_case_info,
-    // 22=fee_status, 23=rd_project, 24=class_level4, 25=tag, 26=details, 27=filing_date
+    // 22=fee_status, 23=rd_project, 24=class_level4, 25=tag, 26=details,
+    // 27=filing_date, 28=disclosure_writer
 
     // 公司内部编号列。格科场景中 Excel 的“格科编码”就是 app 里的“编号”。
     // 代理所/代理人编码不能映射到 geke_code，否则会覆盖公司编号。
@@ -195,6 +196,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     if (column_name.find("立案日") != std::string::npos) return 27;
     if (column_name.find("申请日") != std::string::npos || column_name.find("申请日期") != std::string::npos) return 5;
     if (column_name.find("授权日") != std::string::npos || column_name.find("授权日期") != std::string::npos) return 17;
+    if (column_name.find("技术交底书撰写人") != std::string::npos ||
+        column_name.find("交底书撰写人") != std::string::npos) return 28;
     if (column_name.find("到期日") != std::string::npos || column_name.find("届满") != std::string::npos) return 18;
     if (column_name.find("类型") != std::string::npos || column_name.find("专利类型") != std::string::npos) return 6;
     if (column_name.find("发明人") != std::string::npos || column_name.find("设计人") != std::string::npos) return 8;
@@ -503,6 +506,10 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 27:
                     if (p.notes.empty()) p.notes = "立案日: " + ParseDate(value);
                     else p.notes += "; 立案日: " + ParseDate(value);
+                    break;
+                case 28:
+                    if (p.notes.empty()) p.notes = "技术交底书撰写人: " + value;
+                    else p.notes += "; 技术交底书撰写人: " + value;
                     break;
             }
         }
@@ -912,6 +919,10 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 27:
                                 if (p.notes.empty()) p.notes = "立案日: " + ParseDate(value);
                                 else p.notes += "; 立案日: " + ParseDate(value);
+                                break;
+                            case 28:
+                                if (p.notes.empty()) p.notes = "技术交底书撰写人: " + value;
+                                else p.notes += "; 技术交底书撰写人: " + value;
                                 break;
                         }
                     }
