@@ -165,7 +165,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 18=expiration_date, 19=rd_department, 20=agency_firm, 21=related_case_info,
     // 22=fee_status, 23=rd_project, 24=class_level4, 25=tag, 26=details,
     // 27=filing_date, 28=disclosure_writer, 29=agent_code, 30=agent_name,
-    // 31=intangible_asset_eval, 32=internal_rd_project, 33=technology_route
+    // 31=intangible_asset_eval, 32=internal_rd_project, 33=technology_route, 34=project_id,
+    // 35-39=oa_reminders, 40=reexamination, 41=pudong_subsidy, 42=pct_reminder
 
     // 公司内部编号列。格科场景中 Excel 的“格科编码”就是 app 里的“编号”。
     // 代理所/代理人编码不能映射到 geke_code，否则会覆盖公司编号。
@@ -227,6 +228,15 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     if (column_name.find("无形资产评估") != std::string::npos) return 31;
     if (column_name.find("内部研发项目") != std::string::npos) return 32;
     if (column_name.find("技术路线") != std::string::npos) return 33;
+    if (column_name == "项目ID" || column_name == "项目id" || column_name.find("项目ID") != std::string::npos) return 34;
+    if (column_name == "1st OA" || column_name == "1st  OA" || column_name.find("1st") != std::string::npos) return 35;
+    if (column_name == "2nd OA" || column_name.find("2nd") != std::string::npos) return 36;
+    if (column_name == "3rd OA" || column_name.find("3rd") != std::string::npos) return 37;
+    if (column_name == "4th OA" || column_name.find("4th") != std::string::npos) return 38;
+    if (column_name == "5OA" || column_name == "5th OA" || column_name.find("5OA") != std::string::npos || column_name.find("5th") != std::string::npos) return 39;
+    if (column_name.find("复审") != std::string::npos) return 40;
+    if (column_name.find("浦东资助情况") != std::string::npos || column_name.find("浦东资助") != std::string::npos) return 41;
+    if (column_name.find("PCT提醒") != std::string::npos || column_name.find("PCT") != std::string::npos) return 42;
     if (column_name.find("备注") != std::string::npos) return 14;
 
     // English fallback
@@ -538,6 +548,42 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 33:
                     if (p.notes.empty()) p.notes = "技术路线: " + value;
                     else p.notes += "; 技术路线: " + value;
+                    break;
+                case 34:
+                    if (p.notes.empty()) p.notes = "项目ID: " + value;
+                    else p.notes += "; 项目ID: " + value;
+                    break;
+                case 35:
+                    if (p.notes.empty()) p.notes = "1st OA: " + value;
+                    else p.notes += "; 1st OA: " + value;
+                    break;
+                case 36:
+                    if (p.notes.empty()) p.notes = "2nd OA: " + value;
+                    else p.notes += "; 2nd OA: " + value;
+                    break;
+                case 37:
+                    if (p.notes.empty()) p.notes = "3rd OA: " + value;
+                    else p.notes += "; 3rd OA: " + value;
+                    break;
+                case 38:
+                    if (p.notes.empty()) p.notes = "4th OA: " + value;
+                    else p.notes += "; 4th OA: " + value;
+                    break;
+                case 39:
+                    if (p.notes.empty()) p.notes = "5OA: " + value;
+                    else p.notes += "; 5OA: " + value;
+                    break;
+                case 40:
+                    if (p.notes.empty()) p.notes = "复审: " + value;
+                    else p.notes += "; 复审: " + value;
+                    break;
+                case 41:
+                    if (p.notes.empty()) p.notes = "浦东资助情况: " + value;
+                    else p.notes += "; 浦东资助情况: " + value;
+                    break;
+                case 42:
+                    if (p.notes.empty()) p.notes = "PCT提醒: " + value;
+                    else p.notes += "; PCT提醒: " + value;
                     break;
             }
         }
@@ -971,6 +1017,42 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 33:
                                 if (p.notes.empty()) p.notes = "技术路线: " + value;
                                 else p.notes += "; 技术路线: " + value;
+                                break;
+                            case 34:
+                                if (p.notes.empty()) p.notes = "项目ID: " + value;
+                                else p.notes += "; 项目ID: " + value;
+                                break;
+                            case 35:
+                                if (p.notes.empty()) p.notes = "1st OA: " + value;
+                                else p.notes += "; 1st OA: " + value;
+                                break;
+                            case 36:
+                                if (p.notes.empty()) p.notes = "2nd OA: " + value;
+                                else p.notes += "; 2nd OA: " + value;
+                                break;
+                            case 37:
+                                if (p.notes.empty()) p.notes = "3rd OA: " + value;
+                                else p.notes += "; 3rd OA: " + value;
+                                break;
+                            case 38:
+                                if (p.notes.empty()) p.notes = "4th OA: " + value;
+                                else p.notes += "; 4th OA: " + value;
+                                break;
+                            case 39:
+                                if (p.notes.empty()) p.notes = "5OA: " + value;
+                                else p.notes += "; 5OA: " + value;
+                                break;
+                            case 40:
+                                if (p.notes.empty()) p.notes = "复审: " + value;
+                                else p.notes += "; 复审: " + value;
+                                break;
+                            case 41:
+                                if (p.notes.empty()) p.notes = "浦东资助情况: " + value;
+                                else p.notes += "; 浦东资助情况: " + value;
+                                break;
+                            case 42:
+                                if (p.notes.empty()) p.notes = "PCT提醒: " + value;
+                                else p.notes += "; PCT提醒: " + value;
                                 break;
                         }
                     }
