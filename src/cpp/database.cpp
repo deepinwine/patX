@@ -439,12 +439,30 @@ Patent Database::GetPatentByCode(const std::string& geke_code) {
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
         if (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
             p.id = sqlite3_column_int(stmt, 0);
-            p.geke_code = (const char*)sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "";
-            p.title = (const char*)sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
-            p.patent_type = (const char*)sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
-            p.patent_level = (const char*)sqlite3_column_text(stmt, 7) ? (const char*)sqlite3_column_text(stmt, 7) : "";
-            p.geke_handler = (const char*)sqlite3_column_text(stmt, 11) ? (const char*)sqlite3_column_text(stmt, 11) : "";
+            p.geke_code = cs(1);
+            p.application_number = cs(2);
+            p.title = cs(3);
+            p.proposal_name = cs(4);
+            p.application_status = cs(5);
+            p.patent_type = cs(6);
+            p.patent_level = cs(7);
+            p.application_date = cs(8);
+            p.authorization_date = cs(9);
+            p.expiration_date = cs(10);
+            p.geke_handler = cs(11);
+            p.rd_department = cs(12);
+            p.agency_firm = cs(13);
+            p.original_applicant = cs(14);
+            p.current_applicant = cs(15);
+            p.inventor = cs(16);
+            p.notes = cs(17);
+            p.class_level1 = cs(18);
+            p.class_level2 = cs(19);
+            p.class_level3 = cs(20);
         }
         sqlite3_finalize(stmt);
     }
@@ -452,10 +470,11 @@ Patent Database::GetPatentByCode(const std::string& geke_code) {
 }
 
 int Database::InsertPatent(const Patent& p, bool log_undo) {
-    std::string sql = "INSERT INTO patents (geke_code, application_number, title, application_status, patent_type, patent_level, application_date, authorization_date, expiration_date, geke_handler, inventor, class_level1, class_level2, class_level3) VALUES ('" +
+    std::string sql = "INSERT INTO patents (geke_code, application_number, title, proposal_name, application_status, patent_type, patent_level, application_date, authorization_date, expiration_date, geke_handler, rd_department, agency_firm, original_applicant, current_applicant, inventor, notes, class_level1, class_level2, class_level3) VALUES ('" +
         EscapeString(p.geke_code) + "','" +
         EscapeString(p.application_number) + "','" +
         EscapeString(p.title) + "','" +
+        EscapeString(p.proposal_name) + "','" +
         EscapeString(p.application_status) + "','" +
         EscapeString(p.patent_type) + "','" +
         EscapeString(p.patent_level) + "','" +
@@ -463,7 +482,12 @@ int Database::InsertPatent(const Patent& p, bool log_undo) {
         EscapeString(p.authorization_date) + "','" +
         EscapeString(p.expiration_date) + "','" +
         EscapeString(p.geke_handler) + "','" +
+        EscapeString(p.rd_department) + "','" +
+        EscapeString(p.agency_firm) + "','" +
+        EscapeString(p.original_applicant) + "','" +
+        EscapeString(p.current_applicant) + "','" +
         EscapeString(p.inventor) + "','" +
+        EscapeString(p.notes) + "','" +
         EscapeString(p.class_level1) + "','" +
         EscapeString(p.class_level2) + "','" +
         EscapeString(p.class_level3) + "')";
@@ -488,6 +512,7 @@ bool Database::UpdatePatent(int id, const Patent& p, bool log_undo) {
     std::string sql = "UPDATE patents SET " +
         std::string("application_number = '") + EscapeString(p.application_number) + "'," +
         "title = '" + EscapeString(p.title) + "'," +
+        "proposal_name = '" + EscapeString(p.proposal_name) + "'," +
         "application_status = '" + EscapeString(p.application_status) + "'," +
         "patent_type = '" + EscapeString(p.patent_type) + "'," +
         "patent_level = '" + EscapeString(p.patent_level) + "'," +
@@ -495,7 +520,15 @@ bool Database::UpdatePatent(int id, const Patent& p, bool log_undo) {
         "authorization_date = '" + EscapeString(p.authorization_date) + "'," +
         "expiration_date = '" + EscapeString(p.expiration_date) + "'," +
         "geke_handler = '" + EscapeString(p.geke_handler) + "'," +
-        "inventor = '" + EscapeString(p.inventor) + "'" +
+        "rd_department = '" + EscapeString(p.rd_department) + "'," +
+        "agency_firm = '" + EscapeString(p.agency_firm) + "'," +
+        "original_applicant = '" + EscapeString(p.original_applicant) + "'," +
+        "current_applicant = '" + EscapeString(p.current_applicant) + "'," +
+        "inventor = '" + EscapeString(p.inventor) + "'," +
+        "notes = '" + EscapeString(p.notes) + "'," +
+        "class_level1 = '" + EscapeString(p.class_level1) + "'," +
+        "class_level2 = '" + EscapeString(p.class_level2) + "'," +
+        "class_level3 = '" + EscapeString(p.class_level3) + "'" +
         " WHERE id = " + std::to_string(id);
     return Execute(sql);
 }
@@ -519,14 +552,31 @@ std::vector<Patent> Database::SearchPatents(const std::string& keyword) {
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
             Patent p;
             p.id = sqlite3_column_int(stmt, 0);
-            p.geke_code = (const char*)sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "";
-            p.application_number = (const char*)sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
-            p.title = (const char*)sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
-            p.patent_type = (const char*)sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
-            p.patent_level = (const char*)sqlite3_column_text(stmt, 7) ? (const char*)sqlite3_column_text(stmt, 7) : "";
-            p.application_status = (const char*)sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "";
+            p.geke_code = cs(1);
+            p.application_number = cs(2);
+            p.title = cs(3);
+            p.proposal_name = cs(4);
+            p.application_status = cs(5);
+            p.patent_type = cs(6);
+            p.patent_level = cs(7);
+            p.application_date = cs(8);
+            p.authorization_date = cs(9);
+            p.expiration_date = cs(10);
+            p.geke_handler = cs(11);
+            p.rd_department = cs(12);
+            p.agency_firm = cs(13);
+            p.original_applicant = cs(14);
+            p.current_applicant = cs(15);
+            p.inventor = cs(16);
+            p.notes = cs(17);
+            p.class_level1 = cs(18);
+            p.class_level2 = cs(19);
+            p.class_level3 = cs(20);
             results.push_back(p);
         }
         sqlite3_finalize(stmt);

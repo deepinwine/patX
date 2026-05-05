@@ -1520,9 +1520,12 @@ private:
 
         patent_list = new wxListCtrl(splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                       wxLC_REPORT);
-        patent_list->AppendColumn(UTF8_STR("编码"), wxLIST_FORMAT_LEFT, 90);
+        patent_list->AppendColumn(UTF8_STR("编号"), wxLIST_FORMAT_LEFT, 90);
         patent_list->AppendColumn(UTF8_STR("申请号"), wxLIST_FORMAT_LEFT, 130);
+        patent_list->AppendColumn(UTF8_STR("提案名称"), wxLIST_FORMAT_LEFT, 160);
         patent_list->AppendColumn(UTF8_STR("发明名称"), wxLIST_FORMAT_LEFT, 220);
+        patent_list->AppendColumn(UTF8_STR("原申请人"), wxLIST_FORMAT_LEFT, 140);
+        patent_list->AppendColumn(UTF8_STR("现申请人"), wxLIST_FORMAT_LEFT, 140);
         patent_list->AppendColumn(UTF8_STR("类型"), wxLIST_FORMAT_LEFT, 70);
         patent_list->AppendColumn(UTF8_STR("专利等级"), wxLIST_FORMAT_LEFT, 90);
         patent_list->AppendColumn(UTF8_STR("申请状态"), wxLIST_FORMAT_LEFT, 80);
@@ -1559,10 +1562,11 @@ private:
             int col = e.GetColumn();
             // 列到数据库字段的映射
             std::vector<std::string> col_to_field = {
-                "geke_code", "application_number", "title", "patent_type",
-                "patent_level", "application_status", "class_level1", "class_level2",
-                "class_level3", "geke_handler", "inventor", "application_date",
-                "authorization_date", "expiration_date", "agency_firm", "notes"
+                "geke_code", "application_number", "proposal_name", "title",
+                "original_applicant", "current_applicant", "patent_type", "patent_level",
+                "application_status", "class_level1", "class_level2", "class_level3",
+                "geke_handler", "inventor", "application_date", "authorization_date",
+                "expiration_date", "agency_firm", "notes"
             };
             if (col < 0 || col >= (int)col_to_field.size()) return;
 
@@ -1624,7 +1628,7 @@ private:
                     Patent p = db->GetPatentById(id);
                     p.patent_level = levels[choice].ToUTF8().data();
                     db->UpdatePatent(id, p);
-                    patent_list->SetItem(idx, 4, levels[choice]);
+                    patent_list->SetItem(idx, 7, levels[choice]);
                     // Update color
                     if (choice == 0) patent_list->SetItemBackgroundColour(idx, wxColour(255, 210, 210));
                     else if (choice == 1) patent_list->SetItemBackgroundColour(idx, wxColour(255, 245, 200));
@@ -1644,7 +1648,7 @@ private:
             menu.Bind(wxEVT_MENU, [this](wxCommandEvent&) {
                 long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
                 if (idx >= 0) {
-                    wxString title = patent_list->GetItemText(idx, 2);
+                    wxString title = patent_list->GetItemText(idx, 3);
                     if (wxClipboard::Get()->Open()) {
                         wxClipboard::Get()->SetData(new wxTextDataObject(title));
                         wxClipboard::Get()->Close();
@@ -1665,7 +1669,7 @@ private:
 
         // Quick action buttons
         wxBoxSizer* btn_sizer = new wxBoxSizer(wxHORIZONTAL);
-        wxButton* copy_btn = new wxButton(detail_panel, wxID_ANY, UTF8_STR("复制编码"));
+        wxButton* copy_btn = new wxButton(detail_panel, wxID_ANY, UTF8_STR("复制编号"));
         copy_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
@@ -1726,20 +1730,23 @@ private:
         for (const auto& p : patents) {
             long idx = patent_list->InsertItem(row, DB_STR(p.geke_code));
             patent_list->SetItem(idx, 1, DB_STR(p.application_number));
-            patent_list->SetItem(idx, 2, DB_STR(p.title));
-            patent_list->SetItem(idx, 3, DB_STR(p.patent_type));
-            patent_list->SetItem(idx, 4, DB_STR(p.patent_level));
-            patent_list->SetItem(idx, 5, DB_STR(p.application_status));
-            patent_list->SetItem(idx, 6, DB_STR(p.class_level1));
-            patent_list->SetItem(idx, 7, DB_STR(p.class_level2));
-            patent_list->SetItem(idx, 8, DB_STR(p.class_level3));
-            patent_list->SetItem(idx, 9, DB_STR(p.geke_handler));
-            patent_list->SetItem(idx, 10, DB_STR(p.inventor));
-            patent_list->SetItem(idx, 11, DB_STR(p.application_date));
-            patent_list->SetItem(idx, 12, DB_STR(p.authorization_date));
-            patent_list->SetItem(idx, 13, DB_STR(p.expiration_date));
-            patent_list->SetItem(idx, 14, DB_STR(p.agency_firm));
-            patent_list->SetItem(idx, 15, DB_STR(p.notes));
+            patent_list->SetItem(idx, 2, DB_STR(p.proposal_name));
+            patent_list->SetItem(idx, 3, DB_STR(p.title));
+            patent_list->SetItem(idx, 4, DB_STR(p.original_applicant));
+            patent_list->SetItem(idx, 5, DB_STR(p.current_applicant));
+            patent_list->SetItem(idx, 6, DB_STR(p.patent_type));
+            patent_list->SetItem(idx, 7, DB_STR(p.patent_level));
+            patent_list->SetItem(idx, 8, DB_STR(p.application_status));
+            patent_list->SetItem(idx, 9, DB_STR(p.class_level1));
+            patent_list->SetItem(idx, 10, DB_STR(p.class_level2));
+            patent_list->SetItem(idx, 11, DB_STR(p.class_level3));
+            patent_list->SetItem(idx, 12, DB_STR(p.geke_handler));
+            patent_list->SetItem(idx, 13, DB_STR(p.inventor));
+            patent_list->SetItem(idx, 14, DB_STR(p.application_date));
+            patent_list->SetItem(idx, 15, DB_STR(p.authorization_date));
+            patent_list->SetItem(idx, 16, DB_STR(p.expiration_date));
+            patent_list->SetItem(idx, 17, DB_STR(p.agency_firm));
+            patent_list->SetItem(idx, 18, DB_STR(p.notes));
             patent_list->SetItemData(idx, p.id);
 
             // Color by level
@@ -1779,20 +1786,23 @@ private:
             if (!isAll(inventor_f) && p.inventor.find(inventor_f.ToStdString()) == std::string::npos) continue;
             long idx = patent_list->InsertItem(row, DB_STR(p.geke_code));
             patent_list->SetItem(idx, 1, DB_STR(p.application_number));
-            patent_list->SetItem(idx, 2, DB_STR(p.title));
-            patent_list->SetItem(idx, 3, DB_STR(p.patent_type));
-            patent_list->SetItem(idx, 4, DB_STR(p.patent_level));
-            patent_list->SetItem(idx, 5, DB_STR(p.application_status));
-            patent_list->SetItem(idx, 6, DB_STR(p.class_level1));
-            patent_list->SetItem(idx, 7, DB_STR(p.class_level2));
-            patent_list->SetItem(idx, 8, DB_STR(p.class_level3));
-            patent_list->SetItem(idx, 9, DB_STR(p.geke_handler));
-            patent_list->SetItem(idx, 10, DB_STR(p.inventor));
-            patent_list->SetItem(idx, 11, DB_STR(p.application_date));
-            patent_list->SetItem(idx, 12, DB_STR(p.authorization_date));
-            patent_list->SetItem(idx, 13, DB_STR(p.expiration_date));
-            patent_list->SetItem(idx, 14, DB_STR(p.agency_firm));
-            patent_list->SetItem(idx, 15, DB_STR(p.notes));
+            patent_list->SetItem(idx, 2, DB_STR(p.proposal_name));
+            patent_list->SetItem(idx, 3, DB_STR(p.title));
+            patent_list->SetItem(idx, 4, DB_STR(p.original_applicant));
+            patent_list->SetItem(idx, 5, DB_STR(p.current_applicant));
+            patent_list->SetItem(idx, 6, DB_STR(p.patent_type));
+            patent_list->SetItem(idx, 7, DB_STR(p.patent_level));
+            patent_list->SetItem(idx, 8, DB_STR(p.application_status));
+            patent_list->SetItem(idx, 9, DB_STR(p.class_level1));
+            patent_list->SetItem(idx, 10, DB_STR(p.class_level2));
+            patent_list->SetItem(idx, 11, DB_STR(p.class_level3));
+            patent_list->SetItem(idx, 12, DB_STR(p.geke_handler));
+            patent_list->SetItem(idx, 13, DB_STR(p.inventor));
+            patent_list->SetItem(idx, 14, DB_STR(p.application_date));
+            patent_list->SetItem(idx, 15, DB_STR(p.authorization_date));
+            patent_list->SetItem(idx, 16, DB_STR(p.expiration_date));
+            patent_list->SetItem(idx, 17, DB_STR(p.agency_firm));
+            patent_list->SetItem(idx, 18, DB_STR(p.notes));
             patent_list->SetItemData(idx, p.id);
 
             if (p.patent_level == "core" || p.patent_level.find("核心") != std::string::npos) {
@@ -1818,20 +1828,23 @@ private:
         for (const auto& p : patents) {
             long idx = patent_list->InsertItem(row, DB_STR(p.geke_code));
             patent_list->SetItem(idx, 1, DB_STR(p.application_number));
-            patent_list->SetItem(idx, 2, DB_STR(p.title));
-            patent_list->SetItem(idx, 3, DB_STR(p.patent_type));
-            patent_list->SetItem(idx, 4, DB_STR(p.patent_level));
-            patent_list->SetItem(idx, 5, DB_STR(p.application_status));
-            patent_list->SetItem(idx, 6, DB_STR(p.class_level1));
-            patent_list->SetItem(idx, 7, DB_STR(p.class_level2));
-            patent_list->SetItem(idx, 8, DB_STR(p.class_level3));
-            patent_list->SetItem(idx, 9, DB_STR(p.geke_handler));
-            patent_list->SetItem(idx, 10, DB_STR(p.inventor));
-            patent_list->SetItem(idx, 11, DB_STR(p.application_date));
-            patent_list->SetItem(idx, 12, DB_STR(p.authorization_date));
-            patent_list->SetItem(idx, 13, DB_STR(p.expiration_date));
-            patent_list->SetItem(idx, 14, DB_STR(p.agency_firm));
-            patent_list->SetItem(idx, 15, DB_STR(p.notes));
+            patent_list->SetItem(idx, 2, DB_STR(p.proposal_name));
+            patent_list->SetItem(idx, 3, DB_STR(p.title));
+            patent_list->SetItem(idx, 4, DB_STR(p.original_applicant));
+            patent_list->SetItem(idx, 5, DB_STR(p.current_applicant));
+            patent_list->SetItem(idx, 6, DB_STR(p.patent_type));
+            patent_list->SetItem(idx, 7, DB_STR(p.patent_level));
+            patent_list->SetItem(idx, 8, DB_STR(p.application_status));
+            patent_list->SetItem(idx, 9, DB_STR(p.class_level1));
+            patent_list->SetItem(idx, 10, DB_STR(p.class_level2));
+            patent_list->SetItem(idx, 11, DB_STR(p.class_level3));
+            patent_list->SetItem(idx, 12, DB_STR(p.geke_handler));
+            patent_list->SetItem(idx, 13, DB_STR(p.inventor));
+            patent_list->SetItem(idx, 14, DB_STR(p.application_date));
+            patent_list->SetItem(idx, 15, DB_STR(p.authorization_date));
+            patent_list->SetItem(idx, 16, DB_STR(p.expiration_date));
+            patent_list->SetItem(idx, 17, DB_STR(p.agency_firm));
+            patent_list->SetItem(idx, 18, DB_STR(p.notes));
             patent_list->SetItemData(idx, p.id);
 
             if (p.patent_level == "core" || p.patent_level.find("核心") != std::string::npos) {
@@ -1860,7 +1873,8 @@ private:
         wxString info;
         info << UTF8_STR("编号: ") << DB_STR(p.geke_code) << "\n"
              << UTF8_STR("申请号: ") << DB_STR(p.application_number) << "\n"
-             << UTF8_STR("名称: ") << DB_STR(p.title) << "\n\n"
+             << UTF8_STR("提案名称: ") << DB_STR(p.proposal_name) << "\n"
+             << UTF8_STR("发明名称: ") << DB_STR(p.title) << "\n\n"
              << DB_STR(p.patent_type) << " | " << DB_STR(p.patent_level) << " | " << DB_STR(p.application_status) << "\n\n"
              << UTF8_STR("处理人: ") << DB_STR(p.geke_handler) << " | " << UTF8_STR("发明人: ") << DB_STR(p.inventor) << "\n"
              << UTF8_STR("研发部门: ") << DB_STR(p.rd_department) << " | " << UTF8_STR("事务所: ") << DB_STR(p.agency_firm) << "\n\n"
@@ -3113,14 +3127,14 @@ private:
         // Simple text parsing for OA notification
         // Extract application number
         std::string app_no;
-        wxRegEx app_re("申请号[：:]\s*(\d{12,13}[A-Z]?)");
+        wxRegEx app_re("申请号[：:]\\s*(\\d{12,13}[A-Z]?)");
         if (app_re.Matches(text)) {
             app_no = app_re.GetMatch(text, 1).ToUTF8().data();
         }
 
         // Extract issue date
         std::string issue_date;
-        wxRegEx date_re("发文日[期]?[：:]\s*(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日");
+        wxRegEx date_re("发文日[期]?[：:]\\s*(\\d{4})\\s*年\\s*(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*日");
         if (date_re.Matches(text)) {
             long year, month, day;
             date_re.GetMatch(text, 1).ToLong(&year);

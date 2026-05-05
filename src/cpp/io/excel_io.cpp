@@ -136,6 +136,20 @@ SheetType ExcelIO::DetectSheetType(const std::string& sheet_name, const std::vec
 
 // ===================== Column Mapping =====================
 
+static bool ContainsAny(const std::string& value, const std::vector<std::string>& needles) {
+    for (const auto& needle : needles) {
+        if (value.find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+static bool IsExcludedCodeColumn(const std::string& column_name) {
+    return ContainsAny(column_name, {
+        "代理人编码", "代理编码", "事务所编码", "事务所编号", "代理人编号",
+        "案件编号", "案号", "分类编码", "项目ID"
+    });
+}
+
 int ExcelIO::MapColumnToField(const std::string& column_name) {
     // Patent columns (matching Python version)
     // 我司编码 申请号 提案名称 发明名称 原申请人 现申请人 申请状态 关联案信息 缴费状态
@@ -150,22 +164,19 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 15=proposal_name, 16=original_applicant, 17=authorization_date,
     // 18=expiration_date, 19=rd_department, 20=agency_firm
 
-    // 编码列识别：支持任意公司（华为编码、小米编码等）及通用名称
-    // 优先匹配明确关键词，排除"事务所编号"等干扰列
-    if (column_name == "我司编码" || column_name == "内部编码" || column_name == "专利编号" ||
-        column_name.find("我司编码") != std::string::npos ||
-        column_name.find("内部编码") != std::string::npos ||
-        column_name.find("格科编码") != std::string::npos) return 1;
-    // 通用"编号"匹配，排除事务所编号等干扰列
-    if (column_name == "编号" ||
-        (column_name.find("编号") != std::string::npos &&
-         column_name.find("事务所编号") == std::string::npos &&
-         column_name.find("代理编号") == std::string::npos &&
-         column_name.find("案件编号") == std::string::npos)) return 1;
-    // 编码通用匹配
-    if (column_name.find("编码") != std::string::npos &&
-        column_name.find("分类编码") == std::string::npos &&
-        column_name.find("事务所编码") == std::string::npos) return 1;
+    // 公司内部编号列。格科场景中 Excel 的“格科编码”就是 app 里的“编号”。
+    // 代理所/代理人编码不能映射到 geke_code，否则会覆盖公司编号。
+    if (!IsExcludedCodeColumn(column_name)) {
+        if (column_name == "编号" || column_name == "编码" ||
+            column_name == "公司编码" || column_name == "我司编码" || column_name == "我司编号" ||
+            column_name == "内部编码" || column_name == "内部编号" ||
+            column_name == "格科编码" || column_name == "格科编号" ||
+            column_name == "专利编号") return 1;
+
+        if (ContainsAny(column_name, {"格科编码", "格科编号", "公司编码", "公司编号", "我司编码", "我司编号", "内部编码", "内部编号"})) {
+            return 1;
+        }
+    }
     if (column_name.find("申请号") != std::string::npos && column_name.find("PCT") == std::string::npos &&
         column_name.find("国家") == std::string::npos && column_name.find("国内") == std::string::npos) return 2;
     if (column_name.find("提案名称") != std::string::npos) return 15;
@@ -195,7 +206,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // English fallback
     std::string lower = column_name;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    if (lower.find("code") != std::string::npos || lower.find("geke") != std::string::npos) return 1;
+    if ((lower.find("company") != std::string::npos || lower.find("internal") != std::string::npos || lower.find("geke") != std::string::npos) &&
+        lower.find("agent") == std::string::npos && lower.find("agency") == std::string::npos) return 1;
     if (lower.find("application") != std::string::npos && lower.find("number") != std::string::npos) return 2;
     if (lower.find("title") != std::string::npos || lower.find("name") != std::string::npos) return 3;
     if (lower.find("applicant") != std::string::npos) return 4;
@@ -432,13 +444,23 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
             switch (field) {
                 case 2: p.application_number = value; break;
                 case 3: p.title = value; break;
+                case 4: p.current_applicant = value; break;
                 case 5: p.application_date = ParseDate(value); break;
                 case 6: p.patent_type = value; break;
                 case 7: p.application_status = value; break;
                 case 8: p.inventor = value; break;
-                case 15: p.patent_level = value; break;
-                case 16: p.geke_handler = value; break;
-                case 17: p.notes = value; break;
+                case 9: p.class_level1 = value; break;
+                case 10: p.class_level2 = value; break;
+                case 11: p.class_level3 = value; break;
+                case 12: p.patent_level = value; break;
+                case 13: p.geke_handler = value; break;
+                case 14: p.notes = value; break;
+                case 15: p.proposal_name = value; break;
+                case 16: p.original_applicant = value; break;
+                case 17: p.authorization_date = ParseDate(value); break;
+                case 18: p.expiration_date = ParseDate(value); break;
+                case 19: p.rd_department = value; break;
+                case 20: p.agency_firm = value; break;
             }
         }
 
@@ -753,7 +775,7 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                 for (uint16_t col = 0; col < colCount; col++) {
                     int field = MapColumnToField(headers[col]);
                     field_map.push_back(field);
-                    if (field == 1) code_col = col;  // field 1 = geke_code
+                    if (field == 1 && code_col < 0) code_col = col;  // field 1 = geke_code
                     DebugLog("  Col " + std::to_string(col) + " [" + headers[col] + "] -> field " + std::to_string(field));
                 }
 
@@ -793,7 +815,9 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                         std::string value = CleanValue(raw);
                         int field = field_map[col];
                         switch (field) {
-                            case 1: p.geke_code = value; break;
+                            case 1:
+                                if (col == code_col) p.geke_code = value;
+                                break;
                             case 2: p.application_number = value; break;
                             case 3: p.title = value; break;
                             case 4:
@@ -1058,7 +1082,13 @@ bool ExcelIO::IsChanged(const Patent& old_data, const Patent& new_data) {
            old_data.inventor != new_data.inventor ||
            old_data.class_level1 != new_data.class_level1 ||
            old_data.class_level2 != new_data.class_level2 ||
-           old_data.class_level3 != new_data.class_level3;
+           old_data.class_level3 != new_data.class_level3 ||
+           old_data.notes != new_data.notes ||
+           old_data.proposal_name != new_data.proposal_name ||
+           old_data.original_applicant != new_data.original_applicant ||
+           old_data.current_applicant != new_data.current_applicant ||
+           old_data.rd_department != new_data.rd_department ||
+           old_data.agency_firm != new_data.agency_firm;
 }
 
 std::string ExcelIO::GetLastError() const {
