@@ -1657,15 +1657,15 @@ private:
 
         wxPanel* detail_panel = new wxPanel(splitter);
         wxBoxSizer* detail_sizer = new wxBoxSizer(wxVERTICAL);
-        detail_sizer->Add(new wxStaticText(detail_panel, wxID_ANY, "Patent Details"), 0, wxBOTTOM, 5);
+        detail_sizer->Add(new wxStaticText(detail_panel, wxID_ANY, UTF8_STR("专利详情")), 0, wxBOTTOM, 5);
         patent_detail = new wxTextCtrl(detail_panel, wxID_ANY, "", wxDefaultPosition, wxDefaultSize,
                                         wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH);
         patent_detail->SetFont(wxFont(10, wxFONTFAMILY_TELETYPE, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
         detail_sizer->Add(patent_detail, 1, wxEXPAND);
-        
+
         // Quick action buttons
         wxBoxSizer* btn_sizer = new wxBoxSizer(wxHORIZONTAL);
-        wxButton* copy_btn = new wxButton(detail_panel, wxID_ANY, "Copy Code");
+        wxButton* copy_btn = new wxButton(detail_panel, wxID_ANY, UTF8_STR("复制编码"));
         copy_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
@@ -1673,11 +1673,11 @@ private:
                 if (wxClipboard::Get()->Open()) {
                     wxClipboard::Get()->SetData(new wxTextDataObject(code));
                     wxClipboard::Get()->Close();
-                    status_bar->SetStatusText(wxString::Format("Copied: %s", code));
+                    status_bar->SetStatusText(UTF8_STR("已复制: ") + code);
                 }
             }
         });
-        wxButton* calc_btn = new wxButton(detail_panel, wxID_ANY, "Calc Days");
+        wxButton* calc_btn = new wxButton(detail_panel, wxID_ANY, UTF8_STR("计算天数"));
         calc_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
@@ -1686,7 +1686,7 @@ private:
                     wxDateTime exp; exp.ParseFormat(p.expiration_date.c_str(), "%Y-%m-%d");
                     if (exp.IsValid()) {
                         int days = (exp - wxDateTime::Now()).GetDays();
-                        wxMessageBox(wxString::Format("Days until expiration: %d", days), "Calculator", wxOK);
+                        wxMessageBox(wxString::Format(UTF8_STR("距到期还有 %d 天"), days), UTF8_STR("计算器"), wxOK);
                     }
                 }
             }
@@ -1854,7 +1854,7 @@ private:
 
         wxString oa_info;
         for (const auto& oa : oas) {
-            oa_info += "\n  [" + DB_STR(oa.oa_type) + "] " + DB_STR(oa.progress) + " - Deadline: " + DB_STR(oa.official_deadline) + " - " + DB_STR(oa.handler) + (oa.is_completed ? " [DONE]" : "");
+            oa_info += "\n  [" + DB_STR(oa.oa_type) + "] " + DB_STR(oa.progress) + UTF8_STR(" - 期限: ") + DB_STR(oa.official_deadline) + " - " + DB_STR(oa.handler) + (oa.is_completed ? UTF8_STR(" [已完成]") : "");
         }
 
         wxString info;
@@ -1863,16 +1863,16 @@ private:
              << UTF8_STR("名称: ") << DB_STR(p.title) << "\n\n"
              << DB_STR(p.patent_type) << " | " << DB_STR(p.patent_level) << " | " << DB_STR(p.application_status) << "\n\n"
              << UTF8_STR("处理人: ") << DB_STR(p.geke_handler) << " | " << UTF8_STR("发明人: ") << DB_STR(p.inventor) << "\n"
-             << "R&D Dept: " << DB_STR(p.rd_department) << " | Agency: " << DB_STR(p.agency_firm) << "\n\n"
-             << "Application Date: " << DB_STR(p.application_date) << "\n"
-             << "Authorization Date: " << DB_STR(p.authorization_date) << "\n"
-             << "Expiration Date: " << DB_STR(p.expiration_date) << "\n\n"
+             << UTF8_STR("研发部门: ") << DB_STR(p.rd_department) << " | " << UTF8_STR("事务所: ") << DB_STR(p.agency_firm) << "\n\n"
+             << UTF8_STR("申请日: ") << DB_STR(p.application_date) << "\n"
+             << UTF8_STR("授权日: ") << DB_STR(p.authorization_date) << "\n"
+             << UTF8_STR("到期日: ") << DB_STR(p.expiration_date) << "\n\n"
              << UTF8_STR("分类: ") << DB_STR(p.class_level1) << " / " << DB_STR(p.class_level2) << " / " << DB_STR(p.class_level3) << "\n\n"
              << UTF8_STR("申请人(原): ") << DB_STR(p.original_applicant) << "\n"
              << UTF8_STR("申请人(现): ") << DB_STR(p.current_applicant) << "\n\n"
-             << UTF8_STR("备注: ") << (p.notes.empty() ? "None" : DB_STR(p.notes)) << "\n\n"
+             << UTF8_STR("备注: ") << (p.notes.empty() ? UTF8_STR("无") : DB_STR(p.notes)) << "\n\n"
              << "─────────────────────────────────\n"
-             << UTF8_STR("OA记录: ") << (oa_info.IsEmpty() ? "None" : oa_info);
+             << UTF8_STR("OA记录: ") << (oa_info.IsEmpty() ? UTF8_STR("无") : oa_info);
         patent_detail->SetValue(info);
     }
 
@@ -1880,7 +1880,7 @@ private:
         PatentEditDialog dlg(this, db.get());
         if (dlg.ShowModal() == wxID_OK) {
             LoadPatents();
-            wxMessageBox("Patent created successfully", "Success", wxOK | wxICON_INFORMATION);
+            wxMessageBox(UTF8_STR("专利创建成功"), UTF8_STR("成功"), wxOK | wxICON_INFORMATION);
         }
     }
 

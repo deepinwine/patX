@@ -403,18 +403,30 @@ Patent Database::GetPatentById(int id) {
     sqlite3_stmt* stmt;
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
         if (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
             p.id = sqlite3_column_int(stmt, 0);
-            p.geke_code = (const char*)sqlite3_column_text(stmt, 1) ? (const char*)sqlite3_column_text(stmt, 1) : "";
-            p.application_number = (const char*)sqlite3_column_text(stmt, 2) ? (const char*)sqlite3_column_text(stmt, 2) : "";
-            p.title = (const char*)sqlite3_column_text(stmt, 3) ? (const char*)sqlite3_column_text(stmt, 3) : "";
-            p.patent_type = (const char*)sqlite3_column_text(stmt, 6) ? (const char*)sqlite3_column_text(stmt, 6) : "";
-            p.patent_level = (const char*)sqlite3_column_text(stmt, 7) ? (const char*)sqlite3_column_text(stmt, 7) : "";
-            p.application_status = (const char*)sqlite3_column_text(stmt, 5) ? (const char*)sqlite3_column_text(stmt, 5) : "";
-            p.geke_handler = (const char*)sqlite3_column_text(stmt, 11) ? (const char*)sqlite3_column_text(stmt, 11) : "";
-            p.inventor = (const char*)sqlite3_column_text(stmt, 16) ? (const char*)sqlite3_column_text(stmt, 16) : "";
-            p.application_date = (const char*)sqlite3_column_text(stmt, 8) ? (const char*)sqlite3_column_text(stmt, 8) : "";
-            p.authorization_date = (const char*)sqlite3_column_text(stmt, 9) ? (const char*)sqlite3_column_text(stmt, 9) : "";
-            p.expiration_date = (const char*)sqlite3_column_text(stmt, 10) ? (const char*)sqlite3_column_text(stmt, 10) : "";
+            p.geke_code = cs(1);
+            p.application_number = cs(2);
+            p.title = cs(3);
+            p.proposal_name = cs(4);
+            p.application_status = cs(5);
+            p.patent_type = cs(6);
+            p.patent_level = cs(7);
+            p.application_date = cs(8);
+            p.authorization_date = cs(9);
+            p.expiration_date = cs(10);
+            p.geke_handler = cs(11);
+            p.rd_department = cs(12);
+            p.agency_firm = cs(13);
+            p.original_applicant = cs(14);
+            p.current_applicant = cs(15);
+            p.inventor = cs(16);
+            p.notes = cs(17);
+            p.class_level1 = cs(18);
+            p.class_level2 = cs(19);
+            p.class_level3 = cs(20);
         }
         sqlite3_finalize(stmt);
     }
