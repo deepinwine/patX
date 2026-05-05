@@ -163,7 +163,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 9-11=class_level1-3, 12=patent_level, 13=geke_handler, 14=notes,
     // 15=proposal_name, 16=original_applicant, 17=authorization_date,
     // 18=expiration_date, 19=rd_department, 20=agency_firm, 21=related_case_info,
-    // 22=fee_status, 23=rd_project, 24=class_level4, 25=tag
+    // 22=fee_status, 23=rd_project, 24=class_level4, 25=tag, 26=details, 27=filing_date
 
     // 公司内部编号列。格科场景中 Excel 的“格科编码”就是 app 里的“编号”。
     // 代理所/代理人编码不能映射到 geke_code，否则会覆盖公司编号。
@@ -192,7 +192,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
         column_name.find("法律状态") != std::string::npos) return 7;
     if (column_name.find("重要级") != std::string::npos || column_name.find("专利等级") != std::string::npos ||
         column_name.find("等级") != std::string::npos) return 12;
-    if (column_name.find("立案日") != std::string::npos) return 5;  // use as app date if no 申请日
+    if (column_name.find("立案日") != std::string::npos) return 27;
     if (column_name.find("申请日") != std::string::npos || column_name.find("申请日期") != std::string::npos) return 5;
     if (column_name.find("授权日") != std::string::npos || column_name.find("授权日期") != std::string::npos) return 17;
     if (column_name.find("到期日") != std::string::npos || column_name.find("届满") != std::string::npos) return 18;
@@ -499,6 +499,10 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 26:
                     if (p.notes.empty()) p.notes = "具体内容: " + value;
                     else p.notes += "; 具体内容: " + value;
+                    break;
+                case 27:
+                    if (p.notes.empty()) p.notes = "立案日: " + ParseDate(value);
+                    else p.notes += "; 立案日: " + ParseDate(value);
                     break;
             }
         }
@@ -904,6 +908,10 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 26:
                                 if (p.notes.empty()) p.notes = "具体内容: " + value;
                                 else p.notes += "; 具体内容: " + value;
+                                break;
+                            case 27:
+                                if (p.notes.empty()) p.notes = "立案日: " + ParseDate(value);
+                                else p.notes += "; 立案日: " + ParseDate(value);
                                 break;
                         }
                     }
