@@ -1,252 +1,212 @@
-﻿# patX Windows Build Script
+# patX Windows Build Script
 #
-# 编译 C++/Rust 混合项目
+# Builds the Rust library and the C++ wxWidgets application.
 
 param(
-    [string] = "Release",
-    [string] = "x64",
-    [bool] = False,
-    [bool] = False
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Release",
+
+    [ValidateSet("x64", "x86")]
+    [string]$Platform = "x64",
+
+    [switch]$Clean,
+
+    [switch]$RunTests
 )
 
-Continue = "Stop"
- =  | Split-Path -Parent
+$ErrorActionPreference = "Stop"
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  patX Build Script" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# 检查依赖
-function CheckDependencies {
+function Test-Tool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$InstallHint
+    )
+
+    $command = Get-Command $Name -ErrorAction SilentlyContinue
+    if (-not $command) {
+        Write-Host "[ERROR] $Name not found. $InstallHint" -ForegroundColor Red
+        exit 1
+    }
+
+    return $command
+}
+
+function Check-Dependencies {
     Write-Host "Checking dependencies..." -ForegroundColor Yellow
-    
-    # 检查 Rust
-     = Get-Command rustc -ErrorAction SilentlyContinue
-    if (-not ) {
-        Write-Host "[ERROR] Rust not found. Please install via:" -ForegroundColor Red
-        Write-Host "        https://rustup.rs" -ForegroundColor Red
-        exit 1
-    }
-    
-     = (rustc --version).ToString()
-    Write-Host "[OK] Rust: " -ForegroundColor Green
-    
-    # 检查 Cargo
-     = Get-Command cargo -ErrorAction SilentlyContinue
-    if (-not ) {
-        Write-Host "[ERROR] Cargo not found" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "[OK] Cargo: " -ForegroundColor Green
-    
-    # 检查 CMake
-     = Get-Command cmake -ErrorAction SilentlyContinue
-    if (-not ) {
-        Write-Host "[ERROR] CMake not found. Please install via:" -ForegroundColor Red
-        Write-Host "        https://cmake.org/download/" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "[OK] CMake: " -ForegroundColor Green
-    
-    # 检查 C++ 编译器 (MSVC)
-     = Get-Command cl -ErrorAction SilentlyContinue
-    if (-not ) {
-        Write-Host "[WARN] MSVC cl.exe not in PATH" -ForegroundColor Yellow
-        Write-Host "       Will try to find via vswhere" -ForegroundColor Yellow
-        
-        # 尝试通过 vswhere 找到 MSVC
-         = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
-        if (Test-Path ) {
-             = &  -latest -property installationPath
-            Write-Host "[OK] Visual Studio: " -ForegroundColor Green
+
+    Test-Tool "rustc" "Install Rust from https://rustup.rs" | Out-Null
+    $rustVersion = (& rustc --version).Trim()
+    Write-Host "[OK] Rust: $rustVersion" -ForegroundColor Green
+
+    Test-Tool "cargo" "Cargo is included with rustup." | Out-Null
+    $cargoVersion = (& cargo --version).Trim()
+    Write-Host "[OK] Cargo: $cargoVersion" -ForegroundColor Green
+
+    Test-Tool "cmake" "Install CMake from https://cmake.org/download/" | Out-Null
+    $cmakeVersion = (& cmake --version | Select-Object -First 1).Trim()
+    Write-Host "[OK] CMake: $cmakeVersion" -ForegroundColor Green
+
+    $compiler = Get-Command cl -ErrorAction SilentlyContinue
+    if ($compiler) {
+        Write-Host "[OK] MSVC compiler is available" -ForegroundColor Green
+    } else {
+        $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -property installationPath
+            Write-Host "[OK] Visual Studio found: $vsPath" -ForegroundColor Green
         } else {
-            Write-Host "[WARN] vswhere not found, assuming CMake will find compiler" -ForegroundColor Yellow
+            Write-Host "[WARN] MSVC cl.exe and vswhere were not found in PATH; CMake may still find another generator." -ForegroundColor Yellow
         }
-    } else {
-        Write-Host "[OK] MSVC Compiler available" -ForegroundColor Green
     }
-    
+
     Write-Host ""
 }
 
-# 清理构建目录
-function CleanBuild {
-    if () {
-        Write-Host "Cleaning build directories..." -ForegroundColor Yellow
-        
-         = Join-Path  "build"
-         = Join-Path  "target"
-        
-        if (Test-Path ) {
-            Remove-Item -Path  -Recurse -Force
-            Write-Host "[OK] Removed: " -ForegroundColor Green
-        }
-        
-        if (Test-Path ) {
-            Remove-Item -Path  -Recurse -Force
-            Write-Host "[OK] Removed: " -ForegroundColor Green
-        }
-        
-        Write-Host ""
+function Clean-Build {
+    if (-not $Clean) {
+        return
     }
+
+    Write-Host "Cleaning build directories..." -ForegroundColor Yellow
+
+    $buildDir = Join-Path $ProjectRoot "build"
+    $targetDir = Join-Path $ProjectRoot "target"
+
+    foreach ($dir in @($buildDir, $targetDir)) {
+        $resolvedRoot = (Resolve-Path $ProjectRoot).Path
+        $resolvedTarget = if (Test-Path $dir) { (Resolve-Path $dir).Path } else { $dir }
+
+        if ((Test-Path $dir) -and $resolvedTarget.StartsWith($resolvedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $dir -Recurse -Force
+            Write-Host "[OK] Removed: $dir" -ForegroundColor Green
+        }
+    }
+
+    Write-Host ""
 }
 
-# 构建 Rust 库
-function BuildRust {
-    Write-Host "Building Rust library ()..." -ForegroundColor Yellow
-    
-    Push-Location 
-    
-     = @("build")
-    if ( -eq "Release") {
-         += "--release"
-    }
-    
-    & cargo 
-    
-    if (1 -ne 0) {
-        Write-Host "[ERROR] Rust build failed" -ForegroundColor Red
+function Build-Rust {
+    Write-Host "Building Rust library ($Configuration)..." -ForegroundColor Yellow
+
+    Push-Location $ProjectRoot
+    try {
+        $cargoArgs = @("build")
+        if ($Configuration -eq "Release") {
+            $cargoArgs += "--release"
+        }
+
+        & cargo @cargoArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Rust build failed"
+        }
+    } finally {
         Pop-Location
-        exit 1
     }
-    
-    Pop-Location
-    
-    # 确认输出
-     = Join-Path  "target"
-     = if ( -eq "Release") {
-        Join-Path  "release\patx_core.lib"
+
+    $profileDir = if ($Configuration -eq "Release") { "release" } else { "debug" }
+    $rustLib = Join-Path $ProjectRoot "target\$profileDir\patx_core.lib"
+    if (Test-Path $rustLib) {
+        Write-Host "[OK] Rust library: $rustLib" -ForegroundColor Green
     } else {
-        Join-Path  "debug\patx_core.lib"
+        Write-Host "[WARN] Static Rust library was not found at $rustLib" -ForegroundColor Yellow
     }
-    
-    if (Test-Path ) {
-        Write-Host "[OK] Rust library: " -ForegroundColor Green
-    } else {
-        Write-Host "[WARN] Static lib not found (may be cdylib only)" -ForegroundColor Yellow
-    }
-    
+
     Write-Host ""
 }
 
-# 构建 C++ 库和主程序
-function BuildCpp {
-    Write-Host "Building C++ library and main program..." -ForegroundColor Yellow
-    
-     = Join-Path  "build"
-    
-    # CMake 配置
-     = @(
-        "-B", ,
-        "-S", ,
-        "-DCMAKE_BUILD_TYPE="
-    )
-    
-    # 指定生成器 (Windows 默认使用 MSVC)
-    if ( -eq "x64") {
-         += "-A", "x64"
-    } elseif ( -eq "x86") {
-         += "-A", "Win32"
-    }
-    
-    & cmake 
-    
-    if (1 -ne 0) {
-        Write-Host "[ERROR] CMake configuration failed" -ForegroundColor Red
-        exit 1
-    }
-    
-    # CMake 构建
-     = @(
-        "--build", ,
-        "--config", 
-    )
-    
-    & cmake 
-    
-    if (1 -ne 0) {
-        Write-Host "[ERROR] C++ build failed" -ForegroundColor Red
-        exit 1
-    }
-    
-    # 确认输出
-     = Join-Path  "\patx.exe"
-    if (Test-Path ) {
-        Write-Host "[OK] Main executable: " -ForegroundColor Green
-    }
-    
-     = Join-Path  "\patx_test.exe"
-    if (Test-Path ) {
-        Write-Host "[OK] Test executable: " -ForegroundColor Green
-    }
-    
-     = Join-Path  "\patx_benchmark.exe"
-    if (Test-Path ) {
-        Write-Host "[OK] Benchmark executable: " -ForegroundColor Green
-    }
-    
-    Write-Host ""
-}
+function Build-Cpp {
+    Write-Host "Building C++ application..." -ForegroundColor Yellow
 
-# 运行测试
-function RunTests {
-    if () {
-        Write-Host "Running tests..." -ForegroundColor Yellow
-        
-        # Rust 测试
-        Push-Location 
-        & cargo test --release
-        Pop-Location
-        
-        Write-Host ""
-        
-        # C++ 测试
-         = Join-Path  "build"
-         = Join-Path  "\patx_test.exe"
-        
-        if (Test-Path ) {
-            Write-Host "Running C++ tests..." -ForegroundColor Yellow
-            & 
-        } else {
-            Write-Host "[WARN] C++ test executable not found" -ForegroundColor Yellow
+    $buildDir = Join-Path $ProjectRoot "build"
+    $cacheFile = Join-Path $buildDir "CMakeCache.txt"
+    $cmakeArgs = @(
+        "-B", $buildDir,
+        "-S", $ProjectRoot,
+        "-DCMAKE_BUILD_TYPE=$Configuration"
+    )
+
+    if (-not (Test-Path $cacheFile)) {
+        if ($Platform -eq "x64") {
+            $cmakeArgs += @("-A", "x64")
+        } elseif ($Platform -eq "x86") {
+            $cmakeArgs += @("-A", "Win32")
         }
-        
-        Write-Host ""
+    } else {
+        Write-Host "[INFO] Reusing existing CMake cache in $buildDir" -ForegroundColor DarkGray
     }
+
+    & cmake @cmakeArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "CMake configuration failed"
+    }
+
+    & cmake --build $buildDir --config $Configuration
+    if ($LASTEXITCODE -ne 0) {
+        throw "C++ build failed"
+    }
+
+    $exe = Join-Path $buildDir "$Configuration\patx.exe"
+    if (Test-Path $exe) {
+        Write-Host "[OK] Application: $exe" -ForegroundColor Green
+    }
+
+    Write-Host ""
 }
 
-# 显示构建摘要
-function ShowSummary {
+function Invoke-ProjectTests {
+    if (-not $RunTests) {
+        return
+    }
+
+    Write-Host "Running tests..." -ForegroundColor Yellow
+
+    Push-Location $ProjectRoot
+    try {
+        $cargoTestArgs = @("test")
+        if ($Configuration -eq "Release") {
+            $cargoTestArgs += "--release"
+        }
+
+        & cargo @cargoTestArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Rust tests failed"
+        }
+    } finally {
+        Pop-Location
+    }
+
+    Write-Host ""
+}
+
+function Show-Summary {
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host "  Build Summary" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
-    
-     = Join-Path  "build"
-    
-    # Rust 输出
-     = Join-Path  "target\release\patx_core.dll"
-    if (Test-Path ) {
-         = (Get-Item ).Length / 1KB
-        Write-Host "Rust Library:   (0 KB)" -ForegroundColor Green
+
+    $buildDir = Join-Path $ProjectRoot "build"
+    $exe = Join-Path $buildDir "$Configuration\patx.exe"
+
+    if (Test-Path $exe) {
+        $sizeKb = [Math]::Round((Get-Item $exe).Length / 1KB, 1)
+        Write-Host "Application: $exe ($sizeKb KB)" -ForegroundColor Green
     }
-    
-    # C++ 输出
-     = Join-Path  "\patx.exe"
-    if (Test-Path ) {
-         = (Get-Item ).Length / 1KB
-        Write-Host "Main Program:   (0 KB)" -ForegroundColor Green
-    }
-    
+
     Write-Host ""
-    Write-Host "Build completed successfully!" -ForegroundColor Green
-    Write-Host ""
+    Write-Host "Build completed successfully." -ForegroundColor Green
 }
 
-# 主流程
-CheckDependencies
-CleanBuild
-BuildRust
-BuildCpp
-RunTests
-ShowSummary
+Check-Dependencies
+Clean-Build
+Build-Rust
+Build-Cpp
+Invoke-ProjectTests
+Show-Summary

@@ -134,7 +134,10 @@ impl MemoryManager {
     }
 
     pub fn init(&self) {
-        println!("[patX] Memory manager initialized");
+        println!(
+            "[patX] Memory manager initialized (patent pool: {}, buffer size: {}, buffer pool: {})",
+            self.patent_pool_capacity, self.buffer_size, self.buffer_pool_capacity
+        );
     }
 }
 
@@ -150,7 +153,7 @@ mod tests {
 
     #[test]
     fn test_object_pool() {
-        let mut pool: ObjectPool<i32> = ObjectPool::new(10);
+        let pool: ObjectPool<i32> = ObjectPool::new(10);
         let stats = pool.stats();
         assert_eq!(stats.capacity, 10);
     }

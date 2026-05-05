@@ -179,7 +179,7 @@ impl TaskScheduler {
         self.running.store(true, Ordering::SeqCst);
         
         let num_threads = self.config.num_threads;
-        for i in 0..num_threads {
+        for _ in 0..num_threads {
             let task_queue = Arc::clone(&self.task_queue);
             let running = Arc::clone(&self.running);
             
