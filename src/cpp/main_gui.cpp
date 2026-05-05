@@ -2202,7 +2202,6 @@ private:
 
     void OnFilterByCurrentTab(wxCommandEvent&) {
         int tab = GetCurrentTab();
-        RefreshCommonFiltersForTab(tab, true);
 
         switch (tab) {
             case 0: LoadPatents(); break;
