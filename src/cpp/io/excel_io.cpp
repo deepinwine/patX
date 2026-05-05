@@ -162,7 +162,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 5=application_date, 6=patent_type, 7=application_status, 8=inventor,
     // 9-11=class_level1-3, 12=patent_level, 13=geke_handler, 14=notes,
     // 15=proposal_name, 16=original_applicant, 17=authorization_date,
-    // 18=expiration_date, 19=rd_department, 20=agency_firm
+    // 18=expiration_date, 19=rd_department, 20=agency_firm, 21=related_case_info
 
     // 公司内部编号列。格科场景中 Excel 的“格科编码”就是 app 里的“编号”。
     // 代理所/代理人编码不能映射到 geke_code，否则会覆盖公司编号。
@@ -184,6 +184,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
         column_name.find("名称") != std::string::npos) return 3;
     if (column_name.find("原申请人") != std::string::npos) return 16;
     if (column_name.find("现申请人") != std::string::npos || column_name.find("申请人") != std::string::npos) return 4;
+    if (column_name.find("关联案信息") != std::string::npos || column_name.find("关联案") != std::string::npos) return 21;
     if (column_name.find("申请状态") != std::string::npos || column_name.find("状态") != std::string::npos ||
         column_name.find("法律状态") != std::string::npos) return 7;
     if (column_name.find("重要级") != std::string::npos || column_name.find("专利等级") != std::string::npos ||
@@ -461,6 +462,10 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 18: p.expiration_date = ParseDate(value); break;
                 case 19: p.rd_department = value; break;
                 case 20: p.agency_firm = value; break;
+                case 21:
+                    if (p.notes.empty()) p.notes = "关联案信息: " + value;
+                    else p.notes += "; 关联案信息: " + value;
+                    break;
             }
         }
 
@@ -842,6 +847,10 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 18: p.expiration_date = ParseDate(value); break;
                             case 19: p.rd_department = value; break;
                             case 20: p.agency_firm = value; break;
+                            case 21:
+                                if (p.notes.empty()) p.notes = "关联案信息: " + value;
+                                else p.notes += "; 关联案信息: " + value;
+                                break;
                         }
                     }
 
