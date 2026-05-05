@@ -701,6 +701,7 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                     }
                     // For foreign patents, accept any row with title or case_no
                     if (fp.title.empty() && fp.case_no.empty()) continue;
+                    if (!IsValidRowCode(fp.case_no) && !IsValidRowCode(fp.application_no)) continue;
                     if (fp.case_no.empty()) fp.case_no = "F-" + std::to_string(row);
                     db.InsertForeign(fp);
                     sheet_added++;
@@ -955,14 +956,27 @@ bool ExcelIO::IsValidGekeCode(const std::string& code) {
 bool ExcelIO::IsValidRowCode(const std::string& code) {
     if (code.empty()) return false;
 
-    std::string exclude_kw[] = {"total", "sum", "note", "status", "type", "header",
-        "合计", "总计", "备注", "状态", "编码", "序号", "案号", "登记号", "number", "code"};
+    // Exclude keywords - column headers, labels, status text
+    std::string exclude_kw[] = {
+        // English generic
+        "total", "sum", "note", "status", "type", "header", "number", "code",
+        // Chinese generic
+        "合计", "总计", "备注", "状态", "编码", "序号", "案号", "登记号",
+        // Foreign patent status/labels
+        "红色专利", "灰色专利", "绿色专利", "蓝色专利",
+        "视为撤回", "中国同源", "国内同源", "同源",
+        "授权", "驳回", "审查中", "申请中",
+        // Exclude pure numeric status
+        "nan", "null", "none", "n/a"
+    };
 
     std::string lower = code;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
     for (const auto& kw : exclude_kw) {
-        if (lower == kw || lower == kw + "s") return false;
+        std::string lower_kw = kw;
+        std::transform(lower_kw.begin(), lower_kw.end(), lower_kw.begin(), ::tolower);
+        if (lower == lower_kw || lower == lower_kw + "s") return false;
     }
 
     return true;
