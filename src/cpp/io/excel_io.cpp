@@ -215,7 +215,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
         column_name.find("IPR") != std::string::npos || column_name.find("经办人") != std::string::npos) return 13;
     if (column_name.find("研发部门") != std::string::npos) return 19;
     if (column_name.find("事务所") != std::string::npos || column_name.find("代理") != std::string::npos) return 20;
-    if (column_name.find("备注") != std::string::npos || column_name.find("具体内容") != std::string::npos) return 14;
+    if (column_name.find("具体内容") != std::string::npos) return 26;
+    if (column_name.find("备注") != std::string::npos) return 14;
 
     // English fallback
     std::string lower = column_name;
@@ -494,6 +495,10 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 25:
                     if (p.notes.empty()) p.notes = "标签: " + value;
                     else p.notes += "; 标签: " + value;
+                    break;
+                case 26:
+                    if (p.notes.empty()) p.notes = "具体内容: " + value;
+                    else p.notes += "; 具体内容: " + value;
                     break;
             }
         }
@@ -895,6 +900,10 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 25:
                                 if (p.notes.empty()) p.notes = "标签: " + value;
                                 else p.notes += "; 标签: " + value;
+                                break;
+                            case 26:
+                                if (p.notes.empty()) p.notes = "具体内容: " + value;
+                                else p.notes += "; 具体内容: " + value;
                                 break;
                         }
                     }
