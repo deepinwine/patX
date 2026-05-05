@@ -200,7 +200,9 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     if (column_name.find("一级（新）") != std::string::npos ||
         column_name.find("一级(新)") != std::string::npos ||
         (column_name.find("一级") != std::string::npos && column_name.find("分类") != std::string::npos)) return 9;
-    if (column_name.find("二级") != std::string::npos && column_name.find("分类") != std::string::npos) return 10;
+    if (column_name.find("二级（新）") != std::string::npos ||
+        column_name.find("二级(新)") != std::string::npos ||
+        (column_name.find("二级") != std::string::npos && column_name.find("分类") != std::string::npos)) return 10;
     if (column_name.find("三级") != std::string::npos && column_name.find("分类") != std::string::npos) return 11;
     if (column_name.find("处理人") != std::string::npos || column_name.find("负责人") != std::string::npos ||
         column_name.find("IPR") != std::string::npos || column_name.find("经办人") != std::string::npos) return 13;
