@@ -164,7 +164,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 15=proposal_name, 16=original_applicant, 17=authorization_date,
     // 18=expiration_date, 19=rd_department, 20=agency_firm, 21=related_case_info,
     // 22=fee_status, 23=rd_project, 24=class_level4, 25=tag, 26=details,
-    // 27=filing_date, 28=disclosure_writer, 29=agent_code
+    // 27=filing_date, 28=disclosure_writer, 29=agent_code, 30=agent_name
 
     // 公司内部编号列。格科场景中 Excel 的“格科编码”就是 app 里的“编号”。
     // 代理所/代理人编码不能映射到 geke_code，否则会覆盖公司编号。
@@ -220,6 +220,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     if (column_name.find("研发部门") != std::string::npos) return 19;
     if (column_name.find("代理人编码") != std::string::npos ||
         column_name.find("代理编码") != std::string::npos) return 29;
+    if (column_name == "代理人" || column_name.find("代理人") != std::string::npos) return 30;
     if (column_name.find("事务所") != std::string::npos || column_name.find("代理") != std::string::npos) return 20;
     if (column_name.find("具体内容") != std::string::npos) return 26;
     if (column_name.find("备注") != std::string::npos) return 14;
@@ -517,6 +518,10 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 29:
                     if (p.notes.empty()) p.notes = "代理人编码: " + value;
                     else p.notes += "; 代理人编码: " + value;
+                    break;
+                case 30:
+                    if (p.notes.empty()) p.notes = "代理人: " + value;
+                    else p.notes += "; 代理人: " + value;
                     break;
             }
         }
@@ -934,6 +939,10 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 29:
                                 if (p.notes.empty()) p.notes = "代理人编码: " + value;
                                 else p.notes += "; 代理人编码: " + value;
+                                break;
+                            case 30:
+                                if (p.notes.empty()) p.notes = "代理人: " + value;
+                                else p.notes += "; 代理人: " + value;
                                 break;
                         }
                     }
