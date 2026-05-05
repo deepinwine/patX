@@ -128,11 +128,18 @@ function Build-Cpp {
 
     $buildDir = Join-Path $ProjectRoot "build"
     $cacheFile = Join-Path $buildDir "CMakeCache.txt"
+    $vcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { "C:\vcpkg" }
+    $vcpkgToolchain = Join-Path $vcpkgRoot "scripts\buildsystems\vcpkg.cmake"
     $cmakeArgs = @(
         "-B", $buildDir,
         "-S", $ProjectRoot,
-        "-DCMAKE_BUILD_TYPE=$Configuration"
+        "-DCMAKE_BUILD_TYPE=$Configuration",
+        "-DVCPKG_TARGET_TRIPLET=x64-windows-static"
     )
+
+    if (Test-Path $vcpkgToolchain) {
+        $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$vcpkgToolchain"
+    }
 
     if (-not (Test-Path $cacheFile)) {
         if ($Platform -eq "x64") {
