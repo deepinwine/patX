@@ -164,7 +164,7 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     // 15=proposal_name, 16=original_applicant, 17=authorization_date,
     // 18=expiration_date, 19=rd_department, 20=agency_firm, 21=related_case_info,
     // 22=fee_status, 23=rd_project, 24=class_level4, 25=tag, 26=details,
-    // 27=filing_date, 28=disclosure_writer
+    // 27=filing_date, 28=disclosure_writer, 29=agent_code
 
     // 公司内部编号列。格科场景中 Excel 的“格科编码”就是 app 里的“编号”。
     // 代理所/代理人编码不能映射到 geke_code，否则会覆盖公司编号。
@@ -218,6 +218,8 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
         column_name.find("处理人") != std::string::npos || column_name.find("负责人") != std::string::npos ||
         column_name.find("IPR") != std::string::npos || column_name.find("经办人") != std::string::npos) return 13;
     if (column_name.find("研发部门") != std::string::npos) return 19;
+    if (column_name.find("代理人编码") != std::string::npos ||
+        column_name.find("代理编码") != std::string::npos) return 29;
     if (column_name.find("事务所") != std::string::npos || column_name.find("代理") != std::string::npos) return 20;
     if (column_name.find("具体内容") != std::string::npos) return 26;
     if (column_name.find("备注") != std::string::npos) return 14;
@@ -511,6 +513,10 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 28:
                     if (p.notes.empty()) p.notes = "技术交底书撰写人: " + value;
                     else p.notes += "; 技术交底书撰写人: " + value;
+                    break;
+                case 29:
+                    if (p.notes.empty()) p.notes = "代理人编码: " + value;
+                    else p.notes += "; 代理人编码: " + value;
                     break;
             }
         }
@@ -924,6 +930,10 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 28:
                                 if (p.notes.empty()) p.notes = "技术交底书撰写人: " + value;
                                 else p.notes += "; 技术交底书撰写人: " + value;
+                                break;
+                            case 29:
+                                if (p.notes.empty()) p.notes = "代理人编码: " + value;
+                                else p.notes += "; 代理人编码: " + value;
                                 break;
                         }
                     }
