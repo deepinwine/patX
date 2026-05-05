@@ -1216,61 +1216,7 @@ private:
         // Bind tab change event to update filters
         notebook->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, [this](wxBookCtrlEvent& e) {
             int tab = e.GetSelection();
-            // Update status filter based on current tab
-            wxString current_status = common_status_filter->GetValue();
-            common_status_filter->Clear();
-            common_status_filter->Append(current_lang == 0 ? "All" : UTF8_STR("全部"));
-
-            std::string status_table, status_col;
-            switch (tab) {
-                case 0: status_table = "patents"; status_col = "application_status"; break;
-                case 1: status_table = "oa_records"; status_col = "oa_type"; break;
-                case 2: status_table = "pct_patents"; status_col = "application_status"; break;
-                case 3: status_table = "software_copyrights"; status_col = "application_status"; break;
-                case 4: status_table = "ic_layouts"; status_col = "application_status"; break;
-                case 5: status_table = "foreign_patents"; status_col = "patent_status"; break;
-                default: status_table = "patents"; status_col = "application_status"; break;
-            }
-            auto statuses = db->GetDistinctValues(status_table, status_col);
-            for (const auto& s : statuses) {
-                if (!s.empty()) common_status_filter->Append(DB_STR(s));
-            }
-            common_status_filter->SetValue(current_status.IsEmpty() ? (current_lang == 0 ? "All" : UTF8_STR("全部")) : current_status);
-
-            // Update handler filter based on current tab
-            wxString current_handler = common_handler_filter->GetValue();
-            common_handler_filter->Clear();
-            common_handler_filter->Append(current_lang == 0 ? "All" : UTF8_STR("全部"));
-
-            std::string handler_table, handler_col;
-            switch (tab) {
-                case 0: handler_table = "patents"; handler_col = "geke_handler"; break;
-                case 1: handler_table = "oa_records"; handler_col = "handler"; break;
-                case 2: handler_table = "pct_patents"; handler_col = "handler"; break;
-                case 3: handler_table = "software_copyrights"; handler_col = "handler"; break;
-                case 4: handler_table = "ic_layouts"; handler_col = "handler"; break;
-                case 5: handler_table = "foreign_patents"; handler_col = "handler"; break;
-                default: handler_table = "patents"; handler_col = "geke_handler"; break;
-            }
-            auto handlers = db->GetDistinctValues(handler_table, handler_col);
-            for (const auto& h : handlers) {
-                if (!h.empty()) common_handler_filter->Append(DB_STR(h));
-            }
-            common_handler_filter->SetValue(current_handler.IsEmpty() ? (current_lang == 0 ? "All" : UTF8_STR("全部")) : current_handler);
-
-            // Update level filter (only for patents tab)
-            wxString current_level = common_level_filter->GetValue();
-            common_level_filter->Clear();
-            common_level_filter->Append(current_lang == 0 ? "All" : UTF8_STR("全部"));
-            if (tab == 0) {
-                common_level_filter->Append(current_lang == 0 ? "Core" : UTF8_STR("核心"));
-                common_level_filter->Append(current_lang == 0 ? "Important" : UTF8_STR("重要"));
-                common_level_filter->Append(current_lang == 0 ? "Normal" : UTF8_STR("一般"));
-            }
-            common_level_filter->SetValue(current_level.IsEmpty() ? (current_lang == 0 ? "All" : UTF8_STR("全部")) : current_level);
-            lbl_level->Show(tab == 0);
-            common_level_filter->Show(tab == 0);
-
+            RefreshCommonFiltersForTab(tab, true);
             e.Skip();
         });
 
@@ -1959,6 +1905,114 @@ private:
         return nullptr;
     }
 
+    wxString AllFilterLabel() const {
+        return LANG_STR("All", UTF8_STR("全部"));
+    }
+
+    bool IsAllFilterValue(const wxString& value) const {
+        return value.IsEmpty() || value == "All" || value == UTF8_STR("全部");
+    }
+
+    void SetComboValueIfPresent(wxComboBox* combo, const wxString& wanted) {
+        wxString all = AllFilterLabel();
+        if (!combo || IsAllFilterValue(wanted)) {
+            if (combo) combo->SetValue(all);
+            return;
+        }
+
+        for (unsigned int i = 0; i < combo->GetCount(); ++i) {
+            if (combo->GetString(i) == wanted) {
+                combo->SetValue(wanted);
+                return;
+            }
+        }
+        combo->SetValue(all);
+    }
+
+    void GetTabFilterSources(int tab,
+                             std::string& status_table,
+                             std::string& status_col,
+                             std::string& handler_table,
+                             std::string& handler_col) {
+        switch (tab) {
+            case 0:
+                status_table = "patents"; status_col = "application_status";
+                handler_table = "patents"; handler_col = "geke_handler";
+                break;
+            case 1:
+                status_table = "oa_records"; status_col = "oa_type";
+                handler_table = "oa_records"; handler_col = "handler";
+                break;
+            case 2:
+                status_table = "pct_patents"; status_col = "application_status";
+                handler_table = "pct_patents"; handler_col = "handler";
+                break;
+            case 3:
+                status_table = "software_copyrights"; status_col = "application_status";
+                handler_table = "software_copyrights"; handler_col = "handler";
+                break;
+            case 4:
+                status_table = "ic_layouts"; status_col = "application_status";
+                handler_table = "ic_layouts"; handler_col = "handler";
+                break;
+            case 5:
+                status_table = "foreign_patents"; status_col = "patent_status";
+                handler_table = "foreign_patents"; handler_col = "handler";
+                break;
+            default:
+                status_table = "patents"; status_col = "application_status";
+                handler_table = "patents"; handler_col = "geke_handler";
+                break;
+        }
+    }
+
+    void RefreshCommonFiltersForTab(int tab, bool preserve_values) {
+        if (!common_status_filter || !common_handler_filter || !common_level_filter) return;
+
+        wxString old_status = preserve_values ? common_status_filter->GetValue() : AllFilterLabel();
+        wxString old_handler = preserve_values ? common_handler_filter->GetValue() : AllFilterLabel();
+        wxString old_level = preserve_values ? common_level_filter->GetValue() : AllFilterLabel();
+
+        std::string status_table, status_col, handler_table, handler_col;
+        GetTabFilterSources(tab, status_table, status_col, handler_table, handler_col);
+
+        common_status_filter->Clear();
+        common_status_filter->Append(AllFilterLabel());
+        auto statuses = db->GetDistinctValues(status_table, status_col);
+        for (const auto& s : statuses) {
+            if (!s.empty()) common_status_filter->Append(DB_STR(s));
+        }
+        SetComboValueIfPresent(common_status_filter, old_status);
+
+        common_handler_filter->Clear();
+        common_handler_filter->Append(AllFilterLabel());
+        auto handlers = db->GetDistinctValues(handler_table, handler_col);
+        for (const auto& h : handlers) {
+            if (!h.empty()) common_handler_filter->Append(DB_STR(h));
+        }
+        SetComboValueIfPresent(common_handler_filter, old_handler);
+
+        common_level_filter->Clear();
+        common_level_filter->Append(AllFilterLabel());
+        if (tab == 0) {
+            common_level_filter->Append(LANG_STR("Core", UTF8_STR("核心")));
+            common_level_filter->Append(LANG_STR("Important", UTF8_STR("重要")));
+            common_level_filter->Append(LANG_STR("Normal", UTF8_STR("一般")));
+            auto levels = db->GetDistinctValues("patents", "patent_level");
+            for (const auto& l : levels) {
+                if (!l.empty() && l != "core" && l != "important" && l != "normal" &&
+                    l.find("核心") == std::string::npos &&
+                    l.find("重要") == std::string::npos &&
+                    l.find("一般") == std::string::npos) {
+                    common_level_filter->Append(DB_STR(l));
+                }
+            }
+        }
+        SetComboValueIfPresent(common_level_filter, old_level);
+        lbl_level->Show(tab == 0);
+        common_level_filter->Show(tab == 0);
+    }
+
     void OnNewByCurrentTab(wxCommandEvent&) {
         int tab = GetCurrentTab();
         switch (tab) {
@@ -2148,70 +2202,7 @@ private:
 
     void OnFilterByCurrentTab(wxCommandEvent&) {
         int tab = GetCurrentTab();
-
-        // Update status filter with values from current tab's table
-        wxString current_status = common_status_filter->GetValue();
-        common_status_filter->Clear();
-        common_status_filter->Append(LANG_STR("All", UTF8_STR("全部")));
-
-        std::string status_table;
-        std::string status_col;
-        switch (tab) {
-            case 0: status_table = "patents"; status_col = "application_status"; break;
-            case 1: status_table = "oa_records"; status_col = "oa_type"; break;
-            case 2: status_table = "pct_patents"; status_col = "application_status"; break;
-            case 3: status_table = "software_copyrights"; status_col = "application_status"; break;
-            case 4: status_table = "ic_layouts"; status_col = "application_status"; break;
-            case 5: status_table = "foreign_patents"; status_col = "patent_status"; break;
-            default: status_table = "patents"; status_col = "application_status"; break;
-        }
-        auto statuses = db->GetDistinctValues(status_table, status_col);
-        for (const auto& s : statuses) {
-            if (!s.empty()) common_status_filter->Append(DB_STR(s));
-        }
-        common_status_filter->SetValue(current_status);
-
-        // Update handler filter with values from current tab's table
-        wxString current_handler = common_handler_filter->GetValue();
-        common_handler_filter->Clear();
-        common_handler_filter->Append(LANG_STR("All", UTF8_STR("全部")));
-
-        std::string table_name;
-        std::string col_name;
-        switch (tab) {
-            case 0: table_name = "patents"; col_name = "geke_handler"; break;
-            case 1: table_name = "oa_records"; col_name = "handler"; break;
-            case 2: table_name = "pct_patents"; col_name = "handler"; break;
-            case 3: table_name = "software_copyrights"; col_name = "handler"; break;
-            case 4: table_name = "ic_layouts"; col_name = "handler"; break;
-            case 5: table_name = "foreign_patents"; col_name = "handler"; break;
-            default: table_name = "patents"; col_name = "geke_handler"; break;
-        }
-        auto handlers = db->GetDistinctValues(table_name, col_name);
-        for (const auto& h : handlers) {
-            if (!h.empty()) common_handler_filter->Append(DB_STR(h));
-        }
-        common_handler_filter->SetValue(current_handler);
-
-        // Level filter only valid for patents tab
-        wxString current_level = common_level_filter->GetValue();
-        common_level_filter->Clear();
-        common_level_filter->Append(LANG_STR("All", UTF8_STR("全部")));
-        if (tab == 0) {
-            common_level_filter->Append(LANG_STR("Core", UTF8_STR("核心")));
-            common_level_filter->Append(LANG_STR("Important", UTF8_STR("重要")));
-            common_level_filter->Append(LANG_STR("Normal", UTF8_STR("一般")));
-            auto levels = db->GetDistinctValues("patents", "patent_level");
-            for (const auto& l : levels) {
-                if (!l.empty() && l != "core" && l != "important" && l != "normal" &&
-                    l.find("核心") == std::string::npos && l.find("重要") == std::string::npos && l.find("一般") == std::string::npos) {
-                    common_level_filter->Append(DB_STR(l));
-                }
-            }
-        }
-        common_level_filter->SetValue(current_level);
-        lbl_level->Show(tab == 0);
-        common_level_filter->Show(tab == 0);
+        RefreshCommonFiltersForTab(tab, true);
 
         switch (tab) {
             case 0: LoadPatents(); break;
@@ -2838,14 +2829,7 @@ private:
         }
         // Update common_handler_filter items
         if (common_handler_filter) {
-            wxString cur = common_handler_filter->GetValue();
-            common_handler_filter->Clear();
-            common_handler_filter->Append(LANG_STR_L(lang, "All", "全部"));
-            // Add actual handlers from database
-            auto handlers = db->GetDistinctValues("patents", "geke_handler");
-            for (const auto& h : handlers) common_handler_filter->Append(DB_STR(h));
-            if (!cur.IsEmpty()) common_handler_filter->SetValue(cur);
-            else common_handler_filter->SetValue(LANG_STR_L(lang, "All", "全部"));
+            RefreshCommonFiltersForTab(GetCurrentTab(), true);
         }
         // Update common_level_filter items
         if (common_level_filter) {
@@ -3787,6 +3771,7 @@ private:
     void OnExit(wxCommandEvent&) { Close(true); }
 
     void LoadAllData() {
+        RefreshCommonFiltersForTab(GetCurrentTab(), true);
         LoadPatents();
         LoadOA();
         LoadPCT();
