@@ -197,7 +197,9 @@ int ExcelIO::MapColumnToField(const std::string& column_name) {
     if (column_name.find("到期日") != std::string::npos || column_name.find("届满") != std::string::npos) return 18;
     if (column_name.find("类型") != std::string::npos || column_name.find("专利类型") != std::string::npos) return 6;
     if (column_name.find("发明人") != std::string::npos || column_name.find("设计人") != std::string::npos) return 8;
-    if (column_name.find("一级") != std::string::npos && column_name.find("分类") != std::string::npos) return 9;
+    if (column_name.find("一级（新）") != std::string::npos ||
+        column_name.find("一级(新)") != std::string::npos ||
+        (column_name.find("一级") != std::string::npos && column_name.find("分类") != std::string::npos)) return 9;
     if (column_name.find("二级") != std::string::npos && column_name.find("分类") != std::string::npos) return 10;
     if (column_name.find("三级") != std::string::npos && column_name.find("分类") != std::string::npos) return 11;
     if (column_name.find("处理人") != std::string::npos || column_name.find("负责人") != std::string::npos ||
