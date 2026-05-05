@@ -1871,7 +1871,7 @@ private:
              << UTF8_STR("申请人(原): ") << DB_STR(p.original_applicant) << "\n"
              << UTF8_STR("申请人(现): ") << DB_STR(p.current_applicant) << "\n\n"
              << UTF8_STR("备注: ") << (p.notes.empty() ? UTF8_STR("无") : DB_STR(p.notes)) << "\n\n"
-             << "─────────────────────────────────\n"
+             << "---------------------------------\n"
              << UTF8_STR("OA记录: ") << (oa_info.IsEmpty() ? UTF8_STR("无") : oa_info);
         patent_detail->SetValue(info);
     }
