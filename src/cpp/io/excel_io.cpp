@@ -44,21 +44,16 @@ static std::string CellToString(OpenXLSX::XLCellValue value) {
         if (d == static_cast<int64_t>(d) && d >= -9223372036854775807.0 && d <= 9223372036854775807.0) {
             return std::to_string(static_cast<int64_t>(d));
         }
-        // For large numbers that might be IDs/codes (like application numbers),
-        // output without scientific notation and without trailing zeros
+        // For large numbers that might be application numbers (like 202510121074.1),
+        // keep only 1 decimal digit to avoid floating-point precision artifacts
+        // e.g., 202510121074.899993896484375 -> 202510121074.9
         std::ostringstream oss;
-        oss << std::fixed << std::setprecision(15);
+        oss << std::fixed << std::setprecision(1);
         oss << d;
         std::string result = oss.str();
-        // Remove trailing zeros and unnecessary decimal point
-        size_t dot = result.find('.');
-        if (dot != std::string::npos) {
-            size_t last_nonzero = result.find_last_not_of('0');
-            if (last_nonzero == dot) {
-                result = result.substr(0, dot);  // Remove ".000..." entirely
-            } else if (last_nonzero > dot) {
-                result = result.substr(0, last_nonzero + 1);  // Keep significant digits after dot
-            }
+        // Remove trailing ".0" if it's actually an integer
+        if (result.size() > 2 && result.substr(result.size() - 2) == ".0") {
+            result = result.substr(0, result.size() - 2);
         }
         return result;
     }
