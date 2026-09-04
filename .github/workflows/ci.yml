@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows (vcpkg, full app)
+    runs-on: windows-latest
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Export vcpkg root
+        shell: pwsh
+        run: echo "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+
+      - name: Cache vcpkg dependencies
+        uses: actions/cache@v4
+        with:
+          path: build-ci/vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}-v2
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build-ci `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build
+        run: cmake --build build-ci --config Release --parallel 4
+
+      - name: Test
+        working-directory: build-ci
+        run: ctest -C Release --output-on-failure
+
+  macos:
+    name: macOS (core library + tests)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (core + tests, GUI optional)
+        run: |
+          cmake -S . -B build-ci -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DPATX_BUILD_GUI=OFF
+
+      - name: Build
+        run: cmake --build build-ci --parallel 4
+
+      - name: Test
+        working-directory: build-ci
+        run: ctest --output-on-failure
+
+  # Live USPTO API verification is intentionally NOT part of CI: it requires
+  # a personal API key (USPTO_API_KEY secret). The offline fixture suite in
+  # tests/fixtures/uspto covers parsing deterministically.

@@ -1,267 +1,105 @@
-﻿# patX - 专利数据管理系统 C++/Rust 极速版
+# patX — 专利/IP 管理系统 (C++17 + wxWidgets + SQLite)
 
-## 项目介绍
+patX 是一个跨平台专利与知识产权管理桌面软件：国内专利、OA 处理、PCT、软件著作权、集成电路布图、国外专利、美国专利审查（USPTO 官方数据同步）、年费与期限规则，全部存储在本地 SQLite 数据库中。
 
-patX 是一个高性能专利数据管理系统，采用 C++/Rust 混合架构，从 Python 版本 (patentmanager-pyside6) 迁移而来，实现极致性能提升。
+当前版本：**0.4.0**（版本号唯一来源：`CMakeLists.txt` 的 `project(patX VERSION ...)`，经 `include/patx/version.h.in` 生成到代码各处）。
 
-### 性能目标
+## 架构
 
-| 指标 | 目标提升 |
-|------|----------|
-| 核心检索速度 | 50-100 倍 |
-| 批量导入速度 | 20-50 倍 |
-| 并发处理能力 | 10 倍以上 |
-| 数据规模 | 支持千万级专利数据 |
-
-### 架构设计
-
-```text
-┌──────────────────────────────────────────────────────────────┐
-│                    CLI/API 接口层                             │
-├──────────────────────────────────────────────────────────────┤
-│                  C++/Rust FFI 交互适配层                      │
-├───────────────────────────┬──────────────────────────────────┤
-│  Rust 安全并发层          │     C++ 性能核心层                 │
-│  ┌─────────────────┐     │  ┌─────────────────────────────┐  │
-│  │ 并发调度        │     │  │ 内存索引                    │  │
-│  │ 内存池管理      │     │  │ 底层 IO                     │  │
-│  │ 数据校验        │     │  │ 序列化                      │  │
-│  │ 任务编排        │     │  │ 数据持久化                  │  │
-│  └─────────────────┘     │  └─────────────────────────────┘  │
-├───────────────────────────┴──────────────────────────────────┤
-│                  数据持久化层 (SQLite)                        │
-└──────────────────────────────────────────────────────────────┘
+```
+wxWidgets GUI (src/cpp/main_gui.cpp, src/cpp/ui/*)
+        │
+patx_core 静态库（无 GUI 依赖，可独立构建与测试）
+        │
+        ├── database/            核心业务表 + USPTO 表 + 版本化迁移
+        ├── io/excel_io          Excel/CSV 导入导出（OpenXLSX）
+        ├── network/http_client  libcurl 封装（重试/退避/Retry-After/取消）
+        └── uspto/               ODP 客户端、同步服务、文档分类、
+                                 OA 解析、权利要求解析/版本/对比、时间线
+        │
+     SQLite (WAL)
 ```
 
-### 技术栈
+- **GUI 与数据/网络完全分层**：`patx_core` 不依赖 wxWidgets，可在 macOS/Linux/CI 上独立构建并运行单元测试。
+- **USPTO 网络请求全部在 worker 线程**执行（每个线程独立 SQLite 连接），结果经 `wxThreadEvent` 回到主线程，不冻结界面。
+- 仓库中的 Rust 代码（`src/rust`）是历史遗留，**未参与当前构建与运行链路**，仅作参考保留；后续如有百万级全文检索需求再评估接入。
 
-**C++ (底层性能核心)**
-- 标准: C++17/C++20
-- 编译器: GCC/Clang/MSVC
-- 优化选项: -O3 -flto -march=native
-- 依赖: Abseil, SQLite3, mmap, FlatBuffers
+### 与旧版 README 的差异（诚实声明）
 
-**Rust (安全并发中间层)**
-- 版本: Rust 1.70+
-- 依赖: rustc-hash, crossbeam, crossbeam-channel, lazy_static, 内存池
+旧 README 宣称的 "C++/Rust 混合架构"、50x/100x 性能对比表已删除——此前的 benchmark 用 "C++ 时间 × 固定倍数" 伪造 Python 基线，属于虚假数据，相关代码已从仓库移除。本项目现阶段以正确性为先，不发布未经实测的性能数字。
 
-## 编译说明
+## 功能模块
 
-### 环境要求
+| 模块 | 说明 |
+|------|------|
+| 国内专利 | 完整 CRUD、批量等级/状态、列头筛选、自然排序、结构化字段（技术路线/研发项目/标签/代理人/1st-5th OA 提醒等，不再拼进备注） |
+| OA 处理 | 期限倒计时配色、5/30 天到期过滤、PDF 导入自动匹配申请号并按规则表计算建议绝限 |
+| PCT / 软著 / IC / 国外专利 | 完整 CRUD（编辑真正更新全字段）、搜索/状态/处理人筛选 |
+| **美国审查 (US Prosecution)** | 基于 USPTO Open Data Portal Patent File Wrapper API：案件元数据、审查文档增量同步（按 documentIdentifier 去重）、文档分类、Office Action 驳回理由解析（§101/102/103/112 等）、**权利要求 37 CFR 1.121 版本重建与逐词对比**、审查时间线、与 OA 页签联动 |
+| 年费 | 从真实授权专利生成（中国官费标准）；未配置规则的地区显示 "Rule not configured"，不再显示假数据 |
+| 期限规则 | 数据库存储的规则表（管辖地/事件/月/日/可延期），支持增删改与启用禁用；国内 OA 与 USPTO OA 共用同一引擎；人工修改的期限（deadline_source=manual）不会被同步覆盖 |
 
-- C++ 编译器: GCC 10+ / Clang 12+ / MSVC 2022+
-- Rust 工具链: 1.70+ (推荐使用 rustup 安装)
-- CMake: 3.20+
-- vcpkg (可选，用于管理 C++ 依赖)
+## USPTO 同步说明
 
-### Windows 编译
+1. 在 [USPTO Open Data Portal](https://data.uspto.gov/) 注册并申请 API Key（自 2026 年起 ODP API 需要登录账户的 Key）。
+2. patX 内 `美国审查 → 设置` 粘贴 Key（存储在本地 git-ignored 数据库中，不进仓库、不写日志），或设置环境变量 `USPTO_API_KEY`。
+3. `添加案件` 输入美国申请号（如 `17248024` 或 `17/248024`）即可同步。
+4. 数据来源为官方 Patent File Wrapper（`api.uspto.gov`），**不抓取 Patent Center 网页**；未公开的私有案件不在同步范围内，界面上会如实区分。
+5. Office Action / Amendment 默认**懒下载**（先同步元数据），可在设置中开启自动下载；下载文件保存 SHA-256 校验值，原始文档不可变。
+6. 权利要求版本优先采信 Amendment 中的完整 claim listing（37 CFR 1.121），低置信度解析会标记 `Needs Review`，不会默默当作正确文本。
+
+API Key 安全：`patents.db`、`patx_uspto.json`、日志等均在 `.gitignore` 中排除。
+
+## 构建
+
+### Windows（主要平台，vcpkg）
 
 ```powershell
-# 使用构建脚本 (推荐)
-.\scripts\build.ps1
-
-# 或手动编译
-# 1. 编译 Rust 库
-cargo build --release
-
-# 2. 编译 C++ 库和主程序
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+git clone https://github.com/deepinwine/patX
+cd patX
+cmake -B build -S . `
+  -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake `
+  -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+  -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-### Linux/macOS 编译
+依赖由 `vcpkg.json` manifest 自动安装：wxwidgets、openxlsx、curl、sqlite3、nlohmann-json。
+
+### macOS / Linux（核心库 + 测试；GUI 需另装 wxWidgets）
 
 ```bash
-# 安装依赖
-sudo apt install build-essential cmake libsqlite3-dev libabsl-dev  # Debian/Ubuntu
-brew install cmake sqlite abseil  # macOS
-
-# 编译 Rust 库
-cargo build --release
-
-# 编译 C++ 库和主程序
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-
-# 运行测试
-./build/patx_test
-./build/patx_benchmark
+brew install sqlite3 curl wxwidgets   # wxwidgets 仅 GUI 需要
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+cmake --build build -j8
+ctest --test-dir build
 ```
 
-### 依赖安装
+未安装 wxWidgets 时自动只构建 `patx_core` 与测试（`-DPATX_BUILD_GUI=OFF` 可强制关闭）。
 
-**vcpkg 方式 (Windows 推荐)**
-```powershell
-vcpkg install sqlite3:x64-windows abseil:x64-windows
-```
-
-**系统包管理器**
-```bash
-# Debian/Ubuntu
-sudo apt install libsqlite3-dev libabsl-dev
-
-# macOS
-brew install sqlite abseil
-
-# Fedora
-sudo dnf install sqlite-devel abseil-cpp-devel
-```
-
-## 使用方法
-
-### 命令行接口
+## 测试
 
 ```bash
-# 显示帮助
-patx
-
-# 初始化数据库
-patx init [数据库路径]
-
-# 导入专利数据
-patx import <文件路径> [--format excel|csv|json]
-
-# 导出专利数据
-patx export <输出路径> [--format excel|csv|json] [--filter <条件>]
-
-# 检索专利
-patx search --geke <编码>
-patx search --applicant <申请人>
-patx search --keyword <关键词>
-
-# 显示统计信息
-patx stats
-
-# 显示版本
-patx version
+ctest --test-dir build --output-on-failure
 ```
 
-### 示例用法
+覆盖：数据库 CRUD（全部模块全字段往返）、v1→v2 迁移（含 notes 前缀搬迁与迁移前备份）、统一查询过滤（含 LIKE 通配符转义）、期限规则引擎、真 XLSX 导出（重新打开校验单元格）、CSV 引号规则、结构化字段导入、USPTO 响应解析（离线 fixture，来自 ODP 真实响应结构）、文档分类、37 CFR 1.121 claim 解析、逐词 diff、OA 驳回解析、增量去重。
 
-```bash
-# 初始化数据库
-patx init patents.db
+USPTO live API 测试不在 CI 内：需要个人 Key（`USPTO_API_KEY`），无 Key 时相关功能自动跳过，不影响其他模块。
 
-# 导入 Excel 数据
-patx import data/patents_2024.xlsx
+## 数据安全
 
-# 导入 CSV 数据
-patx import data/patents.csv --format csv
+- 版本化迁移（`schema_info` 表）：只 ALTER 加列，永不 DROP/重建；迁移前自动生成 `patents.db.pre_migration_<时间戳>.bak`，迁移在事务内执行并验证。
+- NAS 同步为**文件级、单人使用**设计：同步前先对本地库做备份，冲突时保留本地较新版本；它不是多人实时协作系统。
+- 统一日志（`patx.log`）：记录迁移/导入导出/USPTO 同步/下载/解析，永不打印 API Key（仅掩码显示）。
 
-# 按编码检索
-patx search --geke GC-0001
+## 已知限制（不夸大）
 
-# 按申请人检索
-patx search --applicant "华为"
+- OCR 未实现：PDF 文本依赖 `pdftotext`（poppler-utils）；无文本层的扫描件会标记待人工处理，而不是假装解析成功。
+- `claim(s)` 依赖解析基于规则表达式，复杂从属关系可能漏解析（不影响权利要求文本本身保存）。
+- USPTO 端点以 `api.uspto.gov` 官方 Swagger 为准（2025-2026 期间 PEDS/Developer Hub 已退役迁移至 ODP）；base URL 可在设置中修改以应对官方迁移。
+- Windows 下 API Key 存于本地数据库文件；如需 DPAPI/凭据管理器加密存储可作为后续增强。
 
-# 显示统计信息
-patx stats
+## License
 
-# 导出数据
-patx export output.xlsx --format excel
-```
-
-### API 接口
-
-patX 提供 C FFI 接口，可被其他语言调用：
-
-```c
-// 系统生命周期
-int patx_init();
-int patx_shutdown();
-char* patx_version();
-
-// 数据库操作
-int patx_init_system(const char* db_path);
-int patx_load_data();
-int patx_save_data();
-size_t patx_get_count();
-
-// 内存管理
-void patx_free_string(char* s);
-```
-
-## 性能数据
-
-### 基准测试环境
-
-- CPU: Intel Core i7-12700K / AMD Ryzen 9 5900X
-- 内存: 32GB DDR4-3200
-- 存储: NVMe SSD
-- 数据量: 100万条专利记录
-
-### 检索性能
-
-| 操作 | Python 版本 | patX 版本 | 提升倍数 |
-|------|------------|-----------|----------|
-| 精确检索 (申请号) | 15ms | 0.15ms | 100x |
-| 前缀检索 (编码) | 25ms | 0.3ms | 83x |
-| 模糊检索 (标题) | 150ms | 5ms | 30x |
-| 组合条件检索 | 200ms | 3ms | 67x |
-
-### 导入性能
-
-| 数据格式 | Python 版本 | patX 版本 | 提升倍数 |
-|----------|------------|-----------|----------|
-| Excel (1万条) | 30s | 0.8s | 37x |
-| CSV (1万条) | 10s | 0.3s | 33x |
-| Excel (10万条) | 300s | 8s | 37x |
-| 批量导入 (100万条) | 50min | 80s | 37x |
-
-### 并发性能
-
-| 并发任务数 | Python 版本 | patX 版本 | 提升倍数 |
-|-----------|------------|-----------|----------|
-| 4 个并发导入 | 45s | 3s | 15x |
-| 8 个并发导入 | 40s | 2s | 20x |
-| 16 个并发导入 | 38s | 1.5s | 25x |
-
-### 内存占用
-
-| 数据量 | Python 版本 | patX 版本 |
-|--------|------------|-----------|
-| 10万条 | 800MB | 150MB |
-| 100万条 | 8GB | 1.2GB |
-| 1000万条 | OOM | 12GB |
-
-### 技术优化点
-
-1. **内存索引**: 使用 Abseil flat_hash_map 实现 O(1) 检索
-2. **零拷贝解析**: 直接内存映射避免数据复制
-3. **并行调度**: Rust crossbeam 实现高效任务调度
-4. **内存池**: 预分配内存减少频繁申请释放
-5. **SIMD 优化**: 批量数据处理利用向量化指令
-
-## 开发路线
-
-- [x] Phase 1: 基础框架
-  - [x] 项目结构搭建
-  - [x] C++ 核心数据结构
-  - [x] Rust 并发框架
-  - [x] FFI 接口定义
-
-- [ ] Phase 2: 核心功能
-  - [ ] 数据库管理模块
-  - [ ] 专利 CRUD 操作
-  - [ ] 批量导入/导出
-  - [ ] 数据检索模块
-
-- [ ] Phase 3: 高级功能
-  - [ ] PDF 解析
-  - [ ] Excel 处理
-  - [ ] 统计分析
-  - [ ] 数据校验
-
-- [ ] Phase 4: 性能优化
-  - [ ] 内存索引优化
-  - [ ] 并发优化
-  - [ ] IO 优化
-  - [ ] 编译优化
-
-## 许可证
-
-MIT License
-
-## 作者
-
-deepinwine
+见仓库源码；仅供内部专利管理使用。

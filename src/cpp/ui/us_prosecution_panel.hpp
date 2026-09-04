@@ -65,7 +65,8 @@ private:
     void OnWorkerDone(wxThreadEvent&);
 
     // Sync plumbing
-    void StartSyncWorker(int case_id /*0 = all cases*/, const std::string& new_app_no = "");
+    void StartSyncWorker(int case_id /*0 = all cases*/, const std::string& new_app_no = "",
+                         int foreign_patent_id = 0);
     void ShowClaimDiff(int version_a, int version_b);
     void AppendDiffText(class wxTextCtrl* out, const std::vector<patx::ClaimDiff>& diffs);
 

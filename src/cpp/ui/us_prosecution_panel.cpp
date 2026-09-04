@@ -33,6 +33,7 @@ struct SyncJobSpec {
     SyncJob job = SyncJob::kSyncCase;
     int case_id = 0;
     int document_id = 0;
+    int foreign_patent_id = 0;
     std::string app_no;
 };
 
@@ -52,7 +53,7 @@ protected:
         bool ok = false;
         switch (spec_.job) {
             case SyncJob::kAddCase: {
-                auto r = service.AddCase(spec_.app_no);
+                auto r = service.AddCase(spec_.app_no, spec_.foreign_patent_id);
                 ok = r.ok;
                 if (r.api_key_missing) summary = r.error;
                 else if (r.case_not_found) summary = "Application not found: " + r.error;
@@ -746,24 +747,12 @@ void UsProsecutionPanel::OnAddCase(wxCommandEvent&) {
     std::string app_no = ToStd(dlg.GetValue());
     if (app_no.empty()) return;
 
-    // Auto-link to an existing US foreign_patents row when unambiguous
+    // Auto-link only an UNAMBIGUOUS match by normalized application number.
+    // Ambiguous or missing matches stay unlinked - the user links them
+    // explicitly; never merge on title similarity.
     int foreign_id = db_->FindUSCaseCandidate(app_no);
-    if (foreign_id == 0) {
-        auto all = db_->GetForeignPatents();
-        for (const auto& f : all) {
-            std::string upper;
-            for (char ch : f.country) upper += static_cast<char>(::toupper(ch));
-            if (upper == "US" || upper == "USA" || upper == "UNITED STATES") { foreign_id = f.id; break; }
-        }
-        if (all.empty()) foreign_id = 0;
-        else if (foreign_id != 0) { /* keep found */ }
-        else {
-            // multiple US rows and none matched: leave unlinked, user can edit later
-            foreign_id = 0;
-        }
-    }
 
-    StartSyncWorker(0, app_no);
+    StartSyncWorker(0, app_no, foreign_id);
 }
 
 void UsProsecutionPanel::OnSyncSelected(wxCommandEvent&) {
@@ -942,7 +931,8 @@ void UsProsecutionPanel::OnCaseSelected(wxListEvent& event) {
 // Worker management
 // ---------------------------------------------------------------------------
 
-void UsProsecutionPanel::StartSyncWorker(int case_id, const std::string& new_app_no) {
+void UsProsecutionPanel::StartSyncWorker(int case_id, const std::string& new_app_no,
+                                         int foreign_patent_id) {
     patx::UsptoConfig config = CurrentConfig();
     if (config.api_key.empty()) {
         const char* env = std::getenv("USPTO_API_KEY");
@@ -963,6 +953,7 @@ void UsProsecutionPanel::StartSyncWorker(int case_id, const std::string& new_app
     if (!new_app_no.empty()) {
         spec.job = SyncJob::kAddCase;
         spec.app_no = new_app_no;
+        spec.foreign_patent_id = foreign_patent_id;
     } else if (case_id > 0) {
         spec.job = SyncJob::kSyncCase;
         spec.case_id = case_id;
@@ -1003,6 +994,9 @@ void UsProsecutionPanel::OnWorkerDone(wxThreadEvent& event) {
 void UsProsecutionPanel::CheckAutoSync() {
     std::string interval = db_->GetConfig("uspto_auto_sync_interval");
     if (interval.empty() || interval == "manual") return;
+    // Timer context: no modal dialogs allowed; without a key there is
+    // nothing to sync.
+    if (db_->GetConfig("uspto_api_key").empty() && !std::getenv("USPTO_API_KEY")) return;
 
     long long interval_secs = interval == "12h" ? 12LL * 3600 : 24LL * 3600;
     long long last = std::atoll(db_->GetConfig("uspto_last_auto_sync").c_str());
