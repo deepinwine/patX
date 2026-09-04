@@ -1,4 +1,8 @@
-// patX Database - SQLite wrapper for patent data
+// patX Database - SQLite wrapper for patent/IP data.
+//
+// All modules (Domestic/OA/PCT/Software/IC/Foreign + USPTO repositories) share
+// this connection. Schema changes go through the versioned migration system in
+// migration.cpp - never ALTER/DROP ad hoc from feature code.
 #pragma once
 
 #include <string>
@@ -7,6 +11,10 @@
 #include <map>
 #include <ctime>
 #include <sqlite3.h>
+
+// ---------------------------------------------------------------------------
+// Data models
+// ---------------------------------------------------------------------------
 
 struct Patent {
     int id = 0;
@@ -30,7 +38,31 @@ struct Patent {
     std::string class_level1;
     std::string class_level2;
     std::string class_level3;
-    long long updated_at = 0; // timestamp for sync conflict detection
+    // Structured fields migrated out of notes (schema v2). Excel columns that
+    // users filter/sort on live here instead of being concatenated into notes.
+    std::string related_case_info;
+    std::string fee_status;
+    std::string rd_project;
+    std::string class_level4;
+    std::string tags;
+    std::string details;
+    std::string filing_date;
+    std::string disclosure_writer;
+    std::string agent_code;
+    std::string agent_name;
+    std::string intangible_asset_eval;
+    std::string internal_rd_project;
+    std::string technology_route;
+    std::string project_id;
+    std::string oa_reminder_1;
+    std::string oa_reminder_2;
+    std::string oa_reminder_3;
+    std::string oa_reminder_4;
+    std::string oa_reminder_5;
+    std::string reexamination;
+    std::string pudong_subsidy;
+    std::string pct_reminder;
+    long long updated_at = 0; // unix seconds, maintained on every write (NAS sync conflict detection)
 };
 
 struct OARecord {
@@ -53,6 +85,13 @@ struct OARecord {
     int extension_months = 0;
     std::string extended_deadline;
     std::string notes;
+    // External linkage (USPTO sync). jurisdiction='US', source='USPTO' for
+    // records created by the sync service; empty for manually created records.
+    std::string jurisdiction;
+    std::string source;
+    std::string external_case_id;      // uspto_cases.id
+    std::string external_document_id;  // uspto_documents.document_identifier
+    std::string deadline_source;       // official / calculated / manual / ''
 };
 
 struct PCTPatent {
@@ -124,18 +163,58 @@ struct ForeignPatent {
     std::string notes;
 };
 
+// Deadline calculation rule. Rows live in the deadline_rules table and are
+// fully editable at runtime; the seeded rows are just defaults.
+struct DeadlineRule {
+    int id = 0;
+    std::string jurisdiction;      // CN / US / PCT / ...
+    std::string event_type;        // oa_response / national_phase_entry / ...
+    std::string rule_description;
+    int base_months = 0;
+    int base_days = 0;
+    bool extendable = false;
+    int max_extension_months = 0;
+    std::string effective_from;
+    std::string effective_to;
+    bool enabled = true;
+    std::string notes;
+};
+
+// Unified query filter shared by every module listing. Fields that don't apply
+// to a module are ignored by that module's query. The old per-module filter
+// signatures (status/handler strings) remain as thin wrappers for compatibility.
+struct QueryFilter {
+    std::string keyword;    // LIKE across the module's searchable columns
+    std::string status;
+    std::string handler;
+    std::string level;      // patents only
+    std::string oa_type;    // OA only
+    std::string writer;     // OA only
+    std::string progress;   // OA only
+    std::string country;    // PCT / Foreign
+    std::string examiner;   // US prosecution
+    std::string art_unit;   // US prosecution
+    std::string sync_status;// US prosecution
+    // OA deadline state: "" all / "incomplete" / "completed" / "due5" / "due30"
+    std::string deadline_state;
+};
+
 class Database {
 public:
-    Database(const std::string& db_path);
+    explicit Database(const std::string& db_path);
     ~Database();
+
+    Database(const Database&) = delete;
+    Database& operator=(const Database&) = delete;
 
     bool IsOpen() const { return db_ != nullptr; }
     sqlite3* GetHandle() { return db_; }
+    const std::string& path() const { return db_path_; }
+    int SchemaVersion() const { return schema_version_; }
+    std::string LastError() const { return last_error_; }
 
-    // Patents
-    std::vector<Patent> GetPatents(const std::string& status_filter = "",
-                                    const std::string& level_filter = "",
-                                    const std::string& handler_filter = "");
+    // ---------- Patents ----------
+    std::vector<Patent> GetPatents(const QueryFilter& filter = {});
     Patent GetPatentById(int id);
     Patent GetPatentByCode(const std::string& geke_code);
     int InsertPatent(const Patent& p, bool log_undo = true);
@@ -143,62 +222,89 @@ public:
     bool DeletePatent(int id, bool log_undo = true);
     std::vector<Patent> SearchPatents(const std::string& keyword);
 
-    // OA Records
-    std::vector<OARecord> GetOARecords(const std::string& filter_type = "",
-                                        const std::string& handler_filter = "",
-                                        const std::string& writer_filter = "");
+    // ---------- OA Records ----------
+    std::vector<OARecord> GetOARecords(const QueryFilter& filter = {});
     OARecord GetOAById(int id);
     std::vector<OARecord> GetOAByPatent(const std::string& geke_code);
     int InsertOA(const OARecord& oa, bool log_undo = true);
     bool UpdateOA(int id, const OARecord& oa, bool log_undo = true);
     bool DeleteOA(int id, bool log_undo = true);
     bool MarkOACompleted(int id);
+    // Finds a synced OA record by its USPTO document identifier (0 if absent).
+    int FindOAByExternalDocument(const std::string& external_document_id);
 
-    // PCT
-    std::vector<PCTPatent> GetPCTPatents(const std::string& handler_filter = "");
+    // ---------- PCT ----------
+    std::vector<PCTPatent> GetPCTPatents(const QueryFilter& filter = {});
     PCTPatent GetPCTById(int id);
     int InsertPCT(const PCTPatent& p);
     bool UpdatePCT(int id, const PCTPatent& p);
     bool DeletePCT(int id);
 
-    // Software
-    std::vector<SoftwareCopyright> GetSoftwareCopyrights(const std::string& handler_filter = "");
+    // ---------- Software ----------
+    std::vector<SoftwareCopyright> GetSoftwareCopyrights(const QueryFilter& filter = {});
     SoftwareCopyright GetSoftwareById(int id);
     int InsertSoftware(const SoftwareCopyright& s);
+    bool UpdateSoftware(int id, const SoftwareCopyright& s);
     bool DeleteSoftware(int id);
 
-    // IC Layouts
-    std::vector<ICLayout> GetICLayouts();
+    // ---------- IC Layouts ----------
+    std::vector<ICLayout> GetICLayouts(const QueryFilter& filter = {});
     ICLayout GetICById(int id);
     int InsertIC(const ICLayout& ic);
+    bool UpdateIC(int id, const ICLayout& ic);
     bool DeleteIC(int id);
 
-    // Foreign
-    std::vector<ForeignPatent> GetForeignPatents();
+    // ---------- Foreign ----------
+    std::vector<ForeignPatent> GetForeignPatents(const QueryFilter& filter = {});
     ForeignPatent GetForeignById(int id);
     int InsertForeign(const ForeignPatent& f);
+    bool UpdateForeign(int id, const ForeignPatent& f);
     bool DeleteForeign(int id);
+    // Find a US-case candidate: country in (US/USA/United States) matching by
+    // application number. Returns 0 when there is no unambiguous candidate.
+    int FindUSCaseCandidate(const std::string& application_number);
 
-    // Utility
+    // ---------- Deadline rules ----------
+    std::vector<DeadlineRule> GetDeadlineRules(bool enabled_only = false);
+    bool InsertDeadlineRule(const DeadlineRule& rule, int* new_id = nullptr);
+    bool UpdateDeadlineRule(const DeadlineRule& rule);
+    bool DeleteDeadlineRule(int id);
+    // Computes a suggested deadline from a rule (base date + months/days).
+    // Returns "" when no enabled rule matches the jurisdiction/event type.
+    std::string CalculateDeadline(const std::string& jurisdiction,
+                                  const std::string& event_type,
+                                  const std::string& base_date) const;
+
+    // ---------- Utility ----------
     std::vector<std::string> GetDistinctValues(const std::string& table, const std::string& column);
     void SetConfig(const std::string& key, const std::string& value);
     std::string GetConfig(const std::string& key);
+    std::string GetCurrentDate();
+    // Copy the database file (safe point-in-time backup using SQLite's
+    // backup API; works while the connection is open).
+    bool BackupTo(const std::string& dest_path);
 
-    // Undo support
+    // ---------- Undo ----------
     void BeginBatch();
     int Undo();
     bool CanUndo() const;
 
+    // SQL helpers used by the USPTO repositories as well
+    bool Execute(const std::string& sql);
+    std::string EscapeString(const std::string& s);
+    // Escapes LIKE wildcards in a user keyword and wraps it for LIKE.
+    std::string LikePattern(const std::string& keyword);
+
 private:
     sqlite3* db_ = nullptr;
+    std::string db_path_;
+    int schema_version_ = 0;
+    std::string last_error_;
 
     void InitTables();
     void MigrateTables();
-    bool Execute(const std::string& sql);
-    std::string EscapeString(const std::string& s);
-    std::string GetCurrentDate();
 
-    // JSON serialization for undo
+    // JSON serialization for undo snapshots (full-field, so undo is lossless)
     std::string PatentToJson(const Patent& p);
     std::string OAToJson(const OARecord& oa);
 };

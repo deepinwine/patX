@@ -20,14 +20,19 @@
 #include <windows.h>
 #endif
 
-// Debug log file
-static std::ofstream debug_log;
+// Import diagnostics: written to the unified log (and a debug file only when
+// PATX_IMPORT_DEBUG is set, so normal imports stop littering the workdir).
+#include "patx/log.hpp"
 static void DebugLog(const std::string& msg) {
-    if (!debug_log.is_open()) {
-        debug_log.open("patx_import_debug.txt", std::ios::out | std::ios::app);
+    if (std::getenv("PATX_IMPORT_DEBUG")) {
+        static std::ofstream debug_log;
+        if (!debug_log.is_open()) {
+            debug_log.open("patx_import_debug.txt", std::ios::out | std::ios::app);
+        }
+        debug_log << msg << std::endl;
+        debug_log.flush();
     }
-    debug_log << msg << std::endl;
-    debug_log.flush();
+    PATX_LOG_DEBUG(msg);
 }
 
 ExcelIO::ExcelIO() = default;
@@ -148,6 +153,38 @@ static bool IsExcludedCodeColumn(const std::string& column_name) {
         "代理人编码", "代理编码", "事务所编码", "事务所编号", "代理人编号",
         "案件编号", "案号", "分类编码", "项目ID"
     });
+}
+
+
+// Maps Excel importer field ids 21-42 onto the structured Patent columns
+// (schema v2). Previously these were concatenated into notes with prefixes;
+// v2 stores them as first-class searchable/sortable fields.
+static void ApplyExtendedPatentField(Patent& p, int field, const std::string& value) {
+    if (value.empty()) return;
+    switch (field) {
+        case 21: p.related_case_info = value; break;
+        case 22: p.fee_status = value; break;
+        case 23: p.rd_project = value; break;
+        case 24: p.class_level4 = value; break;
+        case 25: p.tags = value; break;
+        case 26: p.details = value; break;
+        case 27: p.filing_date = value; break;
+        case 28: p.disclosure_writer = value; break;
+        case 29: p.agent_code = value; break;
+        case 30: p.agent_name = value; break;
+        case 31: p.intangible_asset_eval = value; break;
+        case 32: p.internal_rd_project = value; break;
+        case 33: p.technology_route = value; break;
+        case 34: p.project_id = value; break;
+        case 35: p.oa_reminder_1 = value; break;
+        case 36: p.oa_reminder_2 = value; break;
+        case 37: p.oa_reminder_3 = value; break;
+        case 38: p.oa_reminder_4 = value; break;
+        case 39: p.oa_reminder_5 = value; break;
+        case 40: p.reexamination = value; break;
+        case 41: p.pudong_subsidy = value; break;
+        case 42: p.pct_reminder = value; break;
+    }
 }
 
 int ExcelIO::MapColumnToField(const std::string& column_name) {
@@ -455,6 +492,13 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
     int row_num = 0;
 
     if (std::getline(file, line)) {
+        // Strip UTF-8 BOM so the first header column matches exactly
+        if (line.size() >= 3 &&
+            static_cast<unsigned char>(line[0]) == 0xEF &&
+            static_cast<unsigned char>(line[1]) == 0xBB &&
+            static_cast<unsigned char>(line[2]) == 0xBF) {
+            line = line.substr(3);
+        }
         auto headers = ParseCsvLine(line);
         for (const auto& h : headers) {
             field_map.push_back(MapColumnToField(h));
@@ -497,94 +541,7 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
                 case 18: p.expiration_date = ParseDate(value); break;
                 case 19: p.rd_department = value; break;
                 case 20: p.agency_firm = value; break;
-                case 21:
-                    if (p.notes.empty()) p.notes = "关联案信息: " + value;
-                    else p.notes += "; 关联案信息: " + value;
-                    break;
-                case 22:
-                    if (p.notes.empty()) p.notes = "缴费状态: " + value;
-                    else p.notes += "; 缴费状态: " + value;
-                    break;
-                case 23:
-                    if (p.notes.empty()) p.notes = "研发项目: " + value;
-                    else p.notes += "; 研发项目: " + value;
-                    break;
-                case 24:
-                    if (p.notes.empty()) p.notes = "四级（新）: " + value;
-                    else p.notes += "; 四级（新）: " + value;
-                    break;
-                case 25:
-                    if (p.notes.empty()) p.notes = "标签: " + value;
-                    else p.notes += "; 标签: " + value;
-                    break;
-                case 26:
-                    if (p.notes.empty()) p.notes = "具体内容: " + value;
-                    else p.notes += "; 具体内容: " + value;
-                    break;
-                case 27:
-                    if (p.notes.empty()) p.notes = "立案日: " + ParseDate(value);
-                    else p.notes += "; 立案日: " + ParseDate(value);
-                    break;
-                case 28:
-                    if (p.notes.empty()) p.notes = "技术交底书撰写人: " + value;
-                    else p.notes += "; 技术交底书撰写人: " + value;
-                    break;
-                case 29:
-                    if (p.notes.empty()) p.notes = "代理人编码: " + value;
-                    else p.notes += "; 代理人编码: " + value;
-                    break;
-                case 30:
-                    if (p.notes.empty()) p.notes = "代理人: " + value;
-                    else p.notes += "; 代理人: " + value;
-                    break;
-                case 31:
-                    if (p.notes.empty()) p.notes = "无形资产评估: " + value;
-                    else p.notes += "; 无形资产评估: " + value;
-                    break;
-                case 32:
-                    if (p.notes.empty()) p.notes = "内部研发项目: " + value;
-                    else p.notes += "; 内部研发项目: " + value;
-                    break;
-                case 33:
-                    if (p.notes.empty()) p.notes = "技术路线: " + value;
-                    else p.notes += "; 技术路线: " + value;
-                    break;
-                case 34:
-                    if (p.notes.empty()) p.notes = "项目ID: " + value;
-                    else p.notes += "; 项目ID: " + value;
-                    break;
-                case 35:
-                    if (p.notes.empty()) p.notes = "1st OA: " + value;
-                    else p.notes += "; 1st OA: " + value;
-                    break;
-                case 36:
-                    if (p.notes.empty()) p.notes = "2nd OA: " + value;
-                    else p.notes += "; 2nd OA: " + value;
-                    break;
-                case 37:
-                    if (p.notes.empty()) p.notes = "3rd OA: " + value;
-                    else p.notes += "; 3rd OA: " + value;
-                    break;
-                case 38:
-                    if (p.notes.empty()) p.notes = "4th OA: " + value;
-                    else p.notes += "; 4th OA: " + value;
-                    break;
-                case 39:
-                    if (p.notes.empty()) p.notes = "5OA: " + value;
-                    else p.notes += "; 5OA: " + value;
-                    break;
-                case 40:
-                    if (p.notes.empty()) p.notes = "复审: " + value;
-                    else p.notes += "; 复审: " + value;
-                    break;
-                case 41:
-                    if (p.notes.empty()) p.notes = "浦东资助情况: " + value;
-                    else p.notes += "; 浦东资助情况: " + value;
-                    break;
-                case 42:
-                    if (p.notes.empty()) p.notes = "PCT提醒: " + value;
-                    else p.notes += "; PCT提醒: " + value;
-                    break;
+                default: ApplyExtendedPatentField(p, field, value); break;
             }
         }
 
@@ -966,94 +923,7 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                             case 18: p.expiration_date = ParseDate(value); break;
                             case 19: p.rd_department = value; break;
                             case 20: p.agency_firm = value; break;
-                            case 21:
-                                if (p.notes.empty()) p.notes = "关联案信息: " + value;
-                                else p.notes += "; 关联案信息: " + value;
-                                break;
-                            case 22:
-                                if (p.notes.empty()) p.notes = "缴费状态: " + value;
-                                else p.notes += "; 缴费状态: " + value;
-                                break;
-                            case 23:
-                                if (p.notes.empty()) p.notes = "研发项目: " + value;
-                                else p.notes += "; 研发项目: " + value;
-                                break;
-                            case 24:
-                                if (p.notes.empty()) p.notes = "四级（新）: " + value;
-                                else p.notes += "; 四级（新）: " + value;
-                                break;
-                            case 25:
-                                if (p.notes.empty()) p.notes = "标签: " + value;
-                                else p.notes += "; 标签: " + value;
-                                break;
-                            case 26:
-                                if (p.notes.empty()) p.notes = "具体内容: " + value;
-                                else p.notes += "; 具体内容: " + value;
-                                break;
-                            case 27:
-                                if (p.notes.empty()) p.notes = "立案日: " + ParseDate(value);
-                                else p.notes += "; 立案日: " + ParseDate(value);
-                                break;
-                            case 28:
-                                if (p.notes.empty()) p.notes = "技术交底书撰写人: " + value;
-                                else p.notes += "; 技术交底书撰写人: " + value;
-                                break;
-                            case 29:
-                                if (p.notes.empty()) p.notes = "代理人编码: " + value;
-                                else p.notes += "; 代理人编码: " + value;
-                                break;
-                            case 30:
-                                if (p.notes.empty()) p.notes = "代理人: " + value;
-                                else p.notes += "; 代理人: " + value;
-                                break;
-                            case 31:
-                                if (p.notes.empty()) p.notes = "无形资产评估: " + value;
-                                else p.notes += "; 无形资产评估: " + value;
-                                break;
-                            case 32:
-                                if (p.notes.empty()) p.notes = "内部研发项目: " + value;
-                                else p.notes += "; 内部研发项目: " + value;
-                                break;
-                            case 33:
-                                if (p.notes.empty()) p.notes = "技术路线: " + value;
-                                else p.notes += "; 技术路线: " + value;
-                                break;
-                            case 34:
-                                if (p.notes.empty()) p.notes = "项目ID: " + value;
-                                else p.notes += "; 项目ID: " + value;
-                                break;
-                            case 35:
-                                if (p.notes.empty()) p.notes = "1st OA: " + value;
-                                else p.notes += "; 1st OA: " + value;
-                                break;
-                            case 36:
-                                if (p.notes.empty()) p.notes = "2nd OA: " + value;
-                                else p.notes += "; 2nd OA: " + value;
-                                break;
-                            case 37:
-                                if (p.notes.empty()) p.notes = "3rd OA: " + value;
-                                else p.notes += "; 3rd OA: " + value;
-                                break;
-                            case 38:
-                                if (p.notes.empty()) p.notes = "4th OA: " + value;
-                                else p.notes += "; 4th OA: " + value;
-                                break;
-                            case 39:
-                                if (p.notes.empty()) p.notes = "5OA: " + value;
-                                else p.notes += "; 5OA: " + value;
-                                break;
-                            case 40:
-                                if (p.notes.empty()) p.notes = "复审: " + value;
-                                else p.notes += "; 复审: " + value;
-                                break;
-                            case 41:
-                                if (p.notes.empty()) p.notes = "浦东资助情况: " + value;
-                                else p.notes += "; 浦东资助情况: " + value;
-                                break;
-                            case 42:
-                                if (p.notes.empty()) p.notes = "PCT提醒: " + value;
-                                else p.notes += "; PCT提醒: " + value;
-                                break;
+                            default: ApplyExtendedPatentField(p, field, value); break;
                         }
                     }
 
@@ -1307,15 +1177,162 @@ std::string ExcelIO::GetLastError() const {
     return last_error_;
 }
 
+
+// ===================== Export =====================
+
+// CSV quoting per RFC 4180: wrap in quotes when the value contains a comma,
+// quote or newline; double embedded quotes.
+static std::string CsvQuote(const std::string& value) {
+    bool needs_quotes = value.find(',') != std::string::npos ||
+                        value.find('"') != std::string::npos ||
+                        value.find('\n') != std::string::npos ||
+                        value.find('\r') != std::string::npos;
+    if (!needs_quotes) return value;
+    std::string out = "\"";
+    for (char c : value) {
+        if (c == '"') out += "\"\"";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+bool ExcelIO::ExportCsv(const ExportTable& table, const std::string& file_path) {
+    // UTF-8 BOM so Excel opens Chinese text correctly
+    std::ofstream out(file_path, std::ios::binary);
+    if (!out.is_open()) {
+        last_error_ = "cannot create file: " + file_path;
+        return false;
+    }
+    out << "\xEF\xBB\xBF";
+    if (!table.headers.empty()) {
+        for (size_t i = 0; i < table.headers.size(); i++) {
+            if (i > 0) out << ",";
+            out << CsvQuote(table.headers[i]);
+        }
+        out << "\n";
+    }
+    for (const auto& row : table.rows) {
+        for (size_t i = 0; i < row.size(); i++) {
+            if (i > 0) out << ",";
+            out << CsvQuote(row[i]);
+        }
+        out << "\n";
+    }
+    return true;
+}
+
+bool ExcelIO::ExportXlsx(const ExportTable& table, const std::string& file_path) {
+    try {
+        OpenXLSX::XLDocument doc;
+        doc.create(file_path);
+        auto wb = doc.workbook();
+
+        std::string sheet = table.sheet_name.empty() ? "Data" : table.sheet_name;
+        // Workbooks come with a default "Sheet1"; rename it when present
+        auto names = wb.worksheetNames();
+        if (!names.empty()) wb.worksheet(names[0]).setName(sheet);
+        else wb.addWorksheet(sheet);
+        auto ws = wb.worksheet(sheet);
+
+        uint32_t row = 1;
+        if (!table.headers.empty()) {
+            for (uint16_t col = 0; col < table.headers.size(); col++) {
+                ws.cell(row, static_cast<uint16_t>(col + 1)).value() = table.headers[col];
+            }
+            row++;
+        }
+        for (const auto& data_row : table.rows) {
+            for (uint16_t col = 0; col < data_row.size(); col++) {
+                ws.cell(row, static_cast<uint16_t>(col + 1)).value() = data_row[col];
+            }
+            row++;
+        }
+        doc.save();
+        doc.close();
+        return true;
+    } catch (const std::exception& e) {
+        last_error_ = std::string("XLSX export failed: ") + e.what();
+        PATX_LOG_ERROR(last_error_);
+        return false;
+    }
+}
+
+ExportTable ExcelIO::BuildPatentExport(const std::vector<Patent>& patents) {
+    ExportTable t;
+    t.sheet_name = "Patents";
+    t.headers = {"编号", "申请号", "发明名称", "类型", "等级", "状态", "处理人", "发明人",
+                 "申请日", "授权日", "到期日", "技术路线", "研发项目", "标签", "代理人", "备注"};
+    for (const auto& p : patents) {
+        t.rows.push_back({p.geke_code, p.application_number, p.title, p.patent_type,
+                          p.patent_level, p.application_status, p.geke_handler, p.inventor,
+                          p.application_date, p.authorization_date, p.expiration_date,
+                          p.technology_route, p.rd_project, p.tags, p.agent_name, p.notes});
+    }
+    return t;
+}
+
+ExportTable ExcelIO::BuildOAExport(const std::vector<OARecord>& records) {
+    ExportTable t;
+    t.sheet_name = "OA";
+    t.headers = {"编号", "专利名称", "OA类型", "发文日", "截止日", "处理人", "撰写人", "进度", "已完成"};
+    for (const auto& oa : records) {
+        t.rows.push_back({oa.geke_code, oa.patent_title, oa.oa_type, oa.issue_date,
+                          oa.official_deadline, oa.handler, oa.writer, oa.progress,
+                          oa.is_completed ? "yes" : "no"});
+    }
+    return t;
+}
+
+ExportTable ExcelIO::BuildPCTExport(const std::vector<PCTPatent>& rows_in) {
+    ExportTable t;
+    t.sheet_name = "PCT";
+    t.headers = {"编号", "国内同源", "PCT申请号", "国家申请号", "发明名称", "状态", "处理人",
+                 "申请日", "优先权日", "国家"};
+    for (const auto& p : rows_in) {
+        t.rows.push_back({p.geke_code, p.domestic_source, p.application_no, p.country_app_no,
+                          p.title, p.application_status, p.handler, p.application_date,
+                          p.priority_date, p.country});
+    }
+    return t;
+}
+
+ExportTable ExcelIO::BuildSoftwareExport(const std::vector<SoftwareCopyright>& rows_in) {
+    ExportTable t;
+    t.sheet_name = "Software";
+    t.headers = {"案号", "登记号", "名称", "现权利人", "状态", "处理人", "申请日", "登记日"};
+    for (const auto& r : rows_in) {
+        t.rows.push_back({r.case_no, r.reg_no, r.title, r.current_owner, r.application_status,
+                          r.handler, r.application_date, r.reg_date});
+    }
+    return t;
+}
+
+ExportTable ExcelIO::BuildICExport(const std::vector<ICLayout>& rows_in) {
+    ExportTable t;
+    t.sheet_name = "ICLayout";
+    t.headers = {"案号", "登记号", "名称", "现权利人", "状态", "设计人", "申请日", "颁证日"};
+    for (const auto& r : rows_in) {
+        t.rows.push_back({r.case_no, r.reg_no, r.title, r.current_owner, r.application_status,
+                          r.designer, r.application_date, r.cert_date});
+    }
+    return t;
+}
+
+ExportTable ExcelIO::BuildForeignExport(const std::vector<ForeignPatent>& rows_in) {
+    ExportTable t;
+    t.sheet_name = "Foreign";
+    t.headers = {"案号", "PCT号", "国家", "名称", "权利人", "状态", "处理人", "申请日", "授权日",
+                 "申请号", "国家申请号"};
+    for (const auto& r : rows_in) {
+        t.rows.push_back({r.case_no, r.pct_no, r.country, r.title, r.owner, r.patent_status,
+                          r.handler, r.application_date, r.authorization_date, r.application_no,
+                          r.country_app_no});
+    }
+    return t;
+}
+
 ExcelIO& GetExcelIO() {
     static ExcelIO instance;
     return instance;
 }
-
-// Stub implementations for header-only declarations
-void ExcelIO::ProcessPatentRows(void*, uint32_t, uint32_t, uint16_t, const std::vector<int>&, Database&, ImportResult&) {}
-void ExcelIO::ProcessOARows(void*, uint32_t, uint32_t, uint16_t, const std::vector<int>&, Database&, ImportResult&) {}
-void ExcelIO::ProcessPCTRows(void*, uint32_t, uint32_t, uint16_t, const std::vector<int>&, Database&, ImportResult&) {}
-void ExcelIO::ProcessSoftwareRows(void*, uint32_t, uint32_t, uint16_t, const std::vector<int>&, Database&, ImportResult&) {}
-void ExcelIO::ProcessICRows(void*, uint32_t, uint32_t, uint16_t, const std::vector<int>&, Database&, ImportResult&) {}
-void ExcelIO::ProcessForeignRows(void*, uint32_t, uint32_t, uint16_t, const std::vector<int>&, Database&, ImportResult&) {}

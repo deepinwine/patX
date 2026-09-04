@@ -21,3 +21,17 @@ data/test_*
 # Temp
 *.log
 *.tmp
+
+# Build trees (CMake out-of-source)
+build-*/
+# Local git worktrees
+.worktrees/
+# Runtime artifacts
+patents.db*
+*.pre_migration_*.bak
+patx_import_debug.txt
+patx.log
+nas_config.txt
+# Local credentials - never commit USPTO keys
+patx_uspto.json
+*.credential

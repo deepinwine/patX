@@ -42,6 +42,15 @@ struct ExportOptions {
     int start_col = 1;
 };
 
+// Generic export table used by every module's export button. ExcelIO writes
+// a REAL OpenXLSX workbook for .xlsx paths and CSV text for .csv paths -
+// never CSV content behind an .xlsx extension.
+struct ExportTable {
+    std::string sheet_name = "Data";
+    std::vector<std::string> headers;
+    std::vector<std::vector<std::string>> rows;
+};
+
 class ExcelIO {
 public:
     ExcelIO();
@@ -53,12 +62,17 @@ public:
         std::function<bool(int, int)> progress_callback = nullptr
     );
 
-    bool ExportPatents(
-        const std::string& file_path,
-        const std::vector<Patent>& patents,
-        const ExportOptions& options = ExportOptions(),
-        std::function<bool(int, int)> progress_callback = nullptr
-    );
+    // Module-agnostic exports. The extension of file_path selects the format.
+    bool ExportXlsx(const ExportTable& table, const std::string& file_path);
+    bool ExportCsv(const ExportTable& table, const std::string& file_path);
+
+    // Convenience builders: current tab data -> ExportTable
+    static ExportTable BuildPatentExport(const std::vector<Patent>& patents);
+    static ExportTable BuildOAExport(const std::vector<OARecord>& records);
+    static ExportTable BuildPCTExport(const std::vector<PCTPatent>& rows);
+    static ExportTable BuildSoftwareExport(const std::vector<SoftwareCopyright>& rows);
+    static ExportTable BuildICExport(const std::vector<ICLayout>& rows);
+    static ExportTable BuildForeignExport(const std::vector<ForeignPatent>& rows);
 
     bool IsExcelFile(const std::string& file_path);
     bool IsCsvFile(const std::string& file_path);
@@ -86,19 +100,6 @@ private:
         Database& db,
         std::function<bool(int, int)> progress_callback
     );
-
-    void ProcessPatentRows(void* ws, uint32_t start_row, uint32_t end_row, uint16_t col_count,
-                           const std::vector<int>& field_map, Database& db, ImportResult& result);
-    void ProcessOARows(void* ws, uint32_t start_row, uint32_t end_row, uint16_t col_count,
-                       const std::vector<int>& field_map, Database& db, ImportResult& result);
-    void ProcessPCTRows(void* ws, uint32_t start_row, uint32_t end_row, uint16_t col_count,
-                        const std::vector<int>& field_map, Database& db, ImportResult& result);
-    void ProcessSoftwareRows(void* ws, uint32_t start_row, uint32_t end_row, uint16_t col_count,
-                             const std::vector<int>& field_map, Database& db, ImportResult& result);
-    void ProcessICRows(void* ws, uint32_t start_row, uint32_t end_row, uint16_t col_count,
-                       const std::vector<int>& field_map, Database& db, ImportResult& result);
-    void ProcessForeignRows(void* ws, uint32_t start_row, uint32_t end_row, uint16_t col_count,
-                            const std::vector<int>& field_map, Database& db, ImportResult& result);
 
     std::vector<std::string> ParseCsvLine(const std::string& line);
     std::string CleanValue(const std::string& value);
