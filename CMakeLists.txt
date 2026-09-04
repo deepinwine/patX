@@ -124,9 +124,11 @@ endif()
 # ---------------------------------------------------------------------------
 if(PATX_BUILD_GUI)
     # vcpkg exposes targets (wx::core), homebrew exposes wxWidgets_LIBRARIES
-    find_package(wxWidgets COMPONENTS core base adv aui QUIET)
+    find_package(wxWidgets COMPONENTS core base adv aui html core QUIET)
     if(wxWidgets_FOUND)
-        if(wxWidgets_USE_CONFIG AND NOT wxWidgets_CONFIG_FILE)  # Makefile-style
+        # Module-style results (homebrew/system) provide wxWidgets_USE_FILE
+        # that adds include dirs; config-style (vcpkg) only provides targets.
+        if(wxWidgets_USE_FILE)
             include(${wxWidgets_USE_FILE})
         endif()
         add_executable(patx
@@ -137,6 +139,7 @@ if(PATX_BUILD_GUI)
         if(WIN32)
             set_target_properties(patx PROPERTIES WIN32_EXECUTABLE TRUE)
         endif()
+        target_include_directories(patx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp)
         target_link_libraries(patx PRIVATE patx_core ${wxWidgets_LIBRARIES})
         target_compile_definitions(patx PRIVATE PATX_GUI=1)
         if(MSVC)
