@@ -66,6 +66,11 @@ public:
 private:
     SyncResult RunSync(UsptoCase& record, const ProgressFn& progress);
 
+    // Resolves a publication/patent number to an application number through
+    // the official search endpoint. Returns "" on failure with out_result
+    // filled; never guesses on ambiguous matches.
+    std::string ResolveApplicationNumber(const std::string& input, SyncResult& out_result);
+
     Database& db_;
     UsptoRepository repo_;
     UsptoClient client_;

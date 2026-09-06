@@ -339,3 +339,63 @@ TEST(uspto_repository_incremental_dedup) {
     }
     std::filesystem::remove(db_path);
 }
+
+// ---------------- Publication/patent number resolution ----------------
+
+TEST(uspto_normalize_publication_and_patent_numbers) {
+    CHECK_STR_EQ(patx::UsptoClient::NormalizePublicationNumber("US 2021/0210819 A1"),
+                 "US20210210819A1");
+    CHECK_STR_EQ(patx::UsptoClient::NormalizePublicationNumber("us2021/0210819a1"),
+                 "US20210210819A1");
+    CHECK_STR_EQ(patx::UsptoClient::NormalizePatentNumber("11,646,472"), "11646472");
+}
+
+TEST(uspto_build_search_queries) {
+    // Publication numbers (contain letters) search the publication field only
+    auto pub = patx::UsptoClient::BuildSearchQueries("US 2021/0210819 A1");
+    CHECK_EQ(pub.size(), 1u);
+    CHECK_STR_EQ(pub[0], "applicationMetaData.earliestPublicationNumber:\"US20210210819A1\"");
+
+    // Bare digits try patent number then application number
+    auto digits = patx::UsptoClient::BuildSearchQueries("11646472");
+    CHECK_EQ(digits.size(), 2u);
+    CHECK_STR_EQ(digits[0], "applicationMetaData.patentNumber:\"11646472\"");
+    CHECK_STR_EQ(digits[1], "applicationNumberText:\"11646472\"");
+}
+
+TEST(uspto_parse_search_fixture) {
+    std::string body = LoadFixture("uspto/search_publication.json");
+    std::vector<patx::UsptoCase> results;
+    std::string error;
+    CHECK(patx::UsptoClient::ParseSearchBody(body, results, error));
+    CHECK_STR_EQ(error, "");
+    CHECK_EQ(results.size(), 2u);
+    CHECK_STR_EQ(results[0].application_number, "17248024");
+    CHECK_STR_EQ(results[0].publication_number, "US20210210819A1");
+    CHECK_STR_EQ(results[0].patent_number, "11646472");
+    CHECK_STR_EQ(results[1].application_number, "15902471");
+}
+
+TEST(uspto_pick_search_hit) {
+    std::string body = LoadFixture("uspto/search_publication.json");
+    std::vector<patx::UsptoCase> results;
+    std::string error;
+    CHECK(patx::UsptoClient::ParseSearchBody(body, results, error));
+
+    // Publication number input resolves to the exact hit
+    CHECK_EQ(patx::UsptoClient::PickSearchHit("US 2021/0210819 A1", results), 0);
+    CHECK_EQ(patx::UsptoClient::PickSearchHit("US20210210819A1", results), 0);
+    // Patent number resolves to the granted case
+    CHECK_EQ(patx::UsptoClient::PickSearchHit("11,646,472", results), 0);
+    // Application number matches directly
+    CHECK_EQ(patx::UsptoClient::PickSearchHit("17248024", results), 0);
+
+    // No match
+    CHECK_EQ(patx::UsptoClient::PickSearchHit("US9999999999A9", results), -1);
+
+    // Ambiguity: two entries with the same publication number must not
+    // auto-pick (duplicate the first entry to simulate a family duplicate)
+    std::vector<patx::UsptoCase> ambiguous = results;
+    ambiguous.push_back(results[0]);
+    CHECK_EQ(patx::UsptoClient::PickSearchHit("US 2021/0210819 A1", ambiguous), -2);
+}

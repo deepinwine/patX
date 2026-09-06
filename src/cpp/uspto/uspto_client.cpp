@@ -33,7 +33,107 @@ std::string UsptoClient::NormalizeApplicationNumber(const std::string& input) {
     return digits;
 }
 
+std::string UsptoClient::NormalizePublicationNumber(const std::string& input) {
+    // "US 2021/0210819 A1" -> "US20210210819A1" (matches ODP storage form)
+    std::string out;
+    for (char c : input) {
+        if (c == ' ' || c == '/' || c == ',' || c == '-' || c == '\\') continue;
+        out += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
+std::string UsptoClient::NormalizePatentNumber(const std::string& input) {
+    // "11,646,472" -> "11646472" (ODP stores digits without separators)
+    std::string out;
+    for (char c : input) {
+        if (c >= '0' && c <= '9') out += c;
+    }
+    return out;
+}
+
+std::vector<std::string> UsptoClient::BuildSearchQueries(const std::string& input) {
+    std::vector<std::string> queries;
+    std::string pub = NormalizePublicationNumber(input);
+    std::string patent = NormalizePatentNumber(input);
+    std::string app = NormalizeApplicationNumber(input);
+
+    // Publication numbers carry a country code/kind code (letters); a bare
+    // digit string is ambiguous between application and patent numbers.
+    bool has_letters = pub.find_first_not_of("0123456789") != std::string::npos;
+
+    if (has_letters) {
+        queries.push_back("applicationMetaData.earliestPublicationNumber:\"" + pub + "\"");
+    } else {
+        if (!patent.empty() && patent.size() >= 7) {
+            queries.push_back("applicationMetaData.patentNumber:\"" + patent + "\"");
+        }
+        if (!app.empty() && app.size() >= 7) {
+            queries.push_back("applicationNumberText:\"" + app + "\"");
+        }
+    }
+    return queries;
+}
+
+int UsptoClient::PickSearchHit(const std::string& input, const std::vector<UsptoCase>& results) {
+    std::string pub = NormalizePublicationNumber(input);
+    std::string patent = NormalizePatentNumber(input);
+    std::string app = NormalizeApplicationNumber(input);
+
+    int first_hit = -1;
+    int hits = 0;
+    for (size_t i = 0; i < results.size(); i++) {
+        const UsptoCase& c = results[i];
+        bool match =
+            (!pub.empty() && NormalizePublicationNumber(c.publication_number) == pub) ||
+            (!patent.empty() && NormalizePatentNumber(c.patent_number) == patent) ||
+            (!app.empty() && NormalizeApplicationNumber(c.application_number) == app);
+        if (match) {
+            hits++;
+            if (first_hit < 0) first_hit = static_cast<int>(i);
+        }
+    }
+    if (hits == 0) return -1;
+    if (hits > 1) return -2;   // ambiguous: caller must ask the user
+    return first_hit;
+}
+
+ApiResult UsptoClient::SearchApplications(const std::string& q, std::vector<UsptoCase>& out_results,
+                                          int offset, int limit) {
+    out_results.clear();
+    if (q.empty()) {
+        ApiResult r;
+        r.error = "empty search query";
+        return r;
+    }
+
+    // POST body per ODP swagger PatentSearchRequest: q + pagination
+    json body = {
+        {"q", q},
+        {"pagination", {{"offset", offset}, {"limit", limit}}},
+    };
+
+    std::string response;
+    ApiResult result = RequestJson("POST", "/api/v1/patent/applications/search",
+                                   body.dump(), response);
+    if (!result.ok) return result;
+
+    // 404-style "no records" comes back as 200 with an empty bag
+    std::string parse_error;
+    if (!ParseSearchBody(response, out_results, parse_error)) {
+        result.error = parse_error;
+        return result;
+    }
+    result.ok = true;
+    return result;
+}
+
 ApiResult UsptoClient::GetJson(const std::string& path_with_query, std::string& json_body) {
+    return RequestJson("GET", path_with_query, "", json_body);
+}
+
+ApiResult UsptoClient::RequestJson(const std::string& method, const std::string& path_with_query,
+                                   const std::string& post_body, std::string& json_body) {
     ApiResult result;
 
     HttpRequestOptions options;
@@ -50,7 +150,9 @@ ApiResult UsptoClient::GetJson(const std::string& path_with_query, std::string& 
     }
 
     std::string url = config_.api_base_url + path_with_query;
-    HttpResponse resp = http_.Get(url, options);
+    HttpResponse resp = method == "POST"
+        ? http_.Post(url, post_body, "application/json", options)
+        : http_.Get(url, options);
     result.http_status = resp.status_code;
     result.status_line = resp.status_line;
 
@@ -117,73 +219,113 @@ std::string ToDateString(const std::string& value) {
 
 } // namespace
 
+namespace {
+
+// Fills one UsptoCase from a single patentFileWrapperDataBag entry. Shared by
+// the direct-application endpoint and the search endpoint (same shape).
+void ParseWrapper(const json& wrapper, UsptoCase& out_case) {
+    const json* meta = nullptr;
+    auto meta_it = wrapper.find("applicationMetaData");
+    if (meta_it != wrapper.end()) meta = &(*meta_it);
+
+    auto wrapper_str = [&wrapper](const char* key) -> std::string {
+        auto f = wrapper.find(key);
+        if (f != wrapper.end() && f->is_string()) return f->get<std::string>();
+        return "";
+    };
+    out_case.application_number = wrapper_str("applicationNumberText");
+
+    if (meta) {
+        auto get_str = [&meta](const char* key) -> std::string {
+            auto f = meta->find(key);
+            if (f != meta->end() && f->is_string()) return f->get<std::string>();
+            return "";
+        };
+        out_case.application_status = get_str("applicationStatusDescriptionText");
+        out_case.status_date = get_str("applicationStatusDate");
+        out_case.application_type = get_str("applicationTypeCode");
+        out_case.examiner_name = get_str("examinerNameText");
+        out_case.filing_date = ToDateString(get_str("filingDate"));
+        out_case.first_named_inventor = get_str("firstInventorName");
+        out_case.applicant_name = get_str("firstApplicantName");
+        out_case.grant_date = ToDateString(get_str("grantDate"));
+        out_case.art_unit = get_str("groupArtUnitNumber");
+        out_case.attorney_docket_number = get_str("docketNumber");
+        out_case.title = get_str("inventionTitle");
+        out_case.publication_number = get_str("earliestPublicationNumber");
+        out_case.publication_date = ToDateString(get_str("earliestPublicationDate"));
+        out_case.patent_number = get_str("patentNumber");
+
+        // Technology center: first two digits of the art unit
+        if (!out_case.art_unit.empty() && out_case.art_unit.size() >= 2) {
+            out_case.technology_center = out_case.art_unit.substr(0, 2);
+        }
+
+        auto entity = meta->find("entityStatusData");
+        if (entity != meta->end() && entity->is_object()) {
+            auto cat = entity->find("businessEntityStatusCategory");
+            if (cat != entity->end() && cat->is_string()) {
+                out_case.entity_status = cat->get<std::string>();
+            }
+        }
+        // Effective filing date doubles as the priority date
+        out_case.priority_date = ToDateString(get_str("effectiveFilingDate"));
+    }
+
+    auto last_ing = wrapper.find("lastIngestionDateTime");
+    if (last_ing != wrapper.end() && last_ing->is_string()) {
+        out_case.last_uspto_modified_at = last_ing->get<std::string>();
+    }
+    auto assign_bag = wrapper.find("assignmentBag");
+    if (assign_bag != wrapper.end() && assign_bag->is_array() && !assign_bag->empty()) {
+        const json& a = assign_bag->back();
+        auto name = a.find("assigneeName");
+        if (name == a.end()) name = a.find("assignorOrAssigneeName");
+        if (name != a.end() && name->is_string()) {
+            out_case.assignee_name = name->get<std::string>();
+        }
+    }
+}
+
+} // namespace
+
 bool UsptoClient::ParseApplicationBody(const std::string& json_body, UsptoCase& out_case,
                                       std::string& error) {
     try {
         auto parsed = json::parse(json_body);
-
         auto it = parsed.find("patentFileWrapperDataBag");
         if (it == parsed.end() || !it->is_array() || it->empty()) {
             error = "USPTO response has no patentFileWrapperDataBag";
             return false;
         }
-        const json& wrapper = (*it)[0];
-        const json* meta = nullptr;
-        auto meta_it = wrapper.find("applicationMetaData");
-        if (meta_it != wrapper.end()) meta = &(*meta_it);
+        ParseWrapper((*it)[0], out_case);
+    } catch (const json::exception& e) {
+        error = std::string("failed to parse USPTO application JSON: ") + e.what();
+        PATX_LOG_ERROR(error);
+        return false;
+    }
+    return true;
+}
 
-        if (meta) {
-            auto get_str = [&meta](const char* key) -> std::string {
-                auto f = meta->find(key);
-                if (f != meta->end() && f->is_string()) return f->get<std::string>();
-                return "";
-            };
-            out_case.application_status = get_str("applicationStatusDescriptionText");
-            out_case.status_date = get_str("applicationStatusDate");
-            out_case.application_type = get_str("applicationTypeCode");
-            out_case.examiner_name = get_str("examinerNameText");
-            out_case.filing_date = ToDateString(get_str("filingDate"));
-            out_case.first_named_inventor = get_str("firstInventorName");
-            out_case.applicant_name = get_str("firstApplicantName");
-            out_case.grant_date = ToDateString(get_str("grantDate"));
-            out_case.art_unit = get_str("groupArtUnitNumber");
-            out_case.attorney_docket_number = get_str("docketNumber");
-            out_case.title = get_str("inventionTitle");
-            out_case.publication_number = get_str("earliestPublicationNumber");
-            out_case.publication_date = ToDateString(get_str("earliestPublicationDate"));
-            out_case.patent_number = get_str("patentNumber");
-
-            // Technology center: first two digits of the art unit
-            if (!out_case.art_unit.empty() && out_case.art_unit.size() >= 2) {
-                out_case.technology_center = out_case.art_unit.substr(0, 2);
-            }
-
-            auto entity = meta->find("entityStatusData");
-            if (entity != meta->end() && entity->is_object()) {
-                auto cat = entity->find("businessEntityStatusCategory");
-                if (cat != entity->end() && cat->is_string()) {
-                    out_case.entity_status = cat->get<std::string>();
-                }
-            }
-            // Effective filing date doubles as the priority date
-            out_case.priority_date = ToDateString(get_str("effectiveFilingDate"));
+bool UsptoClient::ParseSearchBody(const std::string& json_body,
+                                  std::vector<UsptoCase>& out_results, std::string& error) {
+    out_results.clear();
+    try {
+        auto parsed = json::parse(json_body);
+        auto it = parsed.find("patentFileWrapperDataBag");
+        if (it == parsed.end() || !it->is_array()) {
+            error = "USPTO search response has no patentFileWrapperDataBag";
+            return false;
         }
-
-        auto last_ing = wrapper.find("lastIngestionDateTime");
-        if (last_ing != wrapper.end() && last_ing->is_string()) {
-            out_case.last_uspto_modified_at = last_ing->get<std::string>();
-        }
-        auto assign_bag = wrapper.find("assignmentBag");
-        if (assign_bag != wrapper.end() && assign_bag->is_array() && !assign_bag->empty()) {
-            const json& a = assign_bag->back();
-            auto name = a.find("assigneeName");
-            if (name == a.end()) name = a.find("assignorOrAssigneeName");
-            if (name != a.end() && name->is_string()) {
-                out_case.assignee_name = name->get<std::string>();
+        for (const auto& wrapper : *it) {
+            UsptoCase c;
+            ParseWrapper(wrapper, c);
+            if (!c.application_number.empty()) {
+                out_results.push_back(std::move(c));
             }
         }
     } catch (const json::exception& e) {
-        error = std::string("failed to parse USPTO application JSON: ") + e.what();
+        error = std::string("failed to parse USPTO search JSON: ") + e.what();
         PATX_LOG_ERROR(error);
         return false;
     }

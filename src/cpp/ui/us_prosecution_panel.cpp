@@ -58,7 +58,12 @@ protected:
                 if (r.api_key_missing) summary = r.error;
                 else if (r.case_not_found) summary = "Application not found: " + r.error;
                 else if (r.ok)
-                    summary = "Case " + spec_.app_no + " synced: " +
+                    summary = "Case " + spec_.app_no +
+                              (r.resolved_application_number.empty() ||
+                                       r.resolved_application_number == spec_.app_no
+                                   ? ""
+                                   : " (resolved to application " + r.resolved_application_number + ")") +
+                              " synced: " +
                               std::to_string(r.documents_total) + " documents (" +
                               std::to_string(r.documents_new) + " new), " +
                               std::to_string(r.claim_versions_built) + " claim versions";
@@ -740,8 +745,10 @@ void UsProsecutionPanel::LoadSyncLog() {
 
 void UsProsecutionPanel::OnAddCase(wxCommandEvent&) {
     wxTextEntryDialog dlg(this,
-        UTF8_STR("输入美国申请号\n例如 17248024 或 17/248024\n\n"
-                 "未在美国专利(国外专利页签)中登记的案件也可直接添加。"),
+        UTF8_STR("输入美国申请号 / 公开号 / 专利号\n"
+                 "例如 17248024、US 2021/0210819 A1 或 11,646,472\n\n"
+                 "公开号/专利号会通过 USPTO 官方搜索端点解析为申请号；\n"
+                 "命中多条时会要求改用申请号确认，不会自动猜测。"),
         UTF8_STR("添加 USPTO 案件"));
     if (dlg.ShowModal() != wxID_OK) return;
     std::string app_no = ToStd(dlg.GetValue());

@@ -105,15 +105,74 @@ SyncResult UsptoSyncService::AddCase(const std::string& application_number,
     config_.api_key = resolved_key;
     client_.SetApiKey(resolved_key);
 
-    std::string app_no = UsptoClient::NormalizeApplicationNumber(application_number);
-    UsptoCase existing = repo_.GetCaseByApplicationNumber(app_no);
+    // The user may enter an application number (17248024), a publication
+    // number (US 2021/0210819 A1) or a patent number (11,646,472). Letters in
+    // the input mean it definitely is not an application number, so resolve
+    // it through the official search endpoint first; bare digits go direct
+    // and fall back to search only on a 404.
+    std::string normalized_pub = UsptoClient::NormalizePublicationNumber(application_number);
+    bool has_letters = normalized_pub.find_first_not_of("0123456789") != std::string::npos;
 
     UsptoCase record;
-    record.application_number = app_no;
     record.foreign_patent_id = foreign_patent_id;
 
+    if (has_letters) {
+        std::string resolved = ResolveApplicationNumber(application_number, result);
+        if (resolved.empty()) return result;
+        record.application_number = resolved;
+        record.publication_number = normalized_pub;
+        SyncResult sync = RunSync(record, progress);
+        if (sync.ok) sync.resolved_application_number = resolved;
+        return sync;
+    }
+
+    record.application_number = UsptoClient::NormalizeApplicationNumber(application_number);
     SyncResult sync = RunSync(record, progress);
+
+    // Bare digits that 404'd may be a patent number - resolve and retry once
+    if (!sync.ok && sync.case_not_found) {
+        std::string resolved = ResolveApplicationNumber(application_number, sync);
+        if (!resolved.empty()) {
+            UsptoCase retry;
+            retry.foreign_patent_id = foreign_patent_id;
+            retry.application_number = resolved;
+            sync = RunSync(retry, progress);
+            if (sync.ok) sync.resolved_application_number = resolved;
+        }
+    }
     return sync;
+}
+
+std::string UsptoSyncService::ResolveApplicationNumber(const std::string& input,
+                                                       SyncResult& out_result) {
+    for (const auto& q : UsptoClient::BuildSearchQueries(input)) {
+        std::vector<UsptoCase> hits;
+        ApiResult api = client_.SearchApplications(q, hits);
+        if (!api.ok) {
+            if (api.http_status == 404) continue;   // this query found nothing, try next
+            out_result.error = api.error;
+            out_result.http_status = api.http_status;
+            out_result.http_status_line = api.status_line;
+            return "";
+        }
+        int idx = UsptoClient::PickSearchHit(input, hits);
+        if (idx >= 0) {
+            PATX_LOG_INFO("Resolved identifier '" + input + "' to application " +
+                          hits[idx].application_number + " (query: " + q + ")");
+            return hits[idx].application_number;
+        }
+        if (idx == -2) {
+            out_result.error = "identifier '" + input + "' matches " +
+                               std::to_string(hits.size()) +
+                               " applications; enter the application number (e.g. 17248024) "
+                               "to pick the exact case";
+            return "";
+        }
+        // -1: no exact match among this query's hits - try the next query
+    }
+    out_result.error = "no US application found for '" + input +
+                       "'. Check the number, or use the application number directly.";
+    return "";
 }
 
 SyncResult UsptoSyncService::SyncCase(int uspto_case_id, const ProgressFn& progress) {

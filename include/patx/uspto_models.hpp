@@ -225,6 +225,9 @@ struct SyncResult {
     std::string error;
     long http_status = 0;            // 0 = no HTTP response (config/network issue)
     std::string http_status_line;    // e.g. "HTTP 429 Too Many Requests"
+    // Filled when the user entered a publication/patent number and it was
+    // resolved to this application number via the official search endpoint.
+    std::string resolved_application_number;
 };
 
 } // namespace patx
