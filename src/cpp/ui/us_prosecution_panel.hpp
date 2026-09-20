@@ -55,6 +55,7 @@ private:
     void LoadSyncLog();
 
     // Actions
+    void OnBatchImport(wxCommandEvent&);
     void OnDownloadAll(wxCommandEvent&);
     void OnDownloadDocument(wxCommandEvent&);
     void OnOpenDocument(wxCommandEvent&);
@@ -67,6 +68,9 @@ private:
     // Sync plumbing
     void StartSyncWorker(int case_id /*0 = all cases*/, const std::string& new_app_no = "",
                          int foreign_patent_id = 0);
+    // Batch add: identifiers come from a spreadsheet (US publication/
+    // application/patent numbers); each is resolved and synced in sequence.
+    void StartBatchWorker(const std::vector<std::string>& identifiers);
     void ShowClaimDiff(int version_a, int version_b);
     void AppendDiffText(class wxTextCtrl* out, const std::vector<patx::ClaimDiff>& diffs);
 

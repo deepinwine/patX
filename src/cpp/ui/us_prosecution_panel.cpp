@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <sstream>
+#include <set>
 
 #define UTF8_STR(s) wxString::FromUTF8(s)
 #define DB_STR(s) wxString::FromUTF8(s.c_str())
@@ -19,6 +20,7 @@ static inline std::string ToStd(const wxString& s) { return std::string(s.utf8_s
 #include "patx/log.hpp"
 #include "patx/timeline_service.hpp"
 #include "patx/uspto_sync_service.hpp"
+#include "excel_io.hpp"
 
 // ---------------------------------------------------------------------------
 // Worker thread: opens its OWN database connection (WAL allows concurrent
@@ -27,7 +29,7 @@ static inline std::string ToStd(const wxString& s) { return std::string(s.utf8_s
 
 namespace {
 
-enum class SyncJob { kAddCase, kSyncCase, kSyncAll, kDownloadDoc, kTestConnection };
+enum class SyncJob { kAddCase, kSyncCase, kSyncAll, kDownloadDoc, kTestConnection, kBatchAdd };
 
 struct SyncJobSpec {
     SyncJob job = SyncJob::kSyncCase;
@@ -35,6 +37,7 @@ struct SyncJobSpec {
     int document_id = 0;
     int foreign_patent_id = 0;
     std::string app_no;
+    std::vector<std::string> identifiers;   // batch import
 };
 
 class SyncWorker : public wxThread {
@@ -101,6 +104,47 @@ protected:
                 ok = r.ok;
                 summary = r.ok ? "Connected to USPTO Open Data Portal"
                                : "Connection failed: " + r.error;
+                break;
+            }
+            case SyncJob::kBatchAdd: {
+                // Dedup against existing cases by every normalized number form
+                patx::UsptoRepository repo(db.GetHandle());
+                std::set<std::string> known;
+                for (const auto& c : repo.GetAllCases()) {
+                    known.insert(patx::UsptoClient::NormalizeApplicationNumber(c.application_number));
+                    if (!c.publication_number.empty())
+                        known.insert(patx::UsptoClient::NormalizePublicationNumber(c.publication_number));
+                    if (!c.patent_number.empty())
+                        known.insert(patx::UsptoClient::NormalizePatentNumber(c.patent_number));
+                }
+
+                int added = 0, skipped = 0, failed = 0;
+                std::vector<std::string> failure_notes;
+                for (const auto& id : spec_.identifiers) {
+                    std::string norm_app = patx::UsptoClient::NormalizeApplicationNumber(id);
+                    if (known.count(norm_app)) {
+                        skipped++;
+                        continue;
+                    }
+                    auto r = service.AddCase(id);
+                    if (r.ok) {
+                        added++;
+                        known.insert(r.resolved_application_number.empty()
+                                         ? norm_app
+                                         : patx::UsptoClient::NormalizeApplicationNumber(
+                                               r.resolved_application_number));
+                    } else {
+                        failed++;
+                        if (failure_notes.size() < 8) {
+                            failure_notes.push_back(id + ": " + (r.error.empty() ? "unknown error" : r.error));
+                        }
+                    }
+                }
+                ok = failed == 0;
+                summary = "Batch import: " + std::to_string(added) + " added, " +
+                          std::to_string(skipped) + " already tracked, " +
+                          std::to_string(failed) + " failed";
+                for (const auto& note : failure_notes) summary += "\n  " + note;
                 break;
             }
         }
@@ -360,6 +404,7 @@ void UsProsecutionPanel::BuildToolbar(wxSizer* parent_sizer) {
     };
 
     add_btn(UTF8_STR("添加案件 / Add Case"), &UsProsecutionPanel::OnAddCase);
+    add_btn(UTF8_STR("批量导入表格 / Batch Import"), &UsProsecutionPanel::OnBatchImport);
     add_btn(UTF8_STR("同步选中 / Sync"), &UsProsecutionPanel::OnSyncSelected);
     add_btn(UTF8_STR("同步全部 / Sync All"), &UsProsecutionPanel::OnSyncAll);
     add_btn(UTF8_STR("下载全部文档 / Download All"), &UsProsecutionPanel::OnDownloadAll);
@@ -607,8 +652,17 @@ void UsProsecutionPanel::LoadOverview() {
         << "Resp. deadline : " << (deadline.empty() ? "-" : deadline)
         << (deadline_source == "calculated" ? "  [Calculated - needs confirmation]"
                                             : (deadline_source == "manual" ? "  [Manual]" : ""))
-        << "\n"
-        << "Last sync      : " << c.last_synced_at
+        << "\n";
+
+    // Official Office Action dataset summary (oa_actions / oa_rejections)
+    auto facts = repo_->GetCaseFacts(selected_case_id_);
+    for (const auto& [key, value] : facts) {
+        if (key == "official_oa_summary" && !value.empty()) {
+            out << "Official OA    : " << value << "\n";
+        }
+    }
+
+    out << "Last sync      : " << c.last_synced_at
         << "   Status: " << c.sync_status
         << (c.sync_error.empty() ? "" : "   Error: " + c.sync_error) << "\n";
     overview_text_->SetValue(wxString::FromUTF8(out.str().c_str()));
@@ -762,8 +816,42 @@ void UsProsecutionPanel::OnAddCase(wxCommandEvent&) {
     StartSyncWorker(0, app_no, foreign_id);
 }
 
-void UsProsecutionPanel::OnSyncSelected(wxCommandEvent&) {
-    if (selected_case_id_ <= 0) {
+void UsProsecutionPanel::OnBatchImport(wxCommandEvent&) {
+    wxFileDialog dlg(this, UTF8_STR("选择含美国案号的表格 / Select spreadsheet"),
+                     "", "", UTF8_STR("表格文件|*.xlsx;*.csv"), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (dlg.ShowModal() != wxID_OK) return;
+    std::string path = ToStd(dlg.GetPath());
+
+    std::vector<std::string> ids;
+    int skipped_non_us = 0;
+    std::string error;
+    if (!ExcelIO::ReadIdentifiers(path, ids, &skipped_non_us, error)) {
+        wxMessageBox(wxString::FromUTF8(error.c_str()), UTF8_STR("批量导入"),
+                     wxOK | wxICON_ERROR);
+        return;
+    }
+    if (ids.empty()) {
+        wxMessageBox(UTF8_STR("表格中没有识别到美国申请号/公开号/专利号。\n"
+                              "(CN 等非美国号码无法在 USPTO 查询，会被跳过)"),
+                     UTF8_STR("批量导入"), wxOK | wxICON_INFORMATION);
+        return;
+    }
+
+    wxString msg = wxString::Format(
+        UTF8_STR("从表格识别到 %zu 个美国案号%s。\n"
+                 "将依次解析并同步每个案件（含审查意见下载），可能需要几分钟。继续？"),
+        ids.size(),
+        skipped_non_us > 0
+            ? wxString::Format(UTF8_STR("（另有 %d 个非美国号码已跳过）"), skipped_non_us).utf8_str()
+            : "");
+    if (wxMessageBox(msg, UTF8_STR("批量导入 / Batch Import"),
+                     wxYES_NO | wxICON_QUESTION) != wxYES)
+        return;
+
+    StartBatchWorker(ids);
+}
+
+void UsProsecutionPanel::OnSyncSelected(wxCommandEvent&) {    if (selected_case_id_ <= 0) {
         wxMessageBox(UTF8_STR("请先选择一个案件"), UTF8_STR("提示"), wxOK | wxICON_INFORMATION);
         return;
     }
@@ -972,6 +1060,35 @@ void UsProsecutionPanel::StartSyncWorker(int case_id, const std::string& new_app
     SyncWorker* worker = new SyncWorker(GetEventHandler(), db_path_, config, spec);
     if (worker->Create() != wxTHREAD_NO_ERROR) {
         wxMessageBox("failed to start sync worker", "Error", wxOK | wxICON_ERROR);
+        delete worker;
+        return;
+    }
+    active_workers_++;
+    worker->Run();
+}
+
+void UsProsecutionPanel::StartBatchWorker(const std::vector<std::string>& identifiers) {
+    patx::UsptoConfig config = CurrentConfig();
+    if (config.api_key.empty()) {
+        const char* env = std::getenv("USPTO_API_KEY");
+        if (env && *env) config.api_key = env;
+    }
+    if (config.api_key.empty()) {
+        wxMessageBox(UTF8_STR("批量导入需要 USPTO API Key。\n打开设置现在配置吗？"),
+                     UTF8_STR("USPTO"), wxYES_NO | wxICON_QUESTION);
+        UsptoSettingsDialog dlg(this, db_path_);
+        dlg.ShowModal();
+        return;
+    }
+
+    SyncJobSpec spec;
+    spec.job = SyncJob::kBatchAdd;
+    spec.identifiers = identifiers;
+
+    wxBusyCursor busy;
+    SyncWorker* worker = new SyncWorker(GetEventHandler(), db_path_, config, spec);
+    if (worker->Create() != wxTHREAD_NO_ERROR) {
+        wxMessageBox("failed to start batch worker", "Error", wxOK | wxICON_ERROR);
         delete worker;
         return;
     }

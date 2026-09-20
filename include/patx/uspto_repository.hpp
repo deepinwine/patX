@@ -5,6 +5,7 @@
 #include "patx/uspto_models.hpp"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 struct sqlite3;
@@ -73,6 +74,11 @@ public:
         bool is_error = false;
     };
     std::vector<SyncLogEntry> GetSyncLog(int case_id, int limit = 100);
+
+    // ----- Case facts (official Office Action dataset summaries) -----
+    void SetCaseFact(int case_id, const std::string& key, const std::string& value);
+    std::string GetCaseFact(int case_id, const std::string& key);
+    std::vector<std::pair<std::string, std::string>> GetCaseFacts(int case_id);
 
 private:
     sqlite3* db_;

@@ -184,6 +184,18 @@ void UsptoRepository::EnsureTables() {
         );
     )");
 
+    // Key/value facts derived from the official Office Action datasets
+    // (oa_actions / oa_rejections); refreshed on every sync.
+    Exec(db_, R"(
+        CREATE TABLE IF NOT EXISTS uspto_case_facts (
+            uspto_case_id INTEGER NOT NULL,
+            fact_key TEXT NOT NULL,
+            fact_value TEXT,
+            updated_at TEXT,
+            PRIMARY KEY (uspto_case_id, fact_key)
+        );
+    )");
+
     Exec(db_, "CREATE INDEX IF NOT EXISTS idx_uspto_docs_case ON uspto_documents(uspto_case_id);");
     Exec(db_, "CREATE INDEX IF NOT EXISTS idx_uspto_docs_identifier ON uspto_documents(document_identifier);");
     Exec(db_, "CREATE UNIQUE INDEX IF NOT EXISTS idx_uspto_docs_unique ON uspto_documents(uspto_case_id, document_identifier);");
@@ -868,6 +880,49 @@ std::vector<UsptoRepository::SyncLogEntry> UsptoRepository::GetSyncLog(int case_
             e.created_at = Col(stmt, 4);
             e.is_error = sqlite3_column_int(stmt, 5) != 0;
             results.push_back(std::move(e));
+        }
+        sqlite3_finalize(stmt);
+    }
+    return results;
+}
+
+// ---------------------------------------------------------------------------
+// Case facts (official Office Action dataset summaries)
+// ---------------------------------------------------------------------------
+
+void UsptoRepository::SetCaseFact(int case_id, const std::string& key,
+                                  const std::string& value) {
+    if (!db_) return;
+    Exec(db_, "INSERT INTO uspto_case_facts (uspto_case_id, fact_key, fact_value, updated_at) "
+              "VALUES (" +
+                  std::to_string(case_id) + "," + Q(key) + "," + Q(value) +
+                  ",datetime('now')) "
+                  "ON CONFLICT(uspto_case_id, fact_key) DO UPDATE SET "
+                  "fact_value = excluded.fact_value, updated_at = excluded.updated_at");
+}
+
+std::string UsptoRepository::GetCaseFact(int case_id, const std::string& key) {
+    if (!db_) return "";
+    sqlite3_stmt* stmt;
+    std::string sql = "SELECT fact_value FROM uspto_case_facts WHERE uspto_case_id = " +
+                      std::to_string(case_id) + " AND fact_key = " + Q(key);
+    std::string value;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) value = Col(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    return value;
+}
+
+std::vector<std::pair<std::string, std::string>> UsptoRepository::GetCaseFacts(int case_id) {
+    std::vector<std::pair<std::string, std::string>> results;
+    if (!db_) return results;
+    sqlite3_stmt* stmt;
+    std::string sql = "SELECT fact_key, fact_value FROM uspto_case_facts WHERE uspto_case_id = " +
+                      std::to_string(case_id) + " ORDER BY fact_key";
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            results.emplace_back(Col(stmt, 0), Col(stmt, 1));
         }
         sqlite3_finalize(stmt);
     }

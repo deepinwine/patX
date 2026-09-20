@@ -5,6 +5,8 @@
 //   GET  /api/v1/patent/applications/{applicationNumberText}/documents
 //   GET  /api/v1/patent/applications/{applicationNumberText}/continuity
 //   POST /api/v1/patent/applications/search        (OpenSearch-style q, pagination)
+//   POST /api/v1/patent/oa/oa_actions/v1/records   (DSAPI form query, per-OA rows)
+//   POST /api/v1/patent/oa/oa_rejections/v2/records(DSAPI form query, rejection flags)
 //   GET  /api/v1/download/applications/{app}/{docId}.pdf   (downloadUrl from API)
 //
 // Auth: X-API-Key header (MyUSPTO account; the June 2026 ODP change requires
@@ -49,6 +51,16 @@ public:
     ApiResult FetchDocuments(const std::string& application_number,
                              std::vector<UsptoDocument>& out_documents);
 
+    // Official Office Action datasets (DSAPI, form-encoded Lucene queries;
+    // migrated to the ODP host 2026-03-24). oa_actions returns one row per
+    // OA mailing (actionType + mailedDate); oa_rejections returns rejection
+    // flag rows (hasRej101/102/103/112/DP, alice/bilski indicators). Both are
+    // best-effort data for cross-checking the file wrapper documents.
+    ApiResult SearchOaActions(const std::string& application_number,
+                              std::vector<OaOfficialRecord>& out_records);
+    ApiResult SearchOaRejections(const std::string& application_number,
+                                 std::vector<OaOfficialRecord>& out_records);
+
     // Fetches parent/child continuity JSON (stored raw on the case).
     ApiResult FetchContinuity(const std::string& application_number, std::string& out_json);
 
@@ -89,10 +101,16 @@ public:
     static bool ParseDocumentsBody(const std::string& json_body,
                                    std::vector<UsptoDocument>& out_documents,
                                    std::string& error);
+    // Parses a DSAPI search response: {"response":{"numFound":N,"docs":[...]}}.
+    // out_num_found receives numFound (total rows in the dataset for the query).
+    static bool ParseDsapiBody(const std::string& json_body,
+                               std::vector<OaOfficialRecord>& out_records,
+                               long* out_num_found, std::string& error);
 
 private:
     ApiResult RequestJson(const std::string& method, const std::string& path_with_query,
-                          const std::string& post_body, std::string& json_body);
+                          const std::string& post_body, std::string& json_body,
+                          const std::string& content_type = "application/json");
     ApiResult GetJson(const std::string& path_with_query, /*out*/ std::string& json_body);
 
     UsptoConfig config_;

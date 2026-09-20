@@ -78,6 +78,16 @@ public:
     bool IsCsvFile(const std::string& file_path);
     std::string GetLastError() const;
 
+    // Reads US application/publication/patent numbers from a spreadsheet
+    // (.xlsx) or CSV for the batch USPTO case import. Prefers a header column
+    // named 申请号/公开号/publication/patent number; otherwise scans all cells
+    // for identifier-shaped values. Non-US numbers (e.g. CN公开号) are counted
+    // into *skipped_non_us - the USPTO only has US applications. Returns the
+    // identifiers in file order, de-duplicated.
+    static bool ReadIdentifiers(const std::string& file_path,
+                                std::vector<std::string>& out_identifiers,
+                                int* skipped_non_us, std::string& error);
+
 private:
     std::string last_error_;
 
@@ -101,9 +111,8 @@ private:
         std::function<bool(int, int)> progress_callback
     );
 
-    std::vector<std::string> ParseCsvLine(const std::string& line);
-    std::string CleanValue(const std::string& value);
-    std::string ParseDate(const std::string& value);
+    static std::vector<std::string> ParseCsvLine(const std::string& line);
+    std::string CleanValue(const std::string& value);    std::string ParseDate(const std::string& value);
     bool IsValidGekeCode(const std::string& code);
     bool IsValidRowCode(const std::string& code);
     Patent MergePatents(const Patent& existing, const Patent& new_data);

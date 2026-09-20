@@ -326,6 +326,9 @@ SyncResult UsptoSyncService::RunSync(UsptoCase& record, const ProgressFn& progre
     // ---- 4. Claim history ----
     result.claim_versions_built = BuildClaimHistory(case_id);
 
+    // ---- 4b. Official Office Action dataset cross-check ----
+    SyncOfficialOaData(record, result);
+
     // ---- 5. OA tracker + new-document bookkeeping ----
     result.oa_records_linked = SyncOaTracker(case_id);
     TimelineService timeline(repo_);
@@ -531,6 +534,90 @@ SyncResult UsptoSyncService::DownloadAndParseDocument(int document_id, const Pro
     result.documents_downloaded = 1;
     if (progress) progress(SyncState::Completed, 100, "Done");
     return result;
+}
+
+void UsptoSyncService::SyncOfficialOaData(const UsptoCase& record, SyncResult& result) {
+    if (!config_.HasApiKey()) return;   // RunSync already failed earlier in that case
+
+    // oa_actions: one row per OA mailing. Match each against the file wrapper
+    // documents by date to confirm classification and spot OAs the document
+    // feed missed.
+    std::vector<OaOfficialRecord> actions;
+    ApiResult api = client_.SearchOaActions(record.application_number, actions);
+    if (!api.ok) {
+        // Best effort: log and continue with the rejections dataset.
+        repo_.LogSyncEvent(record.id, "official_oa_data", "oa_actions query failed: " + api.error,
+                           true);
+    }
+
+    // oa_rejections: rows carrying hasRej101/102/103/112/DP flags. Row
+    // granularity varies (per mailing or per rejection basis), so only the
+    // aggregated case-level profile is stored, never per-document claims.
+    std::vector<OaOfficialRecord> rejections;
+    api = client_.SearchOaRejections(record.application_number, rejections);
+    if (!api.ok) {
+        repo_.LogSyncEvent(record.id, "official_oa_data",
+                           "oa_rejections query failed: " + api.error, true);
+    }
+
+    if (!actions.empty()) {
+        auto docs = repo_.GetDocumentsForCaseOrdered(record.id, true);
+        int matched = 0;
+        for (const auto& action : actions) {
+            bool found = false;
+            for (const auto& doc : docs) {
+                std::string date = doc.mail_date.empty() ? doc.filing_date : doc.mail_date;
+                if (!action.mailed_date.empty() && date == action.mailed_date &&
+                    IsOaCategory(doc.category)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                matched++;
+            } else {
+                repo_.LogSyncEvent(record.id, "official_oa_data",
+                                   "official dataset lists " + action.action_type +
+                                       " mailed " + action.mailed_date +
+                                       " not found in the file wrapper documents", false);
+            }
+        }
+        repo_.SetCaseFact(record.id, "official_oa_mailings", std::to_string(actions.size()));
+        repo_.SetCaseFact(record.id, "official_oa_matched", std::to_string(matched));
+    }
+
+    std::string statutes;
+    auto flag_to_statute = [](int flag, const char* name) {
+        return flag == 1 ? name : "";
+    };
+    auto add_statute = [&statutes](const std::string& s) {
+        if (s.empty()) return;
+        if (!statutes.empty()) statutes += ", ";
+        statutes += s;
+    };
+    for (const auto& r : rejections) {
+        add_statute(flag_to_statute(r.has_rej_101, "101"));
+        add_statute(flag_to_statute(r.has_rej_102, "102"));
+        add_statute(flag_to_statute(r.has_rej_103, "103"));
+        add_statute(flag_to_statute(r.has_rej_112, "112"));
+        add_statute(flag_to_statute(r.has_rej_dp, "DP"));
+    }
+    if (!rejections.empty() || !actions.empty()) {
+        repo_.SetCaseFact(record.id, "official_rejection_types", statutes.empty() ? "-" : statutes);
+        repo_.SetCaseFact(record.id, "official_rejection_rows", std::to_string(rejections.size()));
+
+        std::string summary = "official OA data: " + std::to_string(actions.size()) +
+                              " mailing(s) in oa_actions, " + std::to_string(rejections.size()) +
+                              " rejection row(s)";
+        if (!statutes.empty()) summary += ", statutes " + statutes;
+        result.official_oa_summary = summary;
+
+        // Log once per changed summary, not on every sync.
+        if (repo_.GetCaseFact(record.id, "official_oa_summary") != summary) {
+            repo_.SetCaseFact(record.id, "official_oa_summary", summary);
+            repo_.LogSyncEvent(record.id, "official_oa_data", summary, false);
+        }
+    }
 }
 
 } // namespace patx

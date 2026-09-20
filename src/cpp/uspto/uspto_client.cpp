@@ -133,7 +133,8 @@ ApiResult UsptoClient::GetJson(const std::string& path_with_query, std::string& 
 }
 
 ApiResult UsptoClient::RequestJson(const std::string& method, const std::string& path_with_query,
-                                   const std::string& post_body, std::string& json_body) {
+                                   const std::string& post_body, std::string& json_body,
+                                   const std::string& content_type) {
     ApiResult result;
 
     HttpRequestOptions options;
@@ -151,7 +152,7 @@ ApiResult UsptoClient::RequestJson(const std::string& method, const std::string&
 
     std::string url = config_.api_base_url + path_with_query;
     HttpResponse resp = method == "POST"
-        ? http_.Post(url, post_body, "application/json", options)
+        ? http_.Post(url, post_body, content_type, options)
         : http_.Get(url, options);
     result.http_status = resp.status_code;
     result.status_line = resp.status_line;
@@ -453,6 +454,128 @@ ApiResult UsptoClient::FetchContinuity(const std::string& application_number,
     ApiResult result = GetJson("/api/v1/patent/applications/" + app_no + "/continuity", body);
     if (!result.ok) return result;
     out_json = body;   // stored raw; parsed on demand by the UI
+    result.ok = true;
+    return result;
+}
+
+namespace {
+
+// Percent-encodes a value for an application/x-www-form-urlencoded body.
+std::string FormEncode(const std::string& value) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : value) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+// DSAPI flag fields arrive as 0/1 numbers or true/false booleans.
+int ReadFlag(const json& doc, const char* key) {
+    auto f = doc.find(key);
+    if (f == doc.end()) return -1;
+    if (f->is_number()) return f->get<int>() != 0 ? 1 : 0;
+    if (f->is_boolean()) return f->get<bool>() ? 1 : 0;
+    return -1;
+}
+
+} // namespace
+
+bool UsptoClient::ParseDsapiBody(const std::string& json_body,
+                                 std::vector<OaOfficialRecord>& out_records,
+                                 long* out_num_found, std::string& error) {
+    out_records.clear();
+    if (out_num_found) *out_num_found = 0;
+    try {
+        auto parsed = json::parse(json_body);
+        auto resp_it = parsed.find("response");
+        if (resp_it == parsed.end() || !resp_it->is_object()) {
+            error = "DSAPI response has no response object";
+            return false;
+        }
+        auto count = resp_it->find("numFound");
+        if (count != resp_it->end() && count->is_number() && out_num_found) {
+            *out_num_found = count->get<long>();
+        }
+        auto docs = resp_it->find("docs");
+        if (docs == resp_it->end() || !docs->is_array()) {
+            error = "DSAPI response has no docs array";
+            return false;
+        }
+
+        for (const auto& doc : *docs) {
+            if (!doc.is_object()) continue;
+            OaOfficialRecord r;
+            auto get_str = [&doc](const char* key) -> std::string {
+                auto f = doc.find(key);
+                if (f != doc.end() && f->is_string()) return f->get<std::string>();
+                return "";
+            };
+            r.application_number = get_str("patentApplicationNumber");
+            r.action_type = get_str("actionType");
+            r.mailed_date = get_str("mailedDate");
+            r.record_id = get_str("id");
+            r.legal_section_code = get_str("legalSectionCode");
+            r.group_art_unit = get_str("groupArtUnitNumber");
+            r.has_rej_101 = ReadFlag(doc, "hasRej101");
+            r.has_rej_102 = ReadFlag(doc, "hasRej102");
+            r.has_rej_103 = ReadFlag(doc, "hasRej103");
+            r.has_rej_112 = ReadFlag(doc, "hasRej112");
+            r.has_rej_dp = ReadFlag(doc, "hasRejDP");
+            auto alice = doc.find("aliceIndicator");
+            if (alice != doc.end() && alice->is_boolean()) r.alice_indicator = alice->get<bool>();
+            auto bilski = doc.find("bilskiIndicator");
+            if (bilski != doc.end() && bilski->is_boolean()) r.bilski_indicator = bilski->get<bool>();
+            out_records.push_back(std::move(r));
+        }
+    } catch (const json::exception& e) {
+        error = std::string("failed to parse DSAPI JSON: ") + e.what();
+        PATX_LOG_ERROR(error);
+        return false;
+    }
+    return true;
+}
+
+ApiResult UsptoClient::SearchOaActions(const std::string& application_number,
+                                       std::vector<OaOfficialRecord>& out_records) {
+    std::string app_no = NormalizeApplicationNumber(application_number);
+    std::string form = "criteria=" + FormEncode("patentApplicationNumber:" + app_no) +
+                       "&start=0&rows=100";
+    std::string body;
+    ApiResult result = RequestJson("POST", "/api/v1/patent/oa/oa_actions/v1/records",
+                                   form, body, "application/x-www-form-urlencoded");
+    if (!result.ok) return result;
+
+    std::string parse_error;
+    if (!ParseDsapiBody(body, out_records, nullptr, parse_error)) {
+        result.error = parse_error;
+        return result;
+    }
+    result.ok = true;
+    return result;
+}
+
+ApiResult UsptoClient::SearchOaRejections(const std::string& application_number,
+                                          std::vector<OaOfficialRecord>& out_records) {
+    std::string app_no = NormalizeApplicationNumber(application_number);
+    std::string form = "criteria=" + FormEncode("patentApplicationNumber:" + app_no) +
+                       "&start=0&rows=200";
+    std::string body;
+    ApiResult result = RequestJson("POST", "/api/v1/patent/oa/oa_rejections/v2/records",
+                                   form, body, "application/x-www-form-urlencoded");
+    if (!result.ok) return result;
+
+    std::string parse_error;
+    if (!ParseDsapiBody(body, out_records, nullptr, parse_error)) {
+        result.error = parse_error;
+        return result;
+    }
     result.ok = true;
     return result;
 }

@@ -61,6 +61,13 @@ public:
     // existing records - those belong to the user.
     int SyncOaTracker(int uspto_case_id);
 
+    // Cross-checks the file wrapper against the official Office Action
+    // datasets (oa_actions: one row per OA mailing with actionType/mailedDate;
+    // oa_rejections: rejection flags 101/102/103/112/DP). Stores a summary in
+    // uspto_case_facts and logs differences; failures are logged but never
+    // fail the sync (best-effort enrichment).
+    void SyncOfficialOaData(const UsptoCase& record, SyncResult& result);
+
     UsptoClient& client() { return client_; }
 
 private:

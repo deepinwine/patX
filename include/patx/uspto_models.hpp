@@ -198,6 +198,29 @@ struct OaRejection {
     double parse_confidence = 0.0;
 };
 
+// One record from the official Office Action DSAPI datasets on the ODP
+// (migrated there 2026-03-24; the developer.uspto.gov hosts are retired):
+//   POST /api/v1/patent/oa/oa_actions/v1/records     (per-OA-mailing rows)
+//   POST /api/v1/patent/oa/oa_rejections/v2/records  (per-rejection rows)
+// The datasets have different fields; one struct covers both, absent
+// fields keep their defaults.
+struct OaOfficialRecord {
+    std::string application_number;   // patentApplicationNumber
+    std::string action_type;          // oa_actions: "Non-Final Rejection" ...
+    std::string mailed_date;          // oa_actions: YYYY-MM-DD
+    std::string record_id;            // oa_actions: id
+    // oa_rejections flags; -1 = field absent in the record
+    int has_rej_101 = -1;
+    int has_rej_102 = -1;
+    int has_rej_103 = -1;
+    int has_rej_112 = -1;
+    int has_rej_dp = -1;              // double patenting
+    bool alice_indicator = false;     // 101 subject-matter signals
+    bool bilski_indicator = false;
+    std::string legal_section_code;
+    std::string group_art_unit;
+};
+
 // One row in the prosecution timeline.
 struct TimelineEvent {
     std::string date;                 // YYYY-MM-DD
@@ -228,6 +251,9 @@ struct SyncResult {
     // Filled when the user entered a publication/patent number and it was
     // resolved to this application number via the official search endpoint.
     std::string resolved_application_number;
+    // Summary line from the official Office Action datasets (oa_actions /
+    // oa_rejections); empty when the datasets were not consulted.
+    std::string official_oa_summary;
 };
 
 } // namespace patx

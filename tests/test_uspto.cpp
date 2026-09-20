@@ -399,3 +399,79 @@ TEST(uspto_pick_search_hit) {
     ambiguous.push_back(results[0]);
     CHECK_EQ(patx::UsptoClient::PickSearchHit("US 2021/0210819 A1", ambiguous), -2);
 }
+
+// ---------------- Official OA DSAPI datasets (oa_actions / oa_rejections) ----------------
+
+TEST(uspto_parse_dsapi_actions_fixture) {
+    std::string body = LoadFixture("uspto/oa_dsapi_actions.json");
+    std::vector<patx::OaOfficialRecord> records;
+    long num_found = 0;
+    std::string error;
+    CHECK(patx::UsptoClient::ParseDsapiBody(body, records, &num_found, error));
+    CHECK_STR_EQ(error, "");
+    CHECK_EQ(records.size(), 2u);
+    CHECK_EQ(num_found, 5432L);
+    CHECK_STR_EQ(records[0].application_number, "16123456");
+    CHECK_STR_EQ(records[0].action_type, "Non-Final Rejection");
+    CHECK_STR_EQ(records[0].mailed_date, "2021-05-15");
+    CHECK_STR_EQ(records[1].action_type, "Final Rejection");
+    // oa_actions rows carry no rejection flags: all stay "absent"
+    CHECK_EQ(records[0].has_rej_103, -1);
+}
+
+TEST(uspto_parse_dsapi_rejections_fixture) {
+    std::string body = LoadFixture("uspto/oa_dsapi_rejections.json");
+    std::vector<patx::OaOfficialRecord> records;
+    long num_found = 0;
+    std::string error;
+    CHECK(patx::UsptoClient::ParseDsapiBody(body, records, &num_found, error));
+    CHECK_EQ(records.size(), 2u);
+    CHECK_EQ(num_found, 86973947L);
+    // Numeric 0/1 flags
+    CHECK_EQ(records[0].has_rej_103, 1);
+    CHECK_EQ(records[0].has_rej_112, 1);
+    CHECK_EQ(records[0].has_rej_101, 0);
+    CHECK_EQ(records[0].has_rej_dp, 0);
+    CHECK_EQ(records[0].alice_indicator, false);
+    CHECK_STR_EQ(records[0].legal_section_code, "112");
+    CHECK_STR_EQ(records[0].group_art_unit, "1713");
+    // Boolean flags are accepted too
+    CHECK_EQ(records[1].has_rej_101, 1);
+    CHECK_EQ(records[1].has_rej_102, 1);
+    CHECK_EQ(records[1].alice_indicator, true);
+    CHECK_EQ(records[1].bilski_indicator, true);
+}
+
+TEST(uspto_parse_dsapi_rejects_bad_body) {
+    std::vector<patx::OaOfficialRecord> records;
+    std::string error;
+    CHECK(!patx::UsptoClient::ParseDsapiBody("{\"count\": 0}", records, nullptr, error));
+    CHECK(!error.empty());
+}
+
+TEST(uspto_repository_case_facts) {
+    std::string db_path = TempDbPath("uspto_facts");
+    std::filesystem::remove(db_path);
+    {
+        Database db(db_path);
+        patx::UsptoRepository repo(db.GetHandle());
+        repo.EnsureTables();
+
+        patx::UsptoCase c;
+        c.application_number = "17248024";
+        int case_id = repo.UpsertCase(c);
+        CHECK(case_id > 0);
+
+        repo.SetCaseFact(case_id, "official_rejection_types", "103, 112");
+        repo.SetCaseFact(case_id, "official_oa_mailings", "2");
+        // Upsert overwrites
+        repo.SetCaseFact(case_id, "official_oa_mailings", "3");
+        CHECK_STR_EQ(repo.GetCaseFact(case_id, "official_oa_mailings"), "3");
+        CHECK_STR_EQ(repo.GetCaseFact(case_id, "official_rejection_types"), "103, 112");
+        CHECK_STR_EQ(repo.GetCaseFact(case_id, "missing"), "");
+
+        auto facts = repo.GetCaseFacts(case_id);
+        CHECK_EQ(facts.size(), 2u);
+    }
+    std::filesystem::remove(db_path);
+}

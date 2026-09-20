@@ -1,0 +1,30 @@
+{
+  "response": {
+    "numFound": 86973947,
+    "start": 0,
+    "docs": [
+      {
+        "patentApplicationNumber": "12190351",
+        "hasRej101": 0,
+        "hasRej102": 0,
+        "hasRej103": 1,
+        "hasRej112": 1,
+        "hasRejDP": 0,
+        "aliceIndicator": false,
+        "bilskiIndicator": false,
+        "groupArtUnitNumber": "1713",
+        "legalSectionCode": "112"
+      },
+      {
+        "patentApplicationNumber": "12190351",
+        "hasRej101": true,
+        "hasRej102": 1,
+        "hasRej103": 0,
+        "hasRej112": 0,
+        "aliceIndicator": true,
+        "bilskiIndicator": true,
+        "legalSectionCode": "101"
+      }
+    ]
+  }
+}

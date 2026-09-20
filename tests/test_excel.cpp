@@ -103,3 +103,56 @@ TEST(excel_import_csv_into_structured_fields) {
     std::filesystem::remove(csv_path);
     std::filesystem::remove(db_path);
 }
+
+TEST(excel_read_identifiers_from_csv) {
+    std::string path = (std::filesystem::temp_directory_path() / "patx_batch_ids.csv").string();
+    {
+        std::ofstream out(path);
+        out << "\xEF\xBB\xBF案号,US公开号,备注\n";
+        out << "GK-1,US 2021/0210819 A1,备注文本\n";
+        out << "GK-2,CN112345678A,中国申请\n";
+        out << "GK-3,17248024,\n";
+        out << "GK-4,\"11,646,472\",patent grant\n";
+        out << "GK-5,US11646472B2,patent\n";
+        out << "GK-6,EP3456789A1,欧洲\n";
+        out << "GK-7,标题行文本,not a number\n";
+    }
+
+    std::vector<std::string> ids;
+    int skipped = -1;
+    std::string error;
+    CHECK(ExcelIO::ReadIdentifiers(path, ids, &skipped, error));
+    CHECK_STR_EQ(error, "");
+    CHECK_EQ(ids.size(), 4u);
+    CHECK_STR_EQ(ids[0], "US 2021/0210819 A1");
+    CHECK_STR_EQ(ids[1], "17248024");
+    CHECK_STR_EQ(ids[2], "11,646,472");
+    CHECK_STR_EQ(ids[3], "US11646472B2");
+    CHECK_EQ(skipped, 2);   // CN + EP numbers counted as non-US
+    std::filesystem::remove(path);
+}
+
+TEST(excel_read_identifiers_from_xlsx) {
+    std::string path = (std::filesystem::temp_directory_path() / "patx_batch_ids.xlsx").string();
+    {
+        ExcelIO io;
+        ExportTable t;
+        t.sheet_name = "Data";
+        t.headers = {"案号", "US公开号", "状态"};
+        t.rows.push_back({"GK-1", "US 2021/0210819 A1", "pending"});
+        t.rows.push_back({"GK-2", "CN112345678A", "filed"});
+        t.rows.push_back({"GK-3", "17248024", "pending"});
+        CHECK(io.ExportXlsx(t, path));
+    }
+
+    std::vector<std::string> ids;
+    int skipped = 0;
+    std::string error;
+    CHECK(ExcelIO::ReadIdentifiers(path, ids, &skipped, error));
+    CHECK_STR_EQ(error, "");
+    CHECK_EQ(ids.size(), 2u);
+    CHECK_STR_EQ(ids[0], "US 2021/0210819 A1");
+    CHECK_STR_EQ(ids[1], "17248024");
+    CHECK_EQ(skipped, 1);
+    std::filesystem::remove(path);
+}
