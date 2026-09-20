@@ -22,6 +22,7 @@
 #include "database.hpp"
 #include "excel_io.hpp"
 #include "pdf_parser.hpp"
+#include "ui/web_dossier_dialogs.hpp"
 
 // Import types from patx namespace
 using patx::PdfParser;
@@ -980,6 +981,8 @@ class PatXFrame : public wxFrame {
 public:
     PatXFrame() : wxFrame(nullptr, wxID_ANY, "patX - Patent Manager v0.3.0", wxDefaultPosition, wxSize(1600, 900)) {
         db = std::make_unique<Database>("patents.db");
+        dossier_controller = std::make_unique<WebDossierController>(
+            this, *db, [this](const std::string& geke_code) { ShowPatentByCode(geke_code); });
         SetupMenu();
         SetupUI();
         LoadAllData();
@@ -987,6 +990,7 @@ public:
 
 private:
     std::unique_ptr<Database> db;
+    std::unique_ptr<WebDossierController> dossier_controller;
     wxAuiNotebook* notebook;
     wxStatusBar* status_bar;
 
@@ -1072,8 +1076,25 @@ private:
         tools_menu->Append(ID_NAS_CONFIG, LANG_STR("NAS &Configuration...", "NAS配置(&C)..."));
         tools_menu->AppendSeparator();
         tools_menu->Append(ID_BACKUP, LANG_STR("&Backup Database", "备份数据库(&B)"));
-        tools_menu->Append(ID_RESTORE, LANG_STR("&Restore Backup...", "恢复备份(&R)..."));
+        tools_menu->Append(ID_RESTORE, LANG_STR("Restore Backup...", "恢复备份(&R)..."));
         mb->Append(tools_menu, LANG_STR("&Tools", "工具(&T)"));
+
+        // Web dossier sync menu (审查意见网页同步)
+        wxMenu* dossier_menu = new wxMenu;
+        dossier_menu->Append(ID_DOSSIER_SYNC_SELECTED,
+                             LANG_STR("Update &Selected Case", "更新选中案件审查信息(&S)"));
+        dossier_menu->Append(ID_DOSSIER_SYNC_ALL,
+                             LANG_STR("Update All &Active Cases", "更新全部活跃案件(&A)"));
+        dossier_menu->Append(ID_DOSSIER_SYNC_GRANTED,
+                             LANG_STR("Update All (incl. Granted)", "更新全部（含已授权）"));
+        dossier_menu->AppendSeparator();
+        dossier_menu->Append(ID_DOSSIER_LOGIN,
+                             LANG_STR("CNIPA &Login...", "CNIPA 登录(&L)..."));
+        dossier_menu->Append(ID_DOSSIER_HISTORY,
+                             LANG_STR("Sync &History", "同步历史(&H)"));
+        dossier_menu->Append(ID_DOSSIER_ERRORS,
+                             LANG_STR("&Problem Cases", "异常案件(&P)"));
+        mb->Append(dossier_menu, LANG_STR("&Dossier Sync", "审查信息同步(&D)"));
 
         // Help menu
         wxMenu* help_menu = new wxMenu;
@@ -1137,6 +1158,12 @@ private:
         Bind(wxEVT_MENU, &PatXFrame::OnSwitchDatabase, this, ID_SWITCH_DB);
         Bind(wxEVT_MENU, &PatXFrame::OnAutoBackup, this, ID_AUTO_BACKUP);
         Bind(wxEVT_MENU, &PatXFrame::OnAbout, this, wxID_ABOUT);
+        Bind(wxEVT_MENU, &PatXFrame::OnDossierSyncSelected, this, ID_DOSSIER_SYNC_SELECTED);
+        Bind(wxEVT_MENU, &PatXFrame::OnDossierSyncAll, this, ID_DOSSIER_SYNC_ALL);
+        Bind(wxEVT_MENU, &PatXFrame::OnDossierSyncGranted, this, ID_DOSSIER_SYNC_GRANTED);
+        Bind(wxEVT_MENU, &PatXFrame::OnDossierLogin, this, ID_DOSSIER_LOGIN);
+        Bind(wxEVT_MENU, &PatXFrame::OnDossierHistory, this, ID_DOSSIER_HISTORY);
+        Bind(wxEVT_MENU, &PatXFrame::OnDossierErrors, this, ID_DOSSIER_ERRORS);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(0); }, ID_THEME_LIGHT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(1); }, ID_THEME_DARK);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(2); }, ID_THEME_EYE);
@@ -1163,7 +1190,13 @@ private:
         ID_LANG_EN,
         ID_LANG_ZH,
         ID_VALIDATE_DATA,
-        ID_STATISTICS
+        ID_STATISTICS,
+        ID_DOSSIER_SYNC_SELECTED,
+        ID_DOSSIER_SYNC_ALL,
+        ID_DOSSIER_SYNC_GRANTED,
+        ID_DOSSIER_LOGIN,
+        ID_DOSSIER_HISTORY,
+        ID_DOSSIER_ERRORS
     };
     
     int current_lang = 0; // 0=English, 1=Chinese
@@ -3766,6 +3799,43 @@ private:
             "About patX", wxOK | wxICON_INFORMATION
         );
     }
+
+    // ---- Web dossier sync (审查信息网页同步) ----
+    // Jumps to the patent tab and selects the row with this internal code.
+    void ShowPatentByCode(const std::string& geke_code) {
+        notebook->SetSelection(0);   // patent tab
+        for (long i = 0; i < patent_list->GetItemCount(); ++i) {
+            wxString item_code = patent_list->GetItemText(i, 0);
+            patent_list->SetItemState(i, 0, wxLIST_STATE_SELECTED);
+            if (item_code.ToStdString() == geke_code) {
+                patent_list->SetItemState(i, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
+                patent_list->EnsureVisible(i);
+                patent_list->SetFocus();
+            }
+        }
+    }
+
+    void OnDossierSyncSelected(wxCommandEvent&) {
+        std::vector<Patent> selected;
+        long idx = -1;
+        while ((idx = patent_list->GetNextItem(idx, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) >= 0) {
+            int id = patent_list->GetItemData(idx);
+            Patent p = db->GetPatentById(id);
+            if (p.id > 0) selected.push_back(p);
+        }
+        if (selected.empty()) {
+            wxMessageBox(UTF8_STR("请先在专利列表中选择案件"),
+                         UTF8_STR("审查信息同步"), wxOK | wxICON_INFORMATION);
+            return;
+        }
+        dossier_controller->SyncPatents(selected);
+    }
+
+    void OnDossierSyncAll(wxCommandEvent&) { dossier_controller->SyncAllActive(false); }
+    void OnDossierSyncGranted(wxCommandEvent&) { dossier_controller->SyncAllActive(true); }
+    void OnDossierLogin(wxCommandEvent&) { dossier_controller->Login(); }
+    void OnDossierHistory(wxCommandEvent&) { dossier_controller->ShowHistory(); }
+    void OnDossierErrors(wxCommandEvent&) { dossier_controller->ShowErrorCases(); }
 
     void OnExit(wxCommandEvent&) { Close(true); }
 

@@ -21,3 +21,12 @@ data/test_*
 # Temp
 *.log
 *.tmp
+
+# Web dossier sync artifacts
+debug/web_dossier/
+patx_sidecar_stderr.log
+*.pyc
+__pycache__/
+.pytest_cache/
+build-*/
+.worktrees/
