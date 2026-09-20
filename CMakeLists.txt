@@ -88,6 +88,7 @@ add_library(patx_core STATIC
     src/cpp/database/schema_migrations.cpp
     src/cpp/database/uspto_repository.cpp
     src/cpp/io/excel_io.cpp
+    src/cpp/web_dossier_rules.cpp
     src/cpp/database/uspto_repository.cpp
     src/cpp/network/http_client.cpp
     src/cpp/uspto/uspto_client.cpp
@@ -135,6 +136,8 @@ if(PATX_BUILD_GUI)
             src/cpp/main_gui.cpp
             src/cpp/ui/edit_dialogs.cpp
             src/cpp/ui/us_prosecution_panel.cpp
+            src/cpp/web_dossier.cpp
+            src/cpp/ui/web_dossier_dialogs.cpp
         )
         if(WIN32)
             set_target_properties(patx PROPERTIES WIN32_EXECUTABLE TRUE)
@@ -168,6 +171,18 @@ if(PATX_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     add_test(NAME patx_tests COMMAND patx_tests)
+
+    # Web dossier OA merge rules (standalone main; links the core rules unit)
+    add_executable(patx_web_dossier_tests tests/test_web_dossier_rules.cpp)
+    target_link_libraries(patx_web_dossier_tests PRIVATE patx_core)
+    target_include_directories(patx_web_dossier_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp
+    )
+    if(MSVC)
+        target_compile_options(patx_web_dossier_tests PRIVATE /utf-8)
+    endif()
+    add_test(NAME patx_web_dossier_tests COMMAND patx_web_dossier_tests)
     # Fixtures are copied next to the test binary so tests can locate them
     add_custom_command(TARGET patx_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory

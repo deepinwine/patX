@@ -17,7 +17,7 @@ namespace patx {
 
 // Bump when adding a migration step. Fresh databases jump straight to this
 // version; existing databases step up one version at a time.
-inline constexpr int kSchemaVersionCurrent = 2;
+inline constexpr int kSchemaVersionCurrent = 3;
 
 struct SchemaMigrationResult {
     bool ok = true;
@@ -33,8 +33,8 @@ struct SchemaMigrationResult {
 int ReadSchemaVersion(sqlite3* db);
 
 // Brings the schema up to kSchemaVersionCurrent. For a legacy database this
-// applies v1->v2 (structured patent columns, OA external-link columns, notes
-// prefix migration, deadline rules, indexes). Safe to call repeatedly.
+// applies v1->v2 (structured patent columns and USPTO linkage) and v2->v3
+// (CNIPA dossier sync fields/tables). Safe to call repeatedly.
 SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_path);
 
 // Seeds the deadline_rules table with default rules if it is empty. Called on

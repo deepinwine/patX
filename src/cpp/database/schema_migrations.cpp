@@ -183,6 +183,72 @@ bool ApplyV1ToV2(sqlite3* db) {
     return true;
 }
 
+bool ApplyV2ToV3(sqlite3* db) {
+    const std::vector<std::pair<std::string, std::string>> patent_cols = {
+        {"publication_number", "TEXT DEFAULT ''"},
+        {"last_dossier_check_at", "INTEGER DEFAULT 0"},
+        {"next_dossier_check_at", "INTEGER DEFAULT 0"},
+    };
+    for (const auto& [column, type] : patent_cols) {
+        if (!HasColumn(db, "patents", column) &&
+            !Exec(db, "ALTER TABLE patents ADD COLUMN " + column + " " + type + ";")) {
+            return false;
+        }
+    }
+
+    const std::vector<std::pair<std::string, std::string>> oa_cols = {
+        {"remote_document_id", "TEXT DEFAULT ''"},
+        {"sync_flag", "TEXT DEFAULT ''"},
+    };
+    for (const auto& [column, type] : oa_cols) {
+        if (!HasColumn(db, "oa_records", column) &&
+            !Exec(db, "ALTER TABLE oa_records ADD COLUMN " + column + " " + type + ";")) {
+            return false;
+        }
+    }
+
+    if (!Exec(db, R"(
+        CREATE TABLE IF NOT EXISTS prosecution_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patent_id INTEGER,
+            jurisdiction TEXT,
+            application_number TEXT,
+            publication_number TEXT,
+            source TEXT,
+            remote_document_id TEXT,
+            document_type TEXT,
+            document_title TEXT,
+            official_date TEXT,
+            direction TEXT,
+            source_url TEXT,
+            download_url TEXT,
+            download_available INTEGER DEFAULT 0,
+            fingerprint TEXT,
+            first_seen_at INTEGER,
+            last_seen_at INTEGER,
+            raw_metadata TEXT,
+            UNIQUE (source, application_number, fingerprint)
+        );
+        CREATE INDEX IF NOT EXISTS idx_prosecution_docs_patent
+            ON prosecution_documents(patent_id);
+        CREATE TABLE IF NOT EXISTS dossier_sync_state (
+            patent_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            last_checked_at INTEGER DEFAULT 0,
+            last_success_at INTEGER DEFAULT 0,
+            last_error_at INTEGER DEFAULT 0,
+            last_error_code TEXT,
+            last_error_message TEXT,
+            latest_remote_oa_date TEXT,
+            latest_remote_oa_type TEXT,
+            auth_state TEXT DEFAULT 'NOT_INITIALIZED',
+            PRIMARY KEY (patent_id, provider)
+        );
+    )")) return false;
+
+    return true;
+}
+
 } // namespace
 
 int ReadSchemaVersion(sqlite3* db) {
@@ -372,8 +438,12 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
     result.from_version = version;
 
     if (version == 0) {
-        const bool has_current_shape =
+        const bool has_v2_shape =
             HasTable(db, "patents") && HasColumn(db, "patents", "technology_route");
+        const bool has_current_shape = has_v2_shape &&
+            HasColumn(db, "patents", "publication_number") &&
+            HasColumn(db, "oa_records", "sync_flag") &&
+            HasTable(db, "prosecution_documents") && HasTable(db, "dossier_sync_state");
         if (has_current_shape || !HasTable(db, "patents")) {
             // Fresh database (or one without business tables): nothing to
             // migrate, stamp the current version.
@@ -387,6 +457,15 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
             SeedDeadlineRulesIfEmpty(db);
             result.to_version = kSchemaVersionCurrent;
             return result;
+        }
+        if (has_v2_shape) {
+            if (!Exec(db, "CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);",
+                      &result.error) ||
+                !Exec(db, "INSERT INTO schema_info (version) VALUES (2);", &result.error)) {
+                result.ok = false;
+                return result;
+            }
+            version = 2;
         }
         // Legacy v1 database with real user data - back it up before touching
         // anything. The backup is a byte-for-byte copy taken before the
@@ -415,7 +494,7 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
                 PATX_LOG_INFO("Pre-migration backup written: " + backup);
             }
         }
-        version = 1;
+        if (!has_v2_shape) version = 1;
     }
 
     while (version < kSchemaVersionCurrent) {
@@ -449,6 +528,35 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
             }
             version = 2;
             PATX_LOG_INFO("Schema migration v1 -> v2 committed");
+        } else if (version == 2) {
+            PATX_LOG_INFO("Applying schema migration v2 -> v3");
+            if (!Exec(db, "BEGIN TRANSACTION;", &result.error)) {
+                result.ok = false;
+                return result;
+            }
+            if (!ApplyV2ToV3(db)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v2->v3 migration failed (rolled back)";
+                return result;
+            }
+            if (!HasColumn(db, "patents", "publication_number") ||
+                !HasColumn(db, "oa_records", "sync_flag") ||
+                !HasTable(db, "prosecution_documents") || !HasTable(db, "dossier_sync_state")) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v2->v3 verification failed (rolled back)";
+                return result;
+            }
+            if (!Exec(db, "DELETE FROM schema_info;", &result.error) ||
+                !Exec(db, "INSERT INTO schema_info (version) VALUES (3);", &result.error) ||
+                !Exec(db, "COMMIT;", &result.error)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                return result;
+            }
+            version = 3;
+            PATX_LOG_INFO("Schema migration v2 -> v3 committed");
         } else {
             result.ok = false;
             result.error = "unknown schema version " + std::to_string(version);

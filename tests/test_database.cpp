@@ -139,7 +139,7 @@ TEST(database_legacy_migration_preserves_data) {
     {
         Database db(path);   // constructor runs the migration
         CHECK(db.IsOpen());
-        CHECK_EQ(db.SchemaVersion(), 2);
+        CHECK_EQ(db.SchemaVersion(), patx::kSchemaVersionCurrent);
 
         Patent p = db.GetPatentByCode("GK-OLD-1");
         CHECK_STR_EQ(p.title, "旧数据");

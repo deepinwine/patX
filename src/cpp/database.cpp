@@ -10,6 +10,7 @@
 
 #include <sstream>
 #include <iostream>
+#include <cstring>
 #include <set>
 
 static UndoManager* g_undo_manager = nullptr;
@@ -106,7 +107,10 @@ void Database::InitTables() {
             oa_reminder_5 TEXT,
             reexamination TEXT,
             pudong_subsidy TEXT,
-            pct_reminder TEXT
+            pct_reminder TEXT,
+            publication_number TEXT,
+            last_dossier_check_at INTEGER DEFAULT 0,
+            next_dossier_check_at INTEGER DEFAULT 0
         )
     )");
 
@@ -135,7 +139,9 @@ void Database::InitTables() {
             source TEXT DEFAULT '',
             external_case_id TEXT DEFAULT '',
             external_document_id TEXT DEFAULT '',
-            deadline_source TEXT DEFAULT ''
+            deadline_source TEXT DEFAULT '',
+            remote_document_id TEXT DEFAULT '',
+            sync_flag TEXT DEFAULT ''
         )
     )");
 
@@ -232,6 +238,48 @@ void Database::InitTables() {
             notes TEXT,
             jurisdiction TEXT DEFAULT 'CN',
             application_date TEXT DEFAULT ''
+        )
+    )");
+
+    Execute(R"(
+        CREATE TABLE IF NOT EXISTS prosecution_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patent_id INTEGER,
+            jurisdiction TEXT,
+            application_number TEXT,
+            publication_number TEXT,
+            source TEXT,
+            remote_document_id TEXT,
+            document_type TEXT,
+            document_title TEXT,
+            official_date TEXT,
+            direction TEXT,
+            source_url TEXT,
+            download_url TEXT,
+            download_available INTEGER DEFAULT 0,
+            fingerprint TEXT,
+            first_seen_at INTEGER,
+            last_seen_at INTEGER,
+            raw_metadata TEXT,
+            UNIQUE (source, application_number, fingerprint)
+        )
+    )");
+    Execute("CREATE INDEX IF NOT EXISTS idx_prosecution_docs_patent "
+            "ON prosecution_documents(patent_id)");
+
+    Execute(R"(
+        CREATE TABLE IF NOT EXISTS dossier_sync_state (
+            patent_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            last_checked_at INTEGER DEFAULT 0,
+            last_success_at INTEGER DEFAULT 0,
+            last_error_at INTEGER DEFAULT 0,
+            last_error_code TEXT,
+            last_error_message TEXT,
+            latest_remote_oa_date TEXT,
+            latest_remote_oa_type TEXT,
+            auth_state TEXT DEFAULT 'NOT_INITIALIZED',
+            PRIMARY KEY (patent_id, provider)
         )
     )");
 
@@ -357,6 +405,18 @@ std::string Col(sqlite3_stmt* stmt, int col) {
     return text ? text : "";
 }
 
+// SELECT * is retained only at migration-compatibility boundaries. Resolve
+// appended migration fields by name because fresh and upgraded databases can
+// legitimately have different physical column orders.
+std::string ColByName(sqlite3_stmt* stmt, const char* name) {
+    const int count = sqlite3_column_count(stmt);
+    for (int i = 0; i < count; ++i) {
+        const char* column_name = sqlite3_column_name(stmt, i);
+        if (column_name && std::strcmp(column_name, name) == 0) return Col(stmt, i);
+    }
+    return "";
+}
+
 void ReadPatent(sqlite3_stmt* stmt, Patent& p) {
     p.id = sqlite3_column_int(stmt, 0);
     p.geke_code = Col(stmt, 1);
@@ -402,6 +462,7 @@ void ReadPatent(sqlite3_stmt* stmt, Patent& p) {
     p.reexamination = Col(stmt, 41);
     p.pudong_subsidy = Col(stmt, 42);
     p.pct_reminder = Col(stmt, 43);
+    p.publication_number = Col(stmt, 44);
 }
 
 const char* kPatentColumns =
@@ -412,7 +473,7 @@ const char* kPatentColumns =
     "related_case_info, fee_status, rd_project, class_level4, tags, details, filing_date, "
     "disclosure_writer, agent_code, agent_name, intangible_asset_eval, internal_rd_project, "
     "technology_route, project_id, oa_reminder_1, oa_reminder_2, oa_reminder_3, oa_reminder_4, "
-    "oa_reminder_5, reexamination, pudong_subsidy, pct_reminder";
+    "oa_reminder_5, reexamination, pudong_subsidy, pct_reminder, publication_number";
 
 void ReadOA(sqlite3_stmt* stmt, OARecord& oa) {
     oa.id = sqlite3_column_int(stmt, 0);
@@ -439,13 +500,16 @@ void ReadOA(sqlite3_stmt* stmt, OARecord& oa) {
     oa.external_case_id = Col(stmt, 21);
     oa.external_document_id = Col(stmt, 22);
     oa.deadline_source = Col(stmt, 23);
+    oa.remote_document_id = Col(stmt, 24);
+    oa.sync_flag = Col(stmt, 25);
 }
 
 const char* kOAColumns =
     "id, patent_id, geke_code, patent_title, oa_type, official_deadline, issue_date, "
     "response_date, handler, writer, progress, agency, oa_summary, is_completed, "
     "is_extendable, extension_requested, extension_months, extended_deadline, notes, "
-    "jurisdiction, source, external_case_id, external_document_id, deadline_source";
+    "jurisdiction, source, external_case_id, external_document_id, deadline_source, "
+    "remote_document_id, sync_flag";
 
 void ReadPCT(sqlite3_stmt* stmt, PCTPatent& p) {
     p.id = sqlite3_column_int(stmt, 0);
@@ -601,7 +665,8 @@ int Database::InsertPatent(const Patent& p, bool log_undo) {
         "updated_at, related_case_info, fee_status, rd_project, class_level4, tags, details, "
         "filing_date, disclosure_writer, agent_code, agent_name, intangible_asset_eval, "
         "internal_rd_project, technology_route, project_id, oa_reminder_1, oa_reminder_2, "
-        "oa_reminder_3, oa_reminder_4, oa_reminder_5, reexamination, pudong_subsidy, pct_reminder) "
+        "oa_reminder_3, oa_reminder_4, oa_reminder_5, reexamination, pudong_subsidy, pct_reminder, "
+        "publication_number) "
         "VALUES ('" +
         EscapeString(p.geke_code) + "','" + EscapeString(p.application_number) + "','" +
         EscapeString(p.title) + "','" + EscapeString(p.proposal_name) + "','" +
@@ -624,7 +689,8 @@ int Database::InsertPatent(const Patent& p, bool log_undo) {
         EscapeString(p.oa_reminder_1) + "','" + EscapeString(p.oa_reminder_2) + "','" +
         EscapeString(p.oa_reminder_3) + "','" + EscapeString(p.oa_reminder_4) + "','" +
         EscapeString(p.oa_reminder_5) + "','" + EscapeString(p.reexamination) + "','" +
-        EscapeString(p.pudong_subsidy) + "','" + EscapeString(p.pct_reminder) + "')";
+        EscapeString(p.pudong_subsidy) + "','" + EscapeString(p.pct_reminder) + "','" +
+        EscapeString(p.publication_number) + "')";
 
     if (Execute(sql)) {
         int id = static_cast<int>(sqlite3_last_insert_rowid(db_));
@@ -685,7 +751,8 @@ bool Database::UpdatePatent(int id, const Patent& p, bool log_undo) {
         "oa_reminder_5 = '" + EscapeString(p.oa_reminder_5) + "'," +
         "reexamination = '" + EscapeString(p.reexamination) + "'," +
         "pudong_subsidy = '" + EscapeString(p.pudong_subsidy) + "'," +
-        "pct_reminder = '" + EscapeString(p.pct_reminder) + "'" +
+        "pct_reminder = '" + EscapeString(p.pct_reminder) + "'," +
+        "publication_number = '" + EscapeString(p.publication_number) + "'" +
         " WHERE id = " + std::to_string(id);
     return Execute(sql);
 }
@@ -778,7 +845,8 @@ int Database::InsertOA(const OARecord& oa, bool log_undo) {
         "INSERT INTO oa_records (patent_id, geke_code, patent_title, oa_type, official_deadline, "
         "issue_date, response_date, handler, writer, progress, agency, oa_summary, is_completed, "
         "is_extendable, extension_requested, extension_months, extended_deadline, notes, "
-        "jurisdiction, source, external_case_id, external_document_id, deadline_source) VALUES (" +
+        "jurisdiction, source, external_case_id, external_document_id, deadline_source, "
+        "remote_document_id, sync_flag) VALUES (" +
         std::to_string(oa.patent_id) + ",'" +
         EscapeString(oa.geke_code) + "','" + EscapeString(oa.patent_title) + "','" +
         EscapeString(oa.oa_type) + "','" + EscapeString(oa.official_deadline) + "','" +
@@ -793,7 +861,8 @@ int Database::InsertOA(const OARecord& oa, bool log_undo) {
         EscapeString(oa.extended_deadline) + "','" + EscapeString(oa.notes) + "','" +
         EscapeString(oa.jurisdiction) + "','" + EscapeString(oa.source) + "','" +
         EscapeString(oa.external_case_id) + "','" + EscapeString(oa.external_document_id) + "','" +
-        EscapeString(oa.deadline_source) + "')";
+        EscapeString(oa.deadline_source) + "','" + EscapeString(oa.remote_document_id) + "','" +
+        EscapeString(oa.sync_flag) + "')";
 
     if (Execute(sql)) {
         int id = static_cast<int>(sqlite3_last_insert_rowid(db_));
@@ -832,7 +901,9 @@ bool Database::UpdateOA(int id, const OARecord& oa, bool log_undo) {
         "source = '" + EscapeString(oa.source) + "'," +
         "external_case_id = '" + EscapeString(oa.external_case_id) + "'," +
         "external_document_id = '" + EscapeString(oa.external_document_id) + "'," +
-        "deadline_source = '" + EscapeString(oa.deadline_source) + "'" +
+        "deadline_source = '" + EscapeString(oa.deadline_source) + "'," +
+        "remote_document_id = '" + EscapeString(oa.remote_document_id) + "'," +
+        "sync_flag = '" + EscapeString(oa.sync_flag) + "'" +
         " WHERE id = " + std::to_string(id);
     return Execute(sql);
 }
@@ -1473,7 +1544,8 @@ std::string Database::PatentToJson(const Patent& p) {
     field("oa_reminder_5", p.oa_reminder_5);
     field("reexamination", p.reexamination);
     field("pudong_subsidy", p.pudong_subsidy);
-    field("pct_reminder", p.pct_reminder, true);
+    field("pct_reminder", p.pct_reminder);
+    field("publication_number", p.publication_number, true);
     json << "}";
     return json.str();
 }
@@ -1504,7 +1576,9 @@ std::string Database::OAToJson(const OARecord& oa) {
     json << "\"source\":\"" << EscapeString(oa.source) << "\",";
     json << "\"external_case_id\":\"" << EscapeString(oa.external_case_id) << "\",";
     json << "\"external_document_id\":\"" << EscapeString(oa.external_document_id) << "\",";
-    json << "\"deadline_source\":\"" << EscapeString(oa.deadline_source) << "\"";
+    json << "\"deadline_source\":\"" << EscapeString(oa.deadline_source) << "\",";
+    json << "\"remote_document_id\":\"" << EscapeString(oa.remote_document_id) << "\",";
+    json << "\"sync_flag\":\"" << EscapeString(oa.sync_flag) << "\"";
     json << "}";
     return json.str();
 }
@@ -1521,4 +1595,230 @@ int Database::Undo() {
 bool Database::CanUndo() const {
     if (g_undo_manager) return g_undo_manager->CanUndo();
     return false;
+}
+
+// ============== Web Dossier Sync ==============
+
+std::vector<Patent> Database::GetPatentsForDossierCheck(bool include_granted, int limit) {
+    std::vector<Patent> results;
+    // Terminal statuses are never checked; granted cases only on the slow
+    // cycle (include_granted). Everything else (审查中/等待审查/答复/复审...)
+    // counts as active prosecution.
+    std::string sql =
+        "SELECT * FROM patents WHERE "
+        "(application_status IS NULL OR application_status NOT LIKE '%放弃%') AND "
+        "application_status NOT LIKE '%失效%' AND "
+        "application_status NOT LIKE '%撤回%' AND "
+        "application_status NOT LIKE '%视撤%' AND "
+        "application_status NOT LIKE '%终止%'";
+    if (!include_granted) {
+        sql += " AND (application_status IS NULL OR (application_status NOT LIKE '%授权%' "
+               "AND application_status NOT LIKE '%Granted%'))";
+    }
+    sql += " ORDER BY next_dossier_check_at ASC, id ASC";
+    if (limit > 0) sql += " LIMIT " + std::to_string(limit);
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Patent p;
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
+            p.id = sqlite3_column_int(stmt, 0);
+            p.geke_code = cs(1);
+            p.application_number = cs(2);
+            p.title = cs(3);
+            p.proposal_name = cs(4);
+            p.application_status = cs(5);
+            p.patent_type = cs(6);
+            p.patent_level = cs(7);
+            p.application_date = cs(8);
+            p.authorization_date = cs(9);
+            p.expiration_date = cs(10);
+            p.geke_handler = cs(11);
+            p.rd_department = cs(12);
+            p.agency_firm = cs(13);
+            p.original_applicant = cs(14);
+            p.current_applicant = cs(15);
+            p.inventor = cs(16);
+            p.notes = cs(17);
+            p.class_level1 = cs(18);
+            p.class_level2 = cs(19);
+            p.class_level3 = cs(20);
+            p.publication_number = ColByName(stmt, "publication_number");
+            results.push_back(p);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return results;
+}
+
+int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* created) {
+    if (created) *created = false;
+    long long now = static_cast<long long>(time(nullptr));
+
+    // Fingerprint already known? Only refresh last_seen_at.
+    sqlite3_stmt* stmt;
+    std::string find = "SELECT id FROM prosecution_documents WHERE source = ? AND "
+                       "application_number = ? AND fingerprint = ?";
+    if (sqlite3_prepare_v2(db_, find.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, doc.source.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, doc.application_number.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, doc.fingerprint.c_str(), -1, SQLITE_TRANSIENT);
+        int existing = 0;
+        if (sqlite3_step(stmt) == SQLITE_ROW) existing = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+        if (existing > 0) {
+            Execute("UPDATE prosecution_documents SET last_seen_at = " + std::to_string(now) +
+                    ", raw_metadata = '" + EscapeString(doc.raw_metadata) + "'" +
+                    " WHERE id = " + std::to_string(existing));
+            doc.id = existing;
+            doc.last_seen_at = now;
+            return existing;
+        }
+    }
+
+    doc.first_seen_at = now;
+    doc.last_seen_at = now;
+    std::string sql =
+        "INSERT INTO prosecution_documents (patent_id, jurisdiction, application_number, "
+        "publication_number, source, remote_document_id, document_type, document_title, "
+        "official_date, direction, source_url, download_url, download_available, fingerprint, "
+        "first_seen_at, last_seen_at, raw_metadata) VALUES (" +
+        std::to_string(doc.patent_id) + ",'" +
+        EscapeString(doc.jurisdiction) + "','" +
+        EscapeString(doc.application_number) + "','" +
+        EscapeString(doc.publication_number) + "','" +
+        EscapeString(doc.source) + "','" +
+        EscapeString(doc.remote_document_id) + "','" +
+        EscapeString(doc.document_type) + "','" +
+        EscapeString(doc.document_title) + "','" +
+        EscapeString(doc.official_date) + "','" +
+        EscapeString(doc.direction) + "','" +
+        EscapeString(doc.source_url) + "','" +
+        EscapeString(doc.download_url) + "'," +
+        std::to_string(doc.download_available ? 1 : 0) + ",'" +
+        EscapeString(doc.fingerprint) + "'," +
+        std::to_string(doc.first_seen_at) + "," +
+        std::to_string(doc.last_seen_at) + ",'" +
+        EscapeString(doc.raw_metadata) + "')";
+    if (Execute(sql)) {
+        doc.id = sqlite3_last_insert_rowid(db_);
+        if (created) *created = true;
+        return doc.id;
+    }
+    return 0;
+}
+
+bool Database::UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at) {
+    return Execute("UPDATE patents SET last_dossier_check_at = " + std::to_string(last_at) +
+                   ", next_dossier_check_at = " + std::to_string(next_at) +
+                   " WHERE id = " + std::to_string(patent_id));
+}
+
+bool Database::UpsertDossierSyncState(const DossierSyncState& s) {
+    std::string sql =
+        "INSERT INTO dossier_sync_state (patent_id, provider, last_checked_at, last_success_at, "
+        "last_error_at, last_error_code, last_error_message, latest_remote_oa_date, "
+        "latest_remote_oa_type, auth_state) VALUES (" +
+        std::to_string(s.patent_id) + ",'" +
+        EscapeString(s.provider) + "'," +
+        std::to_string(s.last_checked_at) + "," +
+        std::to_string(s.last_success_at) + "," +
+        std::to_string(s.last_error_at) + ",'" +
+        EscapeString(s.last_error_code) + "','" +
+        EscapeString(s.last_error_message) + "','" +
+        EscapeString(s.latest_remote_oa_date) + "','" +
+        EscapeString(s.latest_remote_oa_type) + "','" +
+        EscapeString(s.auth_state) + "') "
+        "ON CONFLICT(patent_id, provider) DO UPDATE SET "
+        "last_checked_at = excluded.last_checked_at, "
+        "last_success_at = excluded.last_success_at, "
+        "last_error_at = excluded.last_error_at, "
+        "last_error_code = excluded.last_error_code, "
+        "last_error_message = excluded.last_error_message, "
+        "latest_remote_oa_date = excluded.latest_remote_oa_date, "
+        "latest_remote_oa_type = excluded.latest_remote_oa_type, "
+        "auth_state = excluded.auth_state";
+    return Execute(sql);
+}
+
+std::vector<DossierSyncState> Database::GetDossierSyncStates(int limit) {
+    std::vector<DossierSyncState> results;
+    sqlite3_stmt* stmt;
+    std::string sql = "SELECT patent_id, provider, last_checked_at, last_success_at, "
+                      "last_error_at, last_error_code, last_error_message, "
+                      "latest_remote_oa_date, latest_remote_oa_type, auth_state "
+                      "FROM dossier_sync_state ORDER BY last_checked_at DESC LIMIT " +
+                      std::to_string(limit);
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            DossierSyncState s;
+            s.patent_id = sqlite3_column_int(stmt, 0);
+            auto text = [&stmt](int i) -> std::string {
+                const char* v = (const char*)sqlite3_column_text(stmt, i);
+                return v ? v : "";
+            };
+            s.provider = text(1);
+            s.last_checked_at = sqlite3_column_int64(stmt, 2);
+            s.last_success_at = sqlite3_column_int64(stmt, 3);
+            s.last_error_at = sqlite3_column_int64(stmt, 4);
+            s.last_error_code = text(5);
+            s.last_error_message = text(6);
+            s.latest_remote_oa_date = text(7);
+            s.latest_remote_oa_type = text(8);
+            s.auth_state = text(9);
+            results.push_back(s);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return results;
+}
+
+std::vector<OARecord> Database::GetOAsForPatentId(int patent_id) {
+    std::vector<OARecord> results;
+    sqlite3_stmt* stmt;
+    std::string sql = "SELECT * FROM oa_records WHERE patent_id = " + std::to_string(patent_id);
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            OARecord oa;
+            oa.id = sqlite3_column_int(stmt, 0);
+            oa.patent_id = sqlite3_column_int(stmt, 1);
+            auto text = [&stmt](int i) -> std::string {
+                const char* v = (const char*)sqlite3_column_text(stmt, i);
+                return v ? v : "";
+            };
+            oa.geke_code = text(2);
+            oa.patent_title = text(3);
+            oa.oa_type = text(4);
+            oa.official_deadline = text(5);
+            oa.issue_date = text(6);
+            oa.response_date = text(7);
+            oa.handler = text(8);
+            oa.writer = text(9);
+            oa.progress = text(10);
+            oa.agency = text(11);
+            oa.oa_summary = text(12);
+            oa.is_completed = sqlite3_column_int(stmt, 13) != 0;
+            // columns 19-21 exist after MigrateTables
+            oa.source = ColByName(stmt, "source");
+            oa.remote_document_id = ColByName(stmt, "remote_document_id");
+            oa.sync_flag = ColByName(stmt, "sync_flag");
+            results.push_back(oa);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return results;
+}
+
+bool Database::UpdateOASyncFields(int oa_id, const std::string& issue_date_if_empty,
+                                  const std::string& sync_flag) {
+    std::string sql = "UPDATE oa_records SET sync_flag = '" + EscapeString(sync_flag) + "'";
+    if (!issue_date_if_empty.empty()) {
+        sql += ", issue_date = CASE WHEN issue_date IS NULL OR issue_date = '' THEN '" +
+               EscapeString(issue_date_if_empty) + "' ELSE issue_date END";
+    }
+    sql += " WHERE id = " + std::to_string(oa_id);
+    return Execute(sql);
 }

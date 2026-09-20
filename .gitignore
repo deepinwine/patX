@@ -35,3 +35,12 @@ nas_config.txt
 # Local credentials - never commit USPTO keys
 patx_uspto.json
 *.credential
+# Web dossier sync artifacts
+debug/web_dossier/
+patx_sidecar_stderr.log
+*.pyc
+__pycache__/
+.pytest_cache/
+build-*/
+.worktrees/
+patents.db*

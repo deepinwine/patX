@@ -20,6 +20,9 @@ struct Patent {
     int id = 0;
     std::string geke_code;
     std::string application_number;
+    // CN 公开号 (e.g. CN119870049A); used to resolve the application number
+    // on the dossier site when application_number is empty.
+    std::string publication_number;
     std::string title;
     std::string proposal_name;
     std::string application_status;
@@ -92,6 +95,10 @@ struct OARecord {
     std::string external_case_id;      // uspto_cases.id
     std::string external_document_id;  // uspto_documents.document_identifier
     std::string deadline_source;       // official / calculated / manual / ''
+    // Web dossier sync linkage (source='cnipa'). Filled by the sync layer
+    // only; the manual edit dialogs never touch these.
+    std::string remote_document_id;
+    std::string sync_flag;              // "" / web_new / date_conflict / auto_filled_date
 };
 
 struct PCTPatent {
@@ -199,6 +206,44 @@ struct QueryFilter {
     std::string deadline_state;
 };
 
+// One document discovered on an official prosecution-dossier website
+// (CNIPA etc.). Populated by the web dossier sync; the Python sidecar finds
+// them, this C++ side persists them. Fingerprint dedup keeps re-syncs cheap.
+struct ProsecutionDocumentRecord {
+    int id = 0;
+    int patent_id = 0;
+    std::string jurisdiction;         // CN / US / ...
+    std::string application_number;
+    std::string publication_number;
+    std::string source;               // provider id, e.g. "cnipa"
+    std::string remote_document_id;   // stable id when the site offers one
+    std::string document_type;        // OFFICE_ACTION_SECOND / GRANT_NOTICE / ...
+    std::string document_title;       // normalized title
+    std::string official_date;        // YYYY-MM-DD ("" when unknown)
+    std::string direction;            // official / applicant
+    std::string source_url;
+    std::string download_url;
+    bool download_available = false;
+    std::string fingerprint;          // sha256(jurisdiction+app+title+date+id)
+    long long first_seen_at = 0;      // unix epoch
+    long long last_seen_at = 0;
+    std::string raw_metadata;         // small JSON blob, never credentials
+};
+
+// Per-patent sync bookkeeping for one provider.
+struct DossierSyncState {
+    int patent_id = 0;
+    std::string provider;             // "cnipa"
+    long long last_checked_at = 0;
+    long long last_success_at = 0;
+    long long last_error_at = 0;
+    std::string last_error_code;      // AUTH_REQUIRED / PAGE_STRUCTURE_CHANGED / ...
+    std::string last_error_message;
+    std::string latest_remote_oa_date;   // YYYY-MM-DD
+    std::string latest_remote_oa_type;
+    std::string auth_state;           // NOT_INITIALIZED / AUTHENTICATED / ...
+};
+
 class Database {
 public:
     explicit Database(const std::string& db_path);
@@ -283,6 +328,26 @@ public:
     // Copy the database file (safe point-in-time backup using SQLite's
     // backup API; works while the connection is open).
     bool BackupTo(const std::string& dest_path);
+
+    // ---------- Web dossier sync (CNIPA 网页审查信息同步) ----------
+    // Cases worth checking: active prosecution statuses first. Terminal
+    // statuses (放弃/失效/撤回/视撤/终止) are skipped; granted cases only
+    // when include_granted (they are checked on the slow cycle).
+    std::vector<Patent> GetPatentsForDossierCheck(bool include_granted, int limit = 0);
+    // Dedup key: (source, application_number, fingerprint). Sets *created
+    // when the row is new; otherwise only last_seen_at is refreshed.
+    int UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* created = nullptr);
+    bool UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at);
+    bool UpsertDossierSyncState(const DossierSyncState& state);
+    std::vector<DossierSyncState> GetDossierSyncStates(int limit = 200);
+    // OA matching helper for the sync rules: existing OA of this patent whose
+    // canonical type equals canonical_type and issue_date is empty (date can
+    // be filled in), or whose date differs (DATE_CONFLICT candidate).
+    std::vector<OARecord> GetOAsForPatentId(int patent_id);
+    // Targeted sync update: fills issue_date only when currently empty and
+    // sets sync_flag - never touches handler/writer/deadline/notes fields.
+    bool UpdateOASyncFields(int oa_id, const std::string& issue_date_if_empty,
+                            const std::string& sync_flag);
 
     // ---------- Undo ----------
     void BeginBatch();
