@@ -79,7 +79,7 @@ static void TestQueueFilter() {
         Patent active;
         active.geke_code = "GC-1001";
         active.application_status = "实质审查中";
-        active.application_number = "202410123456.7";
+        active.application_number = "202410123457.5";
         db.InsertPatent(active, false);
 
         Patent dead;
@@ -124,7 +124,7 @@ static void TestFingerprintDedup() {
         ProsecutionDocumentRecord doc;
         doc.patent_id = 1;
         doc.jurisdiction = "CN";
-        doc.application_number = "202410123456.7";
+        doc.application_number = "202410123457.5";
         doc.source = "cnipa";
         doc.document_type = "OFFICE_ACTION_SECOND";
         doc.document_title = "第二次审查意见通知书";

@@ -38,6 +38,24 @@ echo '{"op":"ping"}' | python3 tools/web_dossier/service.py
 cd tools && python3 -m pytest web_dossier/tests -q
 ```
 
+## 真实站点流程（借鉴 teamilkman/cnipa-cpquery 的实测情报）
+
+cpquery（`cpquery.cponline.cnipa.gov.cn`）是瑞数防护的 Vue SPA：裸 HTTP 与
+带 webdriver 标记的请求会被拦截，DOM 表格也不可依赖。本 provider 的真实模式：
+
+1. 用户登录一次（扫码，专利业务办理 APP）——人完成，程序只等待
+2. 检索：`input[placeholder*="例如"]` 填申请号 → 查询按钮 → 结果 `span.hover_active`
+3. 在已登录页面上下文内 `fetch` 站点自身 JSON API：
+   - `/api/view/gn/scxx/tzs`（通知书清单，审查意见在列）
+   - `/api/view/gn/scxx/zjwj`（中间文件清单）
+   认证自动带 `Authorization: Bearer <localStorage.ACCESS_TOKEN>`
+4. 响应 `{code:200,data:[{name:"YYYY-MM-DD  文件名",additionalData:{rid}}]}`
+   → 复用同一套分类器/指纹/最新OA选择逻辑
+5. 瞬时拦截（HTML/空响应体）→ 隔 7 秒重试一次；再失败按 RATE_LIMITED 停整批
+
+申请号规范为 API 需要的 13 位形式（权重 2–9、2–5 加权 mod 11 补校验位）。
+HTML 表格解析器保留为 fixture/离线模式与兜底。
+
 ## 真实 CNIPA 页面改版后
 
 `providers/cnipa.py` 的解析层是纯函数（`parse_dossier_documents`），

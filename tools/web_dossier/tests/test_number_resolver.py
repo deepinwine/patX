@@ -2,15 +2,15 @@ from web_dossier.number_resolver import normalize_cn_identifier
 
 
 def test_application_number_plain():
-    ident = normalize_cn_identifier("202410123456.7")
+    ident = normalize_cn_identifier("202410123457.5")
     assert ident.valid and ident.number_type == "application"
-    assert ident.normalized_number == "CN202410123456.7"
+    assert ident.normalized_number == "CN202410123457.5"
 
 
 def test_application_number_cn_prefix_and_spaces():
-    ident = normalize_cn_identifier("CN 2024 1012 3456.7")
+    ident = normalize_cn_identifier("CN 2024 1012 3457.5")
     assert ident.number_type == "application"
-    assert ident.normalized_number == "CN202410123456.7"
+    assert ident.normalized_number == "CN202410123457.5"
 
 
 def test_publication_number_variants():

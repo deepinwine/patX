@@ -1,0 +1,12 @@
+{
+  "code": 200,
+  "data": [
+    {"nodeId": "n1", "name": "2026-09-18  第二次审查意见通知书",
+     "additionalData": {"rid": "rid-tzs-2", "ds": "TZS", "wenjiandm": "100000", "tijiaorq": "2026-09-18"},
+     "url": "/api/view/gn/scxx/tzs", "isLeaf": true},
+    {"nodeId": "n2", "name": "2026-03-12  第一次审查意见通知书",
+     "additionalData": {"rid": "rid-tzs-1", "ds": "TZS", "wenjiandm": "100000"}, "isLeaf": true},
+    {"nodeId": "n3", "name": "2024-02-28  发明专利申请公布",
+     "additionalData": {"rid": "rid-tzs-0", "ds": "TZS"}, "isLeaf": true}
+  ]
+}

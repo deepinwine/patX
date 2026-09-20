@@ -75,10 +75,10 @@ def test_dates():
 def test_fingerprint_dedup():
     from web_dossier.models import ProsecutionDocument
     a = ProsecutionDocument(document_title="第二次审查意见通知书", official_date="2026-09-18",
-                            application_number="CN202410123456.7")
+                            application_number="CN202410123457.5")
     b = ProsecutionDocument(document_title="第二次审查意见通知书", official_date="2026-09-18",
-                            application_number="CN202410123456.7")
+                            application_number="CN202410123457.5")
     c = ProsecutionDocument(document_title="第二次审查意见通知书", official_date="2026-09-19",
-                            application_number="CN202410123456.7")
+                            application_number="CN202410123457.5")
     assert a.fingerprint_value() == b.fingerprint_value()
     assert a.fingerprint_value() != c.fingerprint_value()

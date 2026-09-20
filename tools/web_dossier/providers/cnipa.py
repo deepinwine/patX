@@ -17,6 +17,21 @@ Two layers:
 
 Selector strategy: semantic fallbacks (role/text/label) first, positional
 CSS only as the last step; every miss escalates to PAGE_STRUCTURE_CHANGED.
+
+The real-site flow follows the field-tested knowledge documented in
+github.com/teamilkman/cnipa-cpquery (same guardrails: own account, real
+browser, page-context requests, human pacing): cpquery is a Ruishu-protected
+Vue SPA, so the document list comes from the site's own JSON APIs fetched
+INSIDE the logged-in page (the anti-bot layer only signs page-issued
+requests) instead of DOM scraping:
+
+    POST /api/view/gn/scxx/tzs  通知书清单  {zhuanlisqh, nodeId:'aj_gk_scxx_tzs',  anjianbh:''}
+    POST /api/view/gn/scxx/zjwj 中间文件清单 {zhuanlisqh, nodeId:'aj_gk_scxx_zjwj', anjianbh:''}
+
+List rows: {name: 'YYYY-MM-DD  文件名', ds: TZS|ZJWJ|SQWJ, additionalData:{rid,...}}.
+Auth: Authorization: Bearer <localStorage.ACCESS_TOKEN> + userType header.
+Empty-body 200s and HTML intercepts are transient: one retry after a pause,
+never conclude "no access" from them.
 """
 from __future__ import annotations
 
@@ -31,19 +46,28 @@ from typing import List, Optional
 from ..document_classifier import classify_cn_title, direction_for
 from ..models import (Confidence, DocumentType, ProsecutionDocument, ResultCode,
                       normalize_date)
-from ..number_resolver import normalize_cn_identifier
+from ..number_resolver import api_application_number, normalize_cn_identifier
 from .base import DossierProvider, SyncOutcome
 
-BASE_URL = os.environ.get("PATX_CNIPA_BASE_URL", "https://cpquery.cnipa.gov.cn")
+BASE_URL = os.environ.get("PATX_CNIPA_BASE_URL",
+                           "https://cpquery.cponline.cnipa.gov.cn")
 
-# Markers of the login wall vs an authenticated page (multi-fallback).
-LOGIN_MARKERS = ("用户登录", "请登录", "login-form", "统一身份认证")
-LOGGED_IN_MARKERS = ("退出", "欢迎您", "我的案件", "您好")
+# cpquery JSON list APIs (page-context fetch; see module docstring)
+API_TZS = "/api/view/gn/scxx/tzs"      # 通知书（审查意见/授权/驳回…）
+API_ZJWJ = "/api/view/gn/scxx/zjwj"    # 中间文件（意见陈述/补正/替换文件…）
+LIST_RETRY_PAUSE_SECONDS = 7           # field-tested: transient blocks clear
+
+# Markers of the login wall vs an authenticated page (multi-fallback; the
+# QR-login page exposes label.title-item-btn and button.qrImg per the
+# field-tested DOM notes).
+LOGIN_MARKERS = ("用户登录", "请登录", "统一身份认证", "title-item-btn", "qrImg")
+LOGGED_IN_MARKERS = ("退出", "欢迎您", "您好")
 
 # Same-day throttling: minimum pause between dossier queries. Human-paced on
 # purpose; this is case management for one's own portfolio, not crawling.
 MIN_QUERY_INTERVAL_SECONDS = float(os.environ.get("PATX_DOSSIER_MIN_INTERVAL", "8"))
 BLOCK_MARKERS = ("系统繁忙", "访问过于频繁", "验证码错误", "安全验证")
+STEP_WAIT_MS = 20_000
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +202,93 @@ def parse_dossier_documents(html: str, application_number: str = "",
     return outcome
 
 
+
+
+# ---------------------------------------------------------------------------
+# Pure parsing of the cpquery JSON list APIs
+# ---------------------------------------------------------------------------
+
+def looks_like_intercept(body: str) -> bool:
+    """Ruishu intercepts show up as HTML (instead of JSON) or as an empty
+    200 body - both transient per field testing, never 'no access'."""
+    t = (body or "").lstrip()
+    if not t:
+        return True
+    return t.startswith("<")
+
+
+def parse_cpquery_list_response(bodies, application_number="", publication_number=""):
+    """Parses the concatenated tzs + zjwj JSON list responses.
+
+    bodies: list of (api_path, body_text). Rows carry name
+    'YYYY-MM-DD  <文件名>' (two spaces) and additionalData.rid.
+    Returns SyncOutcome; intercept-looking bodies -> TEMPORARY_ERROR.
+    """
+    docs: List[ProsecutionDocument] = []
+    for api_path, body in bodies:
+        if looks_like_intercept(body):
+            return SyncOutcome(code=ResultCode.TEMPORARY_ERROR,
+                               message="清单接口返回拦截页/空响应（瞬时），稍后重试")
+        try:
+            import json as _json
+            payload = _json.loads(body)
+        except ValueError:
+            return SyncOutcome(code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                               message="清单响应不是 JSON（页面结构可能已改版）")
+        if payload.get("code") != 200 or not isinstance(payload.get("data"), list):
+            return SyncOutcome(code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                               message=f"清单响应结构异常 code={payload.get('code')}")
+        for i, row in enumerate(payload["data"]):
+            name = (row.get("name") or "").strip()
+            if not name:
+                continue
+            m = re.match(r"^(\d{4}-\d{2}-\d{2})\s+(.+)$", name)
+            date = normalize_date(m.group(1)) if m else ""
+            title = (m.group(2) if m else name).strip()
+            add = row.get("additionalData") or {}
+            rid = str(add.get("rid") or row.get("nodeId") or f"row-{i+1}")
+            doc_type, ordinal, confidence = classify_cn_title(title)
+            docs.append(ProsecutionDocument(
+                jurisdiction="CN",
+                application_number=application_number,
+                publication_number=publication_number,
+                source="cnipa",
+                remote_document_id=rid,
+                document_type=doc_type,
+                document_title=title,
+                raw_title=title,
+                official_date=date,
+                direction=direction_for(doc_type),
+                source_url=BASE_URL + api_path,
+                download_available=bool(add.get("rid")),
+                confidence=Confidence.HIGH if date else Confidence.MEDIUM,
+                oa_ordinal=ordinal,
+            ))
+    if not docs:
+        return SyncOutcome(code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                           message="清单为空且无有效行（结构可能已改版）")
+    return SyncOutcome(code=ResultCode.OK, documents=docs,
+                       resolved_application_number=application_number)
+
+
+# JS executed INSIDE the logged-in cpquery page: the anti-bot layer signs
+# page-issued requests automatically, so the JSON APIs must be fetched here -
+# a bare replay from outside the page gets blocked by design.
+_PAGE_FETCH_JS = """async (payload) => {
+    const token = localStorage.getItem('ACCESS_TOKEN');
+    const userType = localStorage.getItem('USER_TYPE');
+    const resp = await fetch(payload.path, {
+        method: 'POST',
+        headers: Object.assign(
+            {'Content-Type': 'application/json'},
+            token ? {'Authorization': 'Bearer ' + token} : {},
+            userType ? {'userType': userType} : {}),
+        body: JSON.stringify(payload.body),
+    });
+    const text = await resp.text();
+    return {status: resp.status, text: text.slice(0, 500000)};
+}"""
+
 def looks_like_login_page(html: str) -> bool:
     hit = sum(1 for m in LOGIN_MARKERS if m in html)
     return hit >= 2 or ("登录" in html and "密码" in html)
@@ -255,7 +366,7 @@ class CNIPAWebProvider(DossierProvider):
             app_ident = None
         if not app_ident and pub_ident.number_type != "publication":
             return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
-                               message="申请号与公开号均无法识别（需要 202410123456.7 或 CN119870049A 形式）")
+                               message="申请号与公开号均无法识别（需要 202410123457.5 或 CN119870049A 形式）")
         if app_ident:
             return SyncOutcome(code=ResultCode.OK,
                                resolved_application_number=app_ident.normalized_number)
@@ -304,36 +415,102 @@ class CNIPAWebProvider(DossierProvider):
                 return SyncOutcome(code=ResultCode.AUTH_REQUIRED, message="CNIPA 需要登录")
             return parse_dossier_documents(html, app_no, publication_number)
 
+        app13 = api_application_number(application_number) or \
+                 api_application_number(resolve.resolved_application_number)
+        if not app13:
+            return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
+                               message=f"申请号 {app_no} 无法规范为 13 位 API 形式")
+
         with self._lock:          # exactly one page doing queries at a time
             self._pace()
-            page = self._manager.open_page(
-                f"{BASE_URL}/query?appno={app_no}", cancel)
+            page = self._manager.open_page(BASE_URL, cancel)
             if page is None:
-                return SyncOutcome(code=ResultCode.NETWORK_ERROR, message="查询页打开失败")
+                return SyncOutcome(code=ResultCode.NETWORK_ERROR, message="站点打开失败")
             try:
-                # click into the 审查信息 tab - semantic selectors with
-                # fallback; a miss is PAGE_STRUCTURE_CHANGED, not a guess
-                if not self._manager.click_first_text(page, ("审查信息", "审查", "通知书列表"),
-                                                      cancel):
-                    self._manager.capture_debug_artifacts(
-                        page, "PAGE_STRUCTURE_CHANGED", app_no)
-                    return SyncOutcome(code=ResultCode.PAGE_STRUCTURE_CHANGED,
-                                       message="未找到审查信息入口（页面结构可能已改版）")
                 html = page.content()
+                if looks_like_login_page(html) and not looks_logged_in(html):
+                    return SyncOutcome(code=ResultCode.AUTH_REQUIRED,
+                                       message="CNIPA 登录状态已失效")
+                if not self._search_case(page, app13, cancel):
+                    self._manager.capture_debug_artifacts(
+                        page, "PAGE_STRUCTURE_CHANGED", app13)
+                    return SyncOutcome(code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                                       message="检索/进入案件失败（页面结构可能已改版）")
+
+                bodies = []
+                for api in (API_TZS, API_ZJWJ):
+                    body = self._page_fetch_list(page, api, app13, cancel)
+                    if body is None:
+                        if cancel is not None and cancel.is_set():
+                            return SyncOutcome(code=ResultCode.TEMPORARY_ERROR,
+                                               message="已取消")
+                        # transient intercept/empty body: one paced retry,
+                        # never conclude "no access" from it
+                        time.sleep(LIST_RETRY_PAUSE_SECONDS)
+                        body = self._page_fetch_list(page, api, app13, cancel)
+                    if body is None:
+                        self._manager.capture_debug_artifacts(
+                            page, "RATE_LIMITED", app13)
+                        return SyncOutcome(
+                            code=ResultCode.RATE_LIMITED,
+                            message="清单请求被拦截（瞬时），本批已停止，请稍后再试")
+                    bodies.append((api, body))
             except Exception as exc:   # noqa: BLE001 - mapped to a result code
-                self._manager.capture_debug_artifacts(page, "TEMPORARY_ERROR", app_no)
+                self._manager.capture_debug_artifacts(page, "TEMPORARY_ERROR", app13)
                 return SyncOutcome(code=ResultCode.TEMPORARY_ERROR,
                                    message=f"页面交互失败: {type(exc).__name__}")
 
-        if looks_blocked(html):
-            return SyncOutcome(code=ResultCode.RATE_LIMITED,
-                               message="页面返回限制提示，本批已停止")
-        if looks_like_login_page(html) and not looks_logged_in(html):
-            return SyncOutcome(code=ResultCode.AUTH_REQUIRED, message="CNIPA 登录状态已失效")
-        outcome = parse_dossier_documents(html, app_no, publication_number)
+        outcome = parse_cpquery_list_response(bodies, app_no, publication_number)
         if outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED:
-            self._manager.capture_debug_artifacts(page, "PAGE_STRUCTURE_CHANGED", app_no)
+            self._manager.capture_debug_artifacts(page, "PAGE_STRUCTURE_CHANGED", app13)
         return outcome
+
+    def _search_case(self, page, app13: str, cancel) -> bool:
+        """Search by application number and open the case, using the
+        field-tested selectors (placeholder text / 查询 button / result link)."""
+        try:
+            box = page.locator('input[placeholder*="例如"]')
+            if box.count() == 0:
+                box = page.get_by_placeholder("申请号")
+            if box.count() == 0:
+                return False
+            box.first.click()
+            box.first.fill(app13)
+            search = page.locator('button.q-btn--st',
+                                  has_text="查").first
+            if search.count() == 0:
+                search = page.get_by_role("button", name="查询").first
+            if search.count() == 0:
+                return False
+            search.click()
+            page.wait_for_load_state("networkidle", timeout=STEP_WAIT_MS)
+            link = page.locator("span.hover_active", has_text=app13[:10]).first
+            if link.count() == 0:
+                link = page.get_by_text(app13, exact=False).first
+            if link.count() == 0:
+                return False
+            link.click()
+            page.wait_for_load_state("networkidle", timeout=STEP_WAIT_MS)
+            return True
+        except Exception:
+            return False
+
+    def _page_fetch_list(self, page, api: str, app13: str, cancel):
+        """One in-page fetch of a list API; None on intercept/empty/failure."""
+        if cancel is not None and cancel.is_set():
+            return None
+        try:
+            result = page.evaluate(
+                _PAGE_FETCH_JS,
+                {"path": api,
+                 "body": {"zhuanlisqh": app13, "anjianbh": "",
+                          "nodeId": "aj_gk_scxx_" + ("tzs" if api == API_TZS else "zjwj")}})
+        except Exception:
+            return None
+        body = (result or {}).get("text", "")
+        if looks_like_intercept(body):
+            return None
+        return body
 
     def download_document(self, document: ProsecutionDocument, dest_path: str,
                           cancel) -> ResultCode:

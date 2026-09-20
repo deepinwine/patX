@@ -17,7 +17,7 @@ def _fixture(name):
 
 def test_parse_full_dossier():
     outcome = parse_dossier_documents(_fixture("dossier_list.html"),
-                                      "CN202410123456.7", "CN119870049A")
+                                      "CN202410123457.5", "CN119870049A")
     assert outcome.code == ResultCode.OK
     types = [d.document_type for d in outcome.documents]
     assert DocumentType.OFFICE_ACTION_SECOND in types
@@ -30,7 +30,7 @@ def test_parse_full_dossier():
 
 
 def test_latest_oa_from_fixture():
-    outcome = parse_dossier_documents(_fixture("dossier_list.html"), "CN202410123456.7", "")
+    outcome = parse_dossier_documents(_fixture("dossier_list.html"), "CN202410123457.5", "")
     provider = CNIPAWebProvider(fixture_dir=str(FIXTURES))
     latest = provider.get_latest_office_action(outcome)
     assert latest is not None
@@ -72,7 +72,7 @@ def test_fixture_mode_provider_flow():
     # publication-only input resolves through the fixture's 申请号 line
     outcome = provider.list_documents("", "CN119870049A", cancel)
     assert outcome.code == ResultCode.OK
-    assert outcome.resolved_application_number == "2024101234567"
+    assert outcome.resolved_application_number == "2024101234575"
     assert any(d.document_type.is_office_action for d in outcome.documents)
 
 

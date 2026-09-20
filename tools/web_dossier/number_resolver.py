@@ -1,7 +1,7 @@
 """CN patent number normalization.
 
 A publication number (公开号, e.g. CN119870049A, 9 digits + kind code) is NOT
-an application number (申请号, e.g. 202410123456.7, 12 digits + check digit).
+an application number (申请号, e.g. 202410123457.5, 12 digits + check digit).
 This module classifies input robustly - it never strips letters and calls
 the result an application number.
 """
@@ -68,3 +68,32 @@ def application_number_of(raw: str) -> str:
     """Convenience: returns the normalized application number or ''."""
     ident = normalize_cn_identifier(raw)
     return ident.normalized_number if ident.number_type == "application" else ""
+
+
+# --------------------------------------------------------------------------
+# Application-number check digit (CNIPA rule, verified against
+# 201010199505 -> 7): weights 2..9 then 2..5 over the 12 digits, sum mod 11
+# (10 maps to 'X').
+_CHECK_WEIGHTS = (2, 3, 4, 5, 6, 7, 8, 9, 2, 3, 4, 5)
+
+
+def cn_check_digit(twelve_digits: str) -> str:
+    total = sum(int(d) * w for d, w in zip(twelve_digits, _CHECK_WEIGHTS))
+    r = total % 11
+    return "X" if r == 10 else str(r)
+
+
+def api_application_number(raw: str) -> str:
+    """13-digit form the cpquery JSON APIs expect (no dot, check digit
+    completed when missing). Returns '' when the input is not a CN
+    application number."""
+    s = re.sub(r"\s+", "", (raw or "").upper()).removeprefix("CN")
+    s = s.replace(".", "")
+    if len(s) == 13 and s.isdigit():
+        return s                      # already carries a check digit
+    ident = normalize_cn_identifier(raw)
+    if ident.number_type != "application":
+        return ""
+    if len(ident.number) == 12:
+        return ident.number + cn_check_digit(ident.number)
+    return ""

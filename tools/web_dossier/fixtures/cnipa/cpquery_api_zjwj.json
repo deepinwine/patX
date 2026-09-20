@@ -1,0 +1,9 @@
+{
+  "code": 200,
+  "data": [
+    {"nodeId": "m1", "name": "2026-04-20  意见陈述书",
+     "additionalData": {"rid": "rid-zjwj-2", "ds": "ZJWJ"}, "isLeaf": true},
+    {"nodeId": "m2", "name": "2026-04-20  权利要求书全文替换文件",
+     "additionalData": {"rid": "rid-zjwj-1", "ds": "ZJWJ"}, "isLeaf": true}
+  ]
+}
