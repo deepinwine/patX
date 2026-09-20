@@ -33,6 +33,10 @@ public:
     void ShowHistory();
     void ShowErrorCases();
 
+    // Called on the main thread after every finished batch (new OAs may have
+    // been inserted); the frame uses it to refresh the OA list.
+    void set_on_finished(std::function<void()> fn) { on_finished_ = std::move(fn); }
+
     bool busy() const { return running_.load(); }
 
 private:
@@ -44,6 +48,7 @@ private:
     wxWindow* parent_;
     Database& db_;
     std::function<void(const std::string&)> on_show_case_;
+    std::function<void()> on_finished_;
     std::unique_ptr<webdossier::Manager> manager_;
     WebDossierSyncDialog* active_dialog_ = nullptr;
     std::atomic<bool> running_{false};

@@ -23,6 +23,7 @@
 #include <wx/timer.h>
 #include <memory>
 #include <fstream>
+#include <set>
 #include <filesystem>
 
 #include "patx/version.h"
@@ -167,6 +168,7 @@ public:
                       std::to_string(db->SchemaVersion()) + ")");
         dossier_controller = std::make_unique<WebDossierController>(
             this, *db, [this](const std::string& geke_code) { ShowPatentByCode(geke_code); });
+        dossier_controller->set_on_finished([this]() { LoadOA(); });
         SetupMenu();
         SetupUI();
         LoadAllData();
@@ -1194,6 +1196,56 @@ private:
                 ? wxString::Format("WARNING: %d OA records need urgent attention!", urgent)
                 : wxString("No urgent OA records. Good job!"),
                 "Status", wxOK | (urgent ? wxICON_WARNING : wxICON_INFORMATION));
+        });
+        // 查询选中案件的最新审查意见：CN 案走 CNIPA 网页同步，结果按保护
+        // 规则写入 OA 列表（新 OA 新增、空日期补入、日期冲突只标记）。
+        oa_btn(LANG_STR("Check Latest OA", "查询最新审查意见"), [this](wxCommandEvent&) {
+            std::vector<int> oa_ids;
+            long idx = -1;
+            while ((idx = oa_list->GetNextItem(idx, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) >= 0)
+                oa_ids.push_back(static_cast<int>(oa_list->GetItemData(idx)));
+            if (oa_ids.empty()) {
+                wxMessageBox(UTF8_STR("请先在列表中选择要查询的 OA 记录（可多选）"),
+                             UTF8_STR("查询最新审查意见"), wxOK | wxICON_INFORMATION);
+                return;
+            }
+            auto join = [](const std::vector<std::string>& v) {
+                wxString out;
+                for (const auto& s : v) {
+                    if (!out.empty()) out += ", ";
+                    out += wxString::FromUTF8(s.c_str());
+                }
+                return out;
+            };
+            std::vector<Patent> targets;
+            std::vector<std::string> us_linked, no_number;
+            std::set<std::string> seen;
+            for (int id : oa_ids) {
+                OARecord oa = db->GetOAById(id);
+                if (oa.id == 0) continue;
+                if (oa.jurisdiction == "US" || oa.source == "USPTO") {
+                    us_linked.push_back(oa.geke_code);
+                    continue;
+                }
+                if (!seen.insert(oa.geke_code).second) continue;
+                Patent p = db->GetPatentByCode(oa.geke_code);
+                if (p.id == 0) continue;
+                if (p.application_number.empty() && p.publication_number.empty()) {
+                    no_number.push_back(oa.geke_code);
+                    continue;
+                }
+                targets.push_back(p);
+            }
+            if (!targets.empty()) {
+                dossier_controller->SyncPatents(targets);
+            } else {
+                wxString msg = UTF8_STR("所选记录没有可自动查询的 CN 案件。");
+                if (!us_linked.empty())
+                    msg += UTF8_STR("\nUS 案件请在【美国审查】页同步：") + join(us_linked);
+                if (!no_number.empty())
+                    msg += UTF8_STR("\n缺少申请号和公开号，无法查询：") + join(no_number);
+                wxMessageBox(msg, UTF8_STR("查询最新审查意见"), wxOK | wxICON_INFORMATION);
+            }
         });
         sizer->Add(tb, 0, wxALL, 5);
 

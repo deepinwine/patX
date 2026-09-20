@@ -408,6 +408,7 @@ void WebDossierController::OnBatchDone(wxThreadEvent& event) {
     running_ = false;
     auto summary = event.GetPayload<webdossier::BatchSummary>();
     if (active_dialog_) active_dialog_->OnBatchDone(summary);
+    if (on_finished_) on_finished_();
     if (summary.auth_required > 0) {
         wxMessageBox(
             UTF8_STR("CNIPA 登录状态已失效。\n点击对话框中的【打开浏览器登录】完成登录后重试。"),
