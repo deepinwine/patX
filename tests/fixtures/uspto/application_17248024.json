@@ -1,0 +1,58 @@
+{
+  "count": 1,
+  "patentFileWrapperDataBag": [
+    {
+      "applicationMetaData": {
+        "applicantBag": [
+          {
+            "applicantNameText": "PolyPlus Battery Company",
+            "correspondenceAddressBag": [
+              {
+                "cityName": "Berkeley",
+                "countryCode": "US",
+                "geographicRegionCode": "CA"
+              }
+            ]
+          }
+        ],
+        "applicationConfirmationNumber": 4114,
+        "applicationStatusCode": 150,
+        "applicationStatusDate": "2023-04-19",
+        "applicationStatusDescriptionText": "Patented Case",
+        "applicationTypeCategory": "REGULAR",
+        "applicationTypeCode": "UTL",
+        "applicationTypeLabelName": "Utility",
+        "docketNumber": "PLUSP040X1C4US",
+        "earliestPublicationDate": "2021-07-08",
+        "earliestPublicationNumber": "US20210210819A1",
+        "effectiveFilingDate": "2021-01-05",
+        "entityStatusData": {
+          "businessEntityStatusCategory": "Regular Undiscounted",
+          "smallEntityStatusIndicator": false
+        },
+        "examinerNameText": "DOVE, TRACY MAE",
+        "filingDate": "2021-01-05",
+        "firstApplicantName": "PolyPlus Battery Company",
+        "firstInventorName": "Steven J. Visco",
+        "grantDate": "2023-05-09",
+        "groupArtUnitNumber": "1727",
+        "inventionTitle": "MAKING LITHIUM METAL - SEAWATER BATTERY CELLS HAVING PROTECTED LITHIUM ELECTRODES",
+        "patentNumber": "11646472"
+      },
+      "applicationNumberText": "17248024",
+      "eventDataBag": [
+        {
+          "eventCode": "EML_NTR",
+          "eventDate": "2023-10-03",
+          "eventDescriptionText": "Email Notification"
+        },
+        {
+          "eventCode": "MOPPT",
+          "eventDate": "2023-10-03",
+          "eventDescriptionText": "Mail O.P. Petition Decision"
+        }
+      ],
+      "lastIngestionDateTime": "2023-10-04T02:15:00Z"
+    }
+  ]
+}

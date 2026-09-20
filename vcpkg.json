@@ -1,0 +1,11 @@
+{
+  "name": "patx",
+  "version-string": "0.4.0",
+  "dependencies": [
+    "wxwidgets",
+    "openxlsx",
+    "curl",
+    "sqlite3",
+    "nlohmann-json"
+  ]
+}

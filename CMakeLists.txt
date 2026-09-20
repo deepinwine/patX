@@ -1,96 +1,177 @@
 cmake_minimum_required(VERSION 3.20)
-project(patX VERSION 0.2.0 LANGUAGES C CXX)
+project(patX VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Static runtime
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-set(CMAKE_FIND_LIBRARY_SUFFIXES .lib)
-set(BUILD_SHARED_LIBS OFF)
+# Static runtime on MSVC (matches vcpkg x64-windows-static triplet)
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set(VCPKG_TARGET_TRIPLET x64-windows-static CACHE STRING "")
+endif()
 
-# vcpkg - static
-set(VCPKG_TARGET_TRIPLET x64-windows-static CACHE STRING "")
-find_package(unofficial-sqlite3 CONFIG REQUIRED)
-find_package(wxWidgets CONFIG REQUIRED)
+option(PATX_BUILD_GUI "Build the wxWidgets GUI executable" ON)
+option(PATX_BUILD_TESTS "Build unit tests and register them with CTest" ON)
 
-# OpenXLSX for Excel parsing
-find_package(OpenXLSX CONFIG REQUIRED)
+# ---------------------------------------------------------------------------
+# Single version source: generated header consumed by GUI, logs and About box
+# ---------------------------------------------------------------------------
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/patx/version.h.in
+    ${CMAKE_BINARY_DIR}/generated/include/patx/version.h
+    @ONLY
+)
 
-# poppler-cpp for PDF parsing (disabled due to wxWidgets link conflicts)
-# The fallback pdftotext approach will be used instead
-set(POPPLER_CPP_FOUND FALSE)
-# if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows-static/include/poppler/cpp/poppler-document.h")
-#     set(POPPLER_CPP_FOUND TRUE)
-#     set(POPPLER_CPP_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows-static/include")
-#     set(POPPLER_CPP_LIBRARIES "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows-static/lib/poppler-cpp.lib")
-#     message(STATUS "PDF import enabled (poppler-cpp found manually)")
-# else()
-#     # Try vcpkg root
-#     if(EXISTS "C:/vcpkg/installed/x64-windows-static/include/poppler/cpp/poppler-document.h")
-#         set(POPPLER_CPP_FOUND TRUE)
-#         set(POPPLER_CPP_INCLUDE_DIRS "C:/vcpkg/installed/x64-windows-static/include")
-#         set(POPPLER_CPP_LIBRARIES "C:/vcpkg/installed/x64-windows-static/lib/poppler-cpp.lib")
-#         message(STATUS "PDF import enabled (poppler-cpp found)")
-#     else()
-#         message(STATUS "PDF import disabled (poppler-cpp not found)")
-#     endif()
-# endif()
-message(STATUS "PDF import using pdftotext fallback (poppler-cpp disabled due to link conflicts)")
+# ---------------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------------
 
-# All source files
-set(CPP_SOURCES
-    src/cpp/main_gui.cpp
+# SQLite3: vcpkg exposes unofficial-sqlite3; homebrew/system expose SQLite3.
+find_package(unofficial-sqlite3 CONFIG QUIET)
+if(unofficial-sqlite3_FOUND)
+    set(PATX_SQLITE_TARGET unofficial::sqlite3::sqlite3)
+else()
+    find_package(SQLite3 REQUIRED)
+    set(PATX_SQLITE_TARGET SQLite::SQLite3)
+endif()
+
+# libcurl: required by the USPTO sync layer in patx_core
+find_package(CURL REQUIRED)
+if(NOT TARGET CURL::libcurl)
+    message(FATAL_ERROR "CURL found but CURL::libcurl target is missing")
+endif()
+
+# nlohmann/json: vcpkg/homebrew package first, else download the single header
+find_package(nlohmann_json CONFIG QUIET)
+if(nlohmann_json_FOUND)
+    set(PATX_JSON_TARGET nlohmann_json::nlohmann_json)
+else()
+    set(JSON_HEADER ${CMAKE_BINARY_DIR}/generated/include/nlohmann/json.hpp)
+    if(NOT EXISTS ${JSON_HEADER})
+        message(STATUS "Downloading nlohmann/json single header (v3.11.3)")
+        file(DOWNLOAD
+            https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp
+            ${JSON_HEADER}
+            SHOW_PROGRESS
+            STATUS json_dl_status)
+        list(GET json_dl_status 0 json_dl_rc)
+        if(NOT json_dl_rc EQUAL 0)
+            message(FATAL_ERROR "Failed to download nlohmann/json header (code ${json_dl_rc}). Install nlohmann-json via vcpkg/brew or retry with network access.")
+        endif()
+    endif()
+    add_library(nlohmann_json_header INTERFACE)
+    target_include_directories(nlohmann_json_header INTERFACE ${CMAKE_BINARY_DIR}/generated/include)
+    set(PATX_JSON_TARGET nlohmann_json_header)
+endif()
+
+# OpenXLSX: vcpkg package first, else FetchContent from upstream
+find_package(OpenXLSX CONFIG QUIET)
+if(NOT OpenXLSX_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(OpenXLSX
+        GIT_REPOSITORY https://github.com/troldal/OpenXLSX.git
+        GIT_TAG v0.5.1
+        GIT_SHALLOW TRUE)
+    FetchContent_MakeAvailable(OpenXLSX)
+endif()
+
+# ---------------------------------------------------------------------------
+# Core library: database, IO, USPTO integration. No wxWidgets dependency,
+# so it builds and tests on macOS/Linux/CI without a GUI toolchain.
+# ---------------------------------------------------------------------------
+add_library(patx_core STATIC
     src/cpp/database.cpp
     src/cpp/undo_manager.cpp
     src/cpp/core/migration.cpp
+    src/cpp/core/log.cpp
+    src/cpp/database/schema_migrations.cpp
+    src/cpp/database/uspto_repository.cpp
     src/cpp/io/excel_io.cpp
+    src/cpp/database/uspto_repository.cpp
+    src/cpp/network/http_client.cpp
+    src/cpp/uspto/uspto_client.cpp
+    src/cpp/uspto/document_classifier.cpp
+    src/cpp/uspto/claim_parser.cpp
+    src/cpp/uspto/claim_diff.cpp
+    src/cpp/uspto/oa_parser.cpp
+    src/cpp/uspto/uspto_sync_service.cpp
+    src/cpp/uspto/timeline_service.cpp
+    src/cpp/uspto/text_extractor.cpp
 )
 
-# PDF parser (only if poppler is available)
-# TODO: poppler-cpp has linking conflicts with wxWidgets on Windows
-# Temporarily disabled - using fallback approach
-# if(POPPLER_CPP_FOUND)
-#     list(APPEND CPP_SOURCES src/cpp/io/pdf_parser.cpp)
-# endif()
-
-# GUI executable
-add_executable(patx WIN32 ${CPP_SOURCES})
-
-target_include_directories(patx PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src/cpp
+target_include_directories(patx_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_BINARY_DIR}/generated/include
 )
 
-# Add poppler include dirs if found
-if(POPPLER_CPP_FOUND)
-    target_include_directories(patx PRIVATE ${POPPLER_CPP_INCLUDE_DIRS})
-endif()
-
-# Static link
-target_link_libraries(patx PRIVATE
-    unofficial::sqlite3::sqlite3
-    wx::core
-    wx::base
-    wx::adv
-    wx::aui
+target_link_libraries(patx_core PUBLIC
+    ${PATX_SQLITE_TARGET}
+    CURL::libcurl
+    ${PATX_JSON_TARGET}
     OpenXLSX::OpenXLSX
 )
 
-# Link poppler if found
-if(POPPLER_CPP_FOUND)
-    target_link_libraries(patx PRIVATE ${POPPLER_CPP_LIBRARIES})
-    target_compile_definitions(patx PRIVATE POPPLER_CPP_AVAILABLE)
-endif()
-
-set_target_properties(patx PROPERTIES
-    WIN32_EXECUTABLE TRUE
-)
-
-# MSVC UTF-8 encoding for Chinese characters
 if(MSVC)
-    target_compile_options(patx PRIVATE "/utf-8")
+    target_compile_options(patx_core PRIVATE /utf-8 /W4)
+else()
+    target_compile_options(patx_core PRIVATE -Wall -Wextra)
 endif()
 
-message(STATUS "patX v${PROJECT_VERSION} - Full Patent Manager")
-message(STATUS "Dependencies: SQLite3, wxWidgets, OpenXLSX")
+# ---------------------------------------------------------------------------
+# GUI executable (wxWidgets). Skipped gracefully when wx is unavailable,
+# e.g. on headless CI macOS/Linux core-only builds.
+# ---------------------------------------------------------------------------
+if(PATX_BUILD_GUI)
+    # vcpkg exposes targets (wx::core), homebrew exposes wxWidgets_LIBRARIES
+    find_package(wxWidgets COMPONENTS core base adv aui html core QUIET)
+    if(wxWidgets_FOUND)
+        # Module-style results (homebrew/system) provide wxWidgets_USE_FILE
+        # that adds include dirs; config-style (vcpkg) only provides targets.
+        if(wxWidgets_USE_FILE)
+            include(${wxWidgets_USE_FILE})
+        endif()
+        add_executable(patx
+            src/cpp/main_gui.cpp
+            src/cpp/ui/edit_dialogs.cpp
+            src/cpp/ui/us_prosecution_panel.cpp
+        )
+        if(WIN32)
+            set_target_properties(patx PROPERTIES WIN32_EXECUTABLE TRUE)
+        endif()
+        target_include_directories(patx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp)
+        target_link_libraries(patx PRIVATE patx_core ${wxWidgets_LIBRARIES})
+        target_compile_definitions(patx PRIVATE PATX_GUI=1)
+        if(MSVC)
+            target_compile_options(patx PRIVATE /utf-8)
+        endif()
+        message(STATUS "patX GUI enabled (wxWidgets found)")
+    else()
+        message(STATUS "wxWidgets not found - building core library and tests only")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+if(PATX_BUILD_TESTS)
+    enable_testing()
+    add_executable(patx_tests
+        tests/test_database.cpp
+        tests/test_excel.cpp
+        tests/test_uspto.cpp
+        tests/test_main.cpp
+    )
+    target_link_libraries(patx_tests PRIVATE patx_core)
+    target_include_directories(patx_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME patx_tests COMMAND patx_tests)
+    # Fixtures are copied next to the test binary so tests can locate them
+    add_custom_command(TARGET patx_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures $<TARGET_FILE_DIR:patx_tests>/fixtures)
+endif()
+
+message(STATUS "patX v${PROJECT_VERSION} - core library, optional GUI, tests")

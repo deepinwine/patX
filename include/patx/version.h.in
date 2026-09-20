@@ -1,0 +1,9 @@
+// Single version source for patX. Populated by CMake from project(patX VERSION ...).
+// GUI title, status bar, About box and logs must all read this - never hardcode
+// version strings in individual source files.
+#pragma once
+
+#define PATX_VERSION "@PROJECT_VERSION@"
+#define PATX_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define PATX_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define PATX_VERSION_PATCH @PROJECT_VERSION_PATCH@
