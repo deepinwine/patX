@@ -1,7 +1,7 @@
 // patX GUI - Patent Manager frame.
 //
-// Edit dialogs live in ui/edit_dialogs.*; the USPTO prosecution tab lives in
-// ui/us_prosecution_panel.*. This file is the frame: menus, tabs, filtering,
+// Edit dialogs live in ui/edit_dialogs.*; the web dossier sync UI lives in
+// ui/web_dossier_dialogs.*. This file is the frame: menus, tabs, filtering,
 // import/export, backup/NAS, theme/language.
 #include <wx/wx.h>
 #include <wx/listctrl.h>
@@ -32,7 +32,6 @@
 #include "excel_io.hpp"
 #include "pdf_parser.hpp"
 #include "ui/edit_dialogs.hpp"
-#include "ui/us_prosecution_panel.hpp"
 #include "ui/web_dossier_dialogs.hpp"
 
 #define UTF8_STR(s) wxString::FromUTF8(s)
@@ -175,8 +174,6 @@ public:
 
         // Auto-sync check timer (fires every 30 min; the panel decides
         // whether the configured interval has elapsed)
-        auto_sync_timer_ = new wxTimer(this, ID_AUTO_SYNC_TIMER);
-        auto_sync_timer_->Start(30 * 60 * 1000, wxTIMER_CONTINUOUS);
     }
 
 private:
@@ -209,7 +206,6 @@ private:
     wxListCtrl* foreign_list;
     wxListCtrl* fee_list;
     wxListCtrl* rule_list;
-    UsProsecutionPanel* us_panel = nullptr;
 
     std::map<wxListCtrl*, std::pair<int, bool>> sort_state;
 
@@ -233,7 +229,6 @@ private:
         ID_LANG_ZH,
         ID_VALIDATE_DATA,
         ID_STATISTICS,
-        ID_AUTO_SYNC_TIMER,
         ID_RULE_ADD,
         ID_RULE_EDIT,
         ID_RULE_DELETE,
@@ -353,9 +348,6 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(2); }, ID_THEME_EYE);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetLanguage(0); }, ID_LANG_EN);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetLanguage(1); }, ID_LANG_ZH);
-        Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
-            if (us_panel) us_panel->CheckAutoSync();
-        }, ID_AUTO_SYNC_TIMER);
     }
 
     void SetupUI() {
@@ -998,7 +990,6 @@ private:
             case 3: { SoftwareEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadSoftware(); break; }
             case 4: { ICEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadIC(); break; }
             case 5: { ForeignEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadForeign(); break; }
-            case 6: { wxCommandEvent e; us_panel->OnAddCase(e); break; }
             default: break;
         }
     }
@@ -1241,7 +1232,7 @@ private:
             } else {
                 wxString msg = UTF8_STR("所选记录没有可自动查询的 CN 案件。");
                 if (!us_linked.empty())
-                    msg += UTF8_STR("\nUS 案件请在【美国审查】页同步：") + join(us_linked);
+                    msg += UTF8_STR("\nUS 来源记录（USPTO 同步已停用）跳过：") + join(us_linked);
                 if (!no_number.empty())
                     msg += UTF8_STR("\n缺少申请号和公开号，无法查询：") + join(no_number);
                 wxMessageBox(msg, UTF8_STR("查询最新审查意见"), wxOK | wxICON_INFORMATION);
@@ -1553,8 +1544,6 @@ private:
 
     // ============== US Prosecution Tab ==============
     void SetupUSTab() {
-        us_panel = new UsProsecutionPanel(notebook, "patents.db");
-        notebook->AddPage(us_panel, LANG_STR("US Prosecution", "美国审查"));
     }
 
     // ============== Annual Fee Tab ==============
@@ -1698,7 +1687,7 @@ private:
         wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
 
         wxBoxSizer* tb = new wxBoxSizer(wxHORIZONTAL);
-        tb->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("期限计算规则（数据库存储，USPTO OA 同步使用同一规则引擎）")),
+        tb->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("期限计算规则（数据库存储，网页同步与 OA 期限共用同一规则引擎）")),
                 0, wxALIGN_CENTER_VERTICAL);
         tb->AddStretchSpacer();
         auto rule_btn = [&](int id, const wxString& label, void (PatXFrame::*h)(wxCommandEvent&)) {
@@ -1844,7 +1833,6 @@ private:
                 case 3: name = LANG_STR_L(lang, "Software Copyright", "软件著作权"); break;
                 case 4: name = LANG_STR_L(lang, "IC Layout", "集成电路布图"); break;
                 case 5: name = LANG_STR_L(lang, "Foreign Patents", "国外专利"); break;
-                case 6: name = LANG_STR_L(lang, "US Prosecution", "美国审查"); break;
                 case 7: name = LANG_STR_L(lang, "Annual Fees", "年费管理"); break;
                 case 8: name = LANG_STR_L(lang, "Deadline Rules", "期限规则"); break;
             }
@@ -2316,9 +2304,7 @@ private:
                 "patX v%s - Patent Management System\n"
                 "========================================\n\n"
                 "Modules: Domestic / OA / PCT / Software / IC /\n"
-                "Foreign / US Prosecution (USPTO ODP) / Annual Fees / Rules\n\n"
                 "Tech: C++17 + wxWidgets + SQLite3 + OpenXLSX + libcurl\n"
-                "USPTO data: Open Data Portal Patent File Wrapper API\n\n"
                 "GitHub: https://github.com/deepinwine/patX",
                 PATX_VERSION),
             "About patX", wxOK | wxICON_INFORMATION);
@@ -2377,7 +2363,6 @@ private:
         LoadForeign();
         LoadAnnualFees();
         LoadDeadlineRules();
-        if (us_panel) us_panel->RefreshCases();
     }
 
     wxComboBox* inventor_filter_ = nullptr;

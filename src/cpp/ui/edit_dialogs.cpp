@@ -357,9 +357,9 @@ void OAEditDialog::LoadData() {
     extendable_check_->SetValue(oa.is_extendable);
     completed_check_->SetValue(oa.is_completed);
 
-    if (oa.source == "USPTO") {
-        external_info_->SetLabel(UTF8_STR("USPTO 同步记录 — 外部文档: ") +
-                                 DB_STR(oa.external_document_id) +
+    if (oa.source == "cnipa") {
+        external_info_->SetLabel(UTF8_STR("网页同步记录 — 远端文档: ") +
+                                 DB_STR(oa.remote_document_id) +
                                  (oa.deadline_source == "calculated"
                                       ? UTF8_STR(" | 期限为计算值，可手动修改")
                                       : ""));

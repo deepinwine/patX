@@ -88,12 +88,10 @@ struct OARecord {
     int extension_months = 0;
     std::string extended_deadline;
     std::string notes;
-    // External linkage (USPTO sync). jurisdiction='US', source='USPTO' for
-    // records created by the sync service; empty for manually created records.
+    // External linkage (source='cnipa' for web-dossier records, '' for
+    // manual ones; USPTO values may exist in databases from older versions).
     std::string jurisdiction;
     std::string source;
-    std::string external_case_id;      // uspto_cases.id
-    std::string external_document_id;  // uspto_documents.document_identifier
     std::string deadline_source;       // official / calculated / manual / ''
     // Web dossier sync linkage (source='cnipa'). Filled by the sync layer
     // only; the manual edit dialogs never touch these.
@@ -276,7 +274,6 @@ public:
     bool DeleteOA(int id, bool log_undo = true);
     bool MarkOACompleted(int id);
     // Finds a synced OA record by its USPTO document identifier (0 if absent).
-    int FindOAByExternalDocument(const std::string& external_document_id);
 
     // ---------- PCT ----------
     std::vector<PCTPatent> GetPCTPatents(const QueryFilter& filter = {});
@@ -307,7 +304,6 @@ public:
     bool DeleteForeign(int id);
     // Find a US-case candidate: country in (US/USA/United States) matching by
     // application number. Returns 0 when there is no unambiguous candidate.
-    int FindUSCaseCandidate(const std::string& application_number);
 
     // ---------- Deadline rules ----------
     std::vector<DeadlineRule> GetDeadlineRules(bool enabled_only = false);

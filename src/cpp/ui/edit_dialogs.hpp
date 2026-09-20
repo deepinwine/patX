@@ -48,7 +48,7 @@ private:
     wxTextCtrl* notes_field_;
     wxCheckBox* extendable_check_;
     wxCheckBox* completed_check_;
-    // Read-only provenance block for USPTO-synced records: user-owned fields
+    // Read-only provenance block for web-synced records: user-owned fields
     // stay editable, external identity is displayed but not editable.
     wxStaticText* external_info_;
 

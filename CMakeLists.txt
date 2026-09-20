@@ -36,12 +36,6 @@ else()
     set(PATX_SQLITE_TARGET SQLite::SQLite3)
 endif()
 
-# libcurl: required by the USPTO sync layer in patx_core
-find_package(CURL REQUIRED)
-if(NOT TARGET CURL::libcurl)
-    message(FATAL_ERROR "CURL found but CURL::libcurl target is missing")
-endif()
-
 # nlohmann/json: vcpkg/homebrew package first, else download the single header
 find_package(nlohmann_json CONFIG QUIET)
 if(nlohmann_json_FOUND)
@@ -77,7 +71,7 @@ if(NOT OpenXLSX_FOUND)
 endif()
 
 # ---------------------------------------------------------------------------
-# Core library: database, IO, USPTO integration. No wxWidgets dependency,
+# Core library: database, IO, web dossier rules. No wxWidgets dependency,
 # so it builds and tests on macOS/Linux/CI without a GUI toolchain.
 # ---------------------------------------------------------------------------
 add_library(patx_core STATIC
@@ -86,19 +80,8 @@ add_library(patx_core STATIC
     src/cpp/core/migration.cpp
     src/cpp/core/log.cpp
     src/cpp/database/schema_migrations.cpp
-    src/cpp/database/uspto_repository.cpp
     src/cpp/io/excel_io.cpp
     src/cpp/web_dossier_rules.cpp
-    src/cpp/database/uspto_repository.cpp
-    src/cpp/network/http_client.cpp
-    src/cpp/uspto/uspto_client.cpp
-    src/cpp/uspto/document_classifier.cpp
-    src/cpp/uspto/claim_parser.cpp
-    src/cpp/uspto/claim_diff.cpp
-    src/cpp/uspto/oa_parser.cpp
-    src/cpp/uspto/uspto_sync_service.cpp
-    src/cpp/uspto/timeline_service.cpp
-    src/cpp/uspto/text_extractor.cpp
 )
 
 target_include_directories(patx_core PUBLIC
@@ -108,7 +91,6 @@ target_include_directories(patx_core PUBLIC
 
 target_link_libraries(patx_core PUBLIC
     ${PATX_SQLITE_TARGET}
-    CURL::libcurl
     ${PATX_JSON_TARGET}
     OpenXLSX::OpenXLSX
 )
@@ -135,7 +117,6 @@ if(PATX_BUILD_GUI)
         add_executable(patx
             src/cpp/main_gui.cpp
             src/cpp/ui/edit_dialogs.cpp
-            src/cpp/ui/us_prosecution_panel.cpp
             src/cpp/web_dossier.cpp
             src/cpp/ui/web_dossier_dialogs.cpp
         )
@@ -162,7 +143,6 @@ if(PATX_BUILD_TESTS)
     add_executable(patx_tests
         tests/test_database.cpp
         tests/test_excel.cpp
-        tests/test_uspto.cpp
         tests/test_main.cpp
     )
     target_link_libraries(patx_tests PRIVATE patx_core)
@@ -183,10 +163,6 @@ if(PATX_BUILD_TESTS)
         target_compile_options(patx_web_dossier_tests PRIVATE /utf-8)
     endif()
     add_test(NAME patx_web_dossier_tests COMMAND patx_web_dossier_tests)
-    # Fixtures are copied next to the test binary so tests can locate them
-    add_custom_command(TARGET patx_tests POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures $<TARGET_FILE_DIR:patx_tests>/fixtures)
 endif()
 
 message(STATUS "patX v${PROJECT_VERSION} - core library, optional GUI, tests")

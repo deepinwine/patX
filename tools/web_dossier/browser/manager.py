@@ -47,14 +47,37 @@ class BrowserManager:
         self._page = None
 
     # ---- lifecycle -----------------------------------------------------
+    def _launch_channel(self):
+        """Prefer browsers already installed on the machine (Chrome, then
+        Edge - preinstalled on Windows) over Playwright's own Chromium build.
+        No downloads, no version-pinned 300 MB cache. Falls back to the
+        bundled build for portable/offline packages that ship one."""
+        import sys
+        last_error = None
+        channels = ["chrome", "msedge"]
+        if sys.platform == "darwin":
+            channels = ["chrome"]          # no Edge on locked-down macOS
+        for channel in channels:
+            try:
+                self._context = self._pw.chromium.launch_persistent_context(
+                    str(self.profile_dir), headless=self.headless, channel=channel)
+                return True
+            except Exception as exc:       # channel not installed
+                last_error = exc
+        try:
+            self._context = self._pw.chromium.launch_persistent_context(
+                str(self.profile_dir), headless=self.headless)
+            return True
+        except Exception:
+            raise last_error
+
     def launch(self):
         if self._context is not None:
             return True
         from playwright.sync_api import sync_playwright
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
-        self._context = self._pw.chromium.launch_persistent_context(
-            str(self.profile_dir), headless=self.headless)
+        self._launch_channel()
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         return True
 

@@ -295,14 +295,6 @@ TEST(database_pct_software_ic_foreign_full_crud) {
         CHECK_STR_EQ(fp_out.application_no, "17248024");
         CHECK_STR_EQ(fp_out.notes, "fp-note-2");
 
-        // US case candidate lookup: unambiguous match by app number
-        CHECK_EQ(db.FindUSCaseCandidate("17/248024"), fp_id);
-        // Ambiguity must refuse auto-link
-        ForeignPatent fp2 = fp;
-        fp2.case_no = "FP-2";
-        fp2.id = 0;
-        db.InsertForeign(fp2);
-        CHECK_EQ(db.FindUSCaseCandidate("17248024"), 0);
     }
     std::filesystem::remove(path);
 }
@@ -321,9 +313,10 @@ TEST(database_oa_crud_and_external_link) {
         oa.writer = "李四";
         oa.progress = "drafting";
         oa.oa_summary = "创造性";
-        oa.jurisdiction = "US";
-        oa.source = "USPTO";
-        oa.external_document_id = "LN4VBTHCXBLUEX2";
+        oa.jurisdiction = "US";       // legacy value from the removed USPTO sync
+        oa.source = "cnipa";
+        oa.remote_document_id = "row-1";
+        oa.sync_flag = "web_new";
         oa.deadline_source = "calculated";
         int id = db.InsertOA(oa);
         CHECK(id > 0);
@@ -331,11 +324,9 @@ TEST(database_oa_crud_and_external_link) {
         auto out = db.GetOAById(id);
         CHECK_STR_EQ(out.oa_summary, "创造性");
         CHECK_STR_EQ(out.jurisdiction, "US");
-        CHECK_STR_EQ(out.external_document_id, "LN4VBTHCXBLUEX2");
+        CHECK_STR_EQ(out.remote_document_id, "row-1");
+        CHECK_STR_EQ(out.sync_flag, "web_new");
         CHECK_STR_EQ(out.deadline_source, "calculated");
-
-        CHECK_EQ(db.FindOAByExternalDocument("LN4VBTHCXBLUEX2"), id);
-        CHECK_EQ(db.FindOAByExternalDocument("missing"), 0);
 
         // Filter by deadline state
         QueryFilter f;

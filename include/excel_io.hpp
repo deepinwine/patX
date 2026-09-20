@@ -78,17 +78,6 @@ public:
     bool IsCsvFile(const std::string& file_path);
     std::string GetLastError() const;
 
-    // Reads US application/publication/patent numbers from a spreadsheet
-    // (.xlsx) or CSV for the batch USPTO case import. Prefers a header column
-    // named 申请号/公开号/publication/patent number; otherwise scans all cells
-    // for identifier-shaped values. Non-US numbers (e.g. CN公开号) are counted
-    // into *skipped_non_us - the USPTO only has US applications. Returns the
-    // identifiers in file order, de-duplicated.
-    static bool ReadIdentifiers(const std::string& file_path,
-                                std::vector<std::string>& out_identifiers,
-                                int* skipped_non_us, std::string& error);
-
-private:
     std::string last_error_;
 
     SheetType DetectSheetType(const std::string& sheet_name, const std::vector<std::string>& headers);

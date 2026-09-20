@@ -4,7 +4,6 @@
   "dependencies": [
     "wxwidgets",
     "openxlsx",
-    "curl",
     "sqlite3",
     "nlohmann-json"
   ]

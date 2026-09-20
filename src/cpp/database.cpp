@@ -1,8 +1,8 @@
 // patX Database Implementation
 //
 // All SQL for the core IP modules (patents / OA / PCT / software / IC /
-// foreign / deadline rules) lives here. USPTO-specific tables are handled by
-// uspto_repository.cpp on the same connection.
+// foreign / deadline rules) lives here; the web dossier OA merge rules live
+// in web_dossier_rules.cpp.
 #include "database.hpp"
 #include "undo_manager.hpp"
 #include "patx/schema_migrations.hpp"
@@ -137,8 +137,6 @@ void Database::InitTables() {
             notes TEXT,
             jurisdiction TEXT DEFAULT '',
             source TEXT DEFAULT '',
-            external_case_id TEXT DEFAULT '',
-            external_document_id TEXT DEFAULT '',
             deadline_source TEXT DEFAULT '',
             remote_document_id TEXT DEFAULT '',
             sync_flag TEXT DEFAULT ''
@@ -497,18 +495,16 @@ void ReadOA(sqlite3_stmt* stmt, OARecord& oa) {
     oa.notes = Col(stmt, 18);
     oa.jurisdiction = Col(stmt, 19);
     oa.source = Col(stmt, 20);
-    oa.external_case_id = Col(stmt, 21);
-    oa.external_document_id = Col(stmt, 22);
-    oa.deadline_source = Col(stmt, 23);
-    oa.remote_document_id = Col(stmt, 24);
-    oa.sync_flag = Col(stmt, 25);
+    oa.deadline_source = Col(stmt, 21);
+    oa.remote_document_id = Col(stmt, 22);
+    oa.sync_flag = Col(stmt, 23);
 }
 
 const char* kOAColumns =
     "id, patent_id, geke_code, patent_title, oa_type, official_deadline, issue_date, "
     "response_date, handler, writer, progress, agency, oa_summary, is_completed, "
     "is_extendable, extension_requested, extension_months, extended_deadline, notes, "
-    "jurisdiction, source, external_case_id, external_document_id, deadline_source, "
+    "jurisdiction, source, deadline_source, "
     "remote_document_id, sync_flag";
 
 void ReadPCT(sqlite3_stmt* stmt, PCTPatent& p) {
@@ -845,7 +841,7 @@ int Database::InsertOA(const OARecord& oa, bool log_undo) {
         "INSERT INTO oa_records (patent_id, geke_code, patent_title, oa_type, official_deadline, "
         "issue_date, response_date, handler, writer, progress, agency, oa_summary, is_completed, "
         "is_extendable, extension_requested, extension_months, extended_deadline, notes, "
-        "jurisdiction, source, external_case_id, external_document_id, deadline_source, "
+        "jurisdiction, source, deadline_source, "
         "remote_document_id, sync_flag) VALUES (" +
         std::to_string(oa.patent_id) + ",'" +
         EscapeString(oa.geke_code) + "','" + EscapeString(oa.patent_title) + "','" +
@@ -860,7 +856,6 @@ int Database::InsertOA(const OARecord& oa, bool log_undo) {
         std::to_string(oa.extension_months) + ",'" +
         EscapeString(oa.extended_deadline) + "','" + EscapeString(oa.notes) + "','" +
         EscapeString(oa.jurisdiction) + "','" + EscapeString(oa.source) + "','" +
-        EscapeString(oa.external_case_id) + "','" + EscapeString(oa.external_document_id) + "','" +
         EscapeString(oa.deadline_source) + "','" + EscapeString(oa.remote_document_id) + "','" +
         EscapeString(oa.sync_flag) + "')";
 
@@ -899,8 +894,6 @@ bool Database::UpdateOA(int id, const OARecord& oa, bool log_undo) {
         "notes = '" + EscapeString(oa.notes) + "'," +
         "jurisdiction = '" + EscapeString(oa.jurisdiction) + "'," +
         "source = '" + EscapeString(oa.source) + "'," +
-        "external_case_id = '" + EscapeString(oa.external_case_id) + "'," +
-        "external_document_id = '" + EscapeString(oa.external_document_id) + "'," +
         "deadline_source = '" + EscapeString(oa.deadline_source) + "'," +
         "remote_document_id = '" + EscapeString(oa.remote_document_id) + "'," +
         "sync_flag = '" + EscapeString(oa.sync_flag) + "'" +
@@ -919,22 +912,6 @@ bool Database::DeleteOA(int id, bool log_undo) {
 bool Database::MarkOACompleted(int id) {
     return Execute("UPDATE oa_records SET is_completed = 1, progress = 'completed', response_date = '" +
                    GetCurrentDate() + "' WHERE id = " + std::to_string(id));
-}
-
-int Database::FindOAByExternalDocument(const std::string& external_document_id) {
-    if (external_document_id.empty()) return 0;
-    sqlite3_stmt* stmt;
-    std::string sql = "SELECT id FROM oa_records WHERE external_document_id = '" +
-                      EscapeString(external_document_id) + "' LIMIT 1";
-    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
-            int id = sqlite3_column_int(stmt, 0);
-            sqlite3_finalize(stmt);
-            return id;
-        }
-        sqlite3_finalize(stmt);
-    }
-    return 0;
 }
 
 // ============== PCT ==============
@@ -1291,44 +1268,6 @@ std::string NormalizeUSApplicationNumber(const std::string& input) {
 
 } // namespace
 
-int Database::FindUSCaseCandidate(const std::string& application_number) {
-    std::string normalized = NormalizeUSApplicationNumber(application_number);
-    if (normalized.size() < 6) return 0;
-
-    sqlite3_stmt* stmt;
-    std::string sql =
-        "SELECT id, country, application_no, country_app_no FROM foreign_patents "
-        "WHERE UPPER(country) IN ('US','USA','UNITED STATES','U.S.','U.S.A.')";
-
-    struct Candidate { int id; std::string app_no; std::string country_app_no; };
-    std::vector<Candidate> candidates;
-    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            Candidate c;
-            c.id = sqlite3_column_int(stmt, 0);
-            c.app_no = Col(stmt, 2);
-            c.country_app_no = Col(stmt, 3);
-            candidates.push_back(std::move(c));
-        }
-        sqlite3_finalize(stmt);
-    }
-
-    std::vector<int> matches;
-    for (const auto& c : candidates) {
-        std::string a = NormalizeUSApplicationNumber(c.app_no);
-        std::string b = NormalizeUSApplicationNumber(c.country_app_no);
-        if ((!a.empty() && a.find(normalized) != std::string::npos) ||
-            (!b.empty() && b.find(normalized) != std::string::npos) ||
-            (!a.empty() && normalized.find(a) != std::string::npos) ||
-            (!b.empty() && normalized.find(b) != std::string::npos)) {
-            matches.push_back(c.id);
-        }
-    }
-    // Ambiguous matches require user confirmation - refuse to auto-link
-    if (matches.size() == 1) return matches[0];
-    return 0;
-}
-
 // ============== Deadline Rules ==============
 
 std::vector<DeadlineRule> Database::GetDeadlineRules(bool enabled_only) {
@@ -1435,7 +1374,7 @@ std::vector<std::string> Database::GetDistinctValues(const std::string& table, c
     // the guard so future callers can't inject through these two fields.
     static const std::set<std::string> allowed_tables = {
         "patents", "oa_records", "pct_patents", "software_copyrights",
-        "ic_layouts", "foreign_patents", "uspto_cases"};
+        "ic_layouts", "foreign_patents"};
     if (!allowed_tables.count(table)) return results;
 
     std::string sql = "SELECT DISTINCT " + column + " FROM " + table +
@@ -1574,8 +1513,6 @@ std::string Database::OAToJson(const OARecord& oa) {
     json << "\"notes\":\"" << EscapeString(oa.notes) << "\",";
     json << "\"jurisdiction\":\"" << EscapeString(oa.jurisdiction) << "\",";
     json << "\"source\":\"" << EscapeString(oa.source) << "\",";
-    json << "\"external_case_id\":\"" << EscapeString(oa.external_case_id) << "\",";
-    json << "\"external_document_id\":\"" << EscapeString(oa.external_document_id) << "\",";
     json << "\"deadline_source\":\"" << EscapeString(oa.deadline_source) << "\",";
     json << "\"remote_document_id\":\"" << EscapeString(oa.remote_document_id) << "\",";
     json << "\"sync_flag\":\"" << EscapeString(oa.sync_flag) << "\"";

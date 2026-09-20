@@ -60,6 +60,3 @@ jobs:
         working-directory: build-ci
         run: ctest --output-on-failure
 
-  # Live USPTO API verification is intentionally NOT part of CI: it requires
-  # a personal API key (USPTO_API_KEY secret). The offline fixture suite in
-  # tests/fixtures/uspto covers parsing deterministically.

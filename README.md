@@ -1,6 +1,6 @@
 # patX — 专利/IP 管理系统 (C++17 + wxWidgets + SQLite)
 
-patX 是一个跨平台专利与知识产权管理桌面软件：国内专利、OA 处理、PCT、软件著作权、集成电路布图、国外专利、美国专利审查（USPTO 官方数据同步）、年费与期限规则，全部存储在本地 SQLite 数据库中。
+patX 是一个跨平台专利与知识产权管理桌面软件：国内专利、OA 处理（含 CNIPA 网页自动查询最新审查意见）、PCT、软件著作权、集成电路布图、国外专利、年费与期限规则，全部存储在本地 SQLite 数据库中。
 
 当前版本：**0.4.0**（版本号唯一来源：`CMakeLists.txt` 的 `project(patX VERSION ...)`，经 `include/patx/version.h.in` 生成到代码各处）。
 
@@ -11,17 +11,15 @@ wxWidgets GUI (src/cpp/main_gui.cpp, src/cpp/ui/*)
         │
 patx_core 静态库（无 GUI 依赖，可独立构建与测试）
         │
-        ├── database/            核心业务表 + USPTO 表 + 版本化迁移
+        ├── database/            核心业务表 + 版本化迁移
         ├── io/excel_io          Excel/CSV 导入导出（OpenXLSX）
-        ├── network/http_client  libcurl 封装（重试/退避/Retry-After/取消）
-        └── uspto/               ODP 客户端、同步服务、文档分类、
-                                 OA 解析、权利要求解析/版本/对比、时间线
+        └── web_dossier_rules    网页审查同步的 OA 合并规则（纯逻辑，可测）
         │
      SQLite (WAL)
 ```
 
 - **GUI 与数据/网络完全分层**：`patx_core` 不依赖 wxWidgets，可在 macOS/Linux/CI 上独立构建并运行单元测试。
-- **USPTO 网络请求全部在 worker 线程**执行（每个线程独立 SQLite 连接），结果经 `wxThreadEvent` 回到主线程，不冻结界面。
+- **网页审查同步在 worker 线程执行**（Python sidecar 进程 + stdio JSON-RPC），结果经 `wxThreadEvent` 回到主线程，不冻结界面。
 - 仓库中的 Rust 代码（`src/rust`）是历史遗留，**未参与当前构建与运行链路**，仅作参考保留；后续如有百万级全文检索需求再评估接入。
 
 ### 与旧版 README 的差异（诚实声明）
@@ -35,20 +33,19 @@ patx_core 静态库（无 GUI 依赖，可独立构建与测试）
 | 国内专利 | 完整 CRUD、批量等级/状态、列头筛选、自然排序、结构化字段（技术路线/研发项目/标签/代理人/1st-5th OA 提醒等，不再拼进备注） |
 | OA 处理 | 期限倒计时配色、5/30 天到期过滤、PDF 导入自动匹配申请号并按规则表计算建议绝限 |
 | PCT / 软著 / IC / 国外专利 | 完整 CRUD（编辑真正更新全字段）、搜索/状态/处理人筛选 |
-| **美国审查 (US Prosecution)** | 基于 USPTO Open Data Portal Patent File Wrapper API：案件元数据、审查文档增量同步（按 documentIdentifier 去重）、文档分类、Office Action 驳回理由解析（§101/102/103/112 等）、**权利要求 37 CFR 1.121 版本重建与逐词对比**、审查时间线、与 OA 页签联动 |
+| **审查信息同步 (Dossier Sync)** | CNIPA 网页自动查询最新审查意见：公开号→申请号解析、审查文件清单入库（指纹去重）、最新 OA 识别与官文日获取、按保护规则更新 OA 记录 |
 | 年费 | 从真实授权专利生成（中国官费标准）；未配置规则的地区显示 "Rule not configured"，不再显示假数据 |
-| 期限规则 | 数据库存储的规则表（管辖地/事件/月/日/可延期），支持增删改与启用禁用；国内 OA 与 USPTO OA 共用同一引擎；人工修改的期限（deadline_source=manual）不会被同步覆盖 |
+| 期限规则 | 数据库存储的规则表（管辖地/事件/月/日/可延期），支持增删改与启用禁用；OA 期限共用同一引擎；人工修改的期限（deadline_source=manual）不会被同步覆盖 |
 
-## USPTO 同步说明
+## 审查意见网页同步（CNIPA）
 
-1. 在 [USPTO Open Data Portal](https://data.uspto.gov/) 注册并申请 API Key（自 2026 年起 ODP API 需要登录账户的 Key）。
-2. patX 内 `美国审查 → 设置` 粘贴 Key（存储在本地 git-ignored 数据库中，不进仓库、不写日志），或设置环境变量 `USPTO_API_KEY`。
-3. `添加案件` 输入美国申请号（如 `17248024` 或 `17/248024`）即可同步。
-4. 数据来源为官方 Patent File Wrapper（`api.uspto.gov`），**不抓取 Patent Center 网页**；未公开的私有案件不在同步范围内，界面上会如实区分。
-5. Office Action / Amendment 默认**懒下载**（先同步元数据），可在设置中开启自动下载；下载文件保存 SHA-256 校验值，原始文档不可变。
-6. 权利要求版本优先采信 Amendment 中的完整 claim listing（37 CFR 1.121），低置信度解析会标记 `Needs Review`，不会默默当作正确文本。
+不需要任何 API Key。首次使用在菜单 `审查信息同步 → CNIPA 登录` 中用自己的账号在可见浏览器里完成登录（软件不读取密码、不自动化验证码），之后：
 
-API Key 安全：`patents.db`、`patx_uspto.json`、日志等均在 `.gitignore` 中排除。
+- OA 页选中记录点【查询最新审查意见】即可按案件自动查询；或菜单里更新全部活跃案件
+- 人工节奏逐件查询（单页面、最小间隔、遇到限流提示本批立即停止）
+- 发现新 OA 只**新增**记录（source=cnipa）；人工录入的处理人/撰写人/摘要/期限永不被覆盖
+- 已有记录缺官文日时仅补日期；日期不一致标记 `date_conflict` 待人工确认，不自动改写
+- 浏览器优先使用系统已安装的 Chrome/Edge；详细红线与调试方法见 `tools/web_dossier/README.md`
 
 ## 构建
 
@@ -83,21 +80,20 @@ ctest --test-dir build
 ctest --test-dir build --output-on-failure
 ```
 
-覆盖：数据库 CRUD（全部模块全字段往返）、v1→v2 迁移（含 notes 前缀搬迁与迁移前备份）、统一查询过滤（含 LIKE 通配符转义）、期限规则引擎、真 XLSX 导出（重新打开校验单元格）、CSV 引号规则、结构化字段导入、USPTO 响应解析（离线 fixture，来自 ODP 真实响应结构）、文档分类、37 CFR 1.121 claim 解析、逐词 diff、OA 驳回解析、增量去重。
+覆盖：数据库 CRUD（全部模块全字段往返）、v1→v2 迁移（含 notes 前缀搬迁与迁移前备份）、统一查询过滤（含 LIKE 通配符转义）、期限规则引擎、真 XLSX 导出（重新打开校验单元格）、CSV 引号规则、结构化字段导入、网页同步 OA 合并规则（含冲突保护）。
 
-USPTO live API 测试不在 CI 内：需要个人 Key（`USPTO_API_KEY`），无 Key 时相关功能自动跳过，不影响其他模块。
 
 ## 数据安全
 
 - 版本化迁移（`schema_info` 表）：只 ALTER 加列，永不 DROP/重建；迁移前自动生成 `patents.db.pre_migration_<时间戳>.bak`，迁移在事务内执行并验证。
 - NAS 同步为**文件级、单人使用**设计：同步前先对本地库做备份，冲突时保留本地较新版本；它不是多人实时协作系统。
-- 统一日志（`patx.log`）：记录迁移/导入导出/USPTO 同步/下载/解析，永不打印 API Key（仅掩码显示）。
+- 统一日志（`patx.log`）：记录迁移/导入导出/同步与解析；网页同步的密码/Cookie 永不落日志。
 
 ## 已知限制（不夸大）
 
 - OCR 未实现：PDF 文本依赖 `pdftotext`（poppler-utils）；无文本层的扫描件会标记待人工处理，而不是假装解析成功。
 - `claim(s)` 依赖解析基于规则表达式，复杂从属关系可能漏解析（不影响权利要求文本本身保存）。
-- USPTO 端点以 `api.uspto.gov` 官方 Swagger 为准（2025-2026 期间 PEDS/Developer Hub 已退役迁移至 ODP）；base URL 可在设置中修改以应对官方迁移。
+- （历史说明）USPTO ODP API 同步因无法取得 API Key 已于 2026-09 移除；架构保留 provider 抽象，未来如需恢复可重新实现。
 - Windows 下 API Key 存于本地数据库文件；如需 DPAPI/凭据管理器加密存储可作为后续增强。
 
 ## License
