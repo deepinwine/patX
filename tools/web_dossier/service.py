@@ -85,6 +85,8 @@ def _op_sync_case(args, cancel):
         return {"ok": False, "code": auth.value, "message": f"连通性检查失败: {auth.value}"}
 
     outcome = provider.list_documents(app_no, pub_no, cancel)
+    if outcome.auth_state in ("", "NOT_INITIALIZED") and outcome.ok:
+        outcome.auth_state = "AUTHENTICATED"
     latest_oa = provider.get_latest_office_action(outcome)
     response = outcome.to_dict(latest_oa)
     if latest_oa is not None:

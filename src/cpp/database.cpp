@@ -3,6 +3,7 @@
 #include "undo_manager.hpp"
 #include <sstream>
 #include <iostream>
+#include <cstring>
 #include <set>
 
 static UndoManager* g_undo_manager = nullptr;
@@ -328,6 +329,21 @@ void Database::MigrateTables() {
     )");
 }
 
+
+// Column lookup by name - SELECT * positional reads break when migrations
+// append columns in a different order on fresh vs upgraded databases.
+static std::string ColByName(sqlite3_stmt* stmt, const char* name) {
+    int n = sqlite3_column_count(stmt);
+    for (int i = 0; i < n; ++i) {
+        const char* cn = sqlite3_column_name(stmt, i);
+        if (cn && strcmp(cn, name) == 0) {
+            const char* v = (const char*)sqlite3_column_text(stmt, i);
+            return v ? v : "";
+        }
+    }
+    return "";
+}
+
 bool Database::Execute(const std::string& sql) {
     char* err_msg = nullptr;
     int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
@@ -451,6 +467,7 @@ std::vector<Patent> Database::GetPatents(const std::string& status_filter,
             p.class_level1 = (const char*)sqlite3_column_text(stmt, 18) ? (const char*)sqlite3_column_text(stmt, 18) : "";
             p.class_level2 = (const char*)sqlite3_column_text(stmt, 19) ? (const char*)sqlite3_column_text(stmt, 19) : "";
             p.class_level3 = (const char*)sqlite3_column_text(stmt, 20) ? (const char*)sqlite3_column_text(stmt, 20) : "";
+            p.publication_number = ColByName(stmt, "publication_number");
             results.push_back(p);
         }
         sqlite3_finalize(stmt);
@@ -488,6 +505,7 @@ Patent Database::GetPatentById(int id) {
             p.class_level1 = cs(18);
             p.class_level2 = cs(19);
             p.class_level3 = cs(20);
+            p.publication_number = ColByName(stmt, "publication_number");
         }
         sqlite3_finalize(stmt);
     }
@@ -524,6 +542,7 @@ Patent Database::GetPatentByCode(const std::string& geke_code) {
             p.class_level1 = cs(18);
             p.class_level2 = cs(19);
             p.class_level3 = cs(20);
+            p.publication_number = ColByName(stmt, "publication_number");
         }
         sqlite3_finalize(stmt);
     }
@@ -638,6 +657,7 @@ std::vector<Patent> Database::SearchPatents(const std::string& keyword) {
             p.class_level1 = cs(18);
             p.class_level2 = cs(19);
             p.class_level3 = cs(20);
+            p.publication_number = ColByName(stmt, "publication_number");
             results.push_back(p);
         }
         sqlite3_finalize(stmt);
@@ -1178,8 +1198,7 @@ std::vector<Patent> Database::GetPatentsForDossierCheck(bool include_granted, in
             p.class_level1 = cs(18);
             p.class_level2 = cs(19);
             p.class_level3 = cs(20);
-            // publication_number is column 21 after MigrateTables
-            p.publication_number = cs(21);
+            p.publication_number = ColByName(stmt, "publication_number");
             results.push_back(p);
         }
         sqlite3_finalize(stmt);
@@ -1335,9 +1354,9 @@ std::vector<OARecord> Database::GetOAsForPatentId(int patent_id) {
             oa.oa_summary = text(12);
             oa.is_completed = sqlite3_column_int(stmt, 13) != 0;
             // columns 19-21 exist after MigrateTables
-            oa.source = text(19);
-            oa.remote_document_id = text(20);
-            oa.sync_flag = text(21);
+            oa.source = ColByName(stmt, "source");
+            oa.remote_document_id = ColByName(stmt, "remote_document_id");
+            oa.sync_flag = ColByName(stmt, "sync_flag");
             results.push_back(oa);
         }
         sqlite3_finalize(stmt);
