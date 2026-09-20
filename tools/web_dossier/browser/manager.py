@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-LOGIN_WAIT_TIMEOUT_SECONDS = 20 * 60   # the user gets 20 minutes, no loop
+LOGIN_WAIT_TIMEOUT_SECONDS = float(os.environ.get("PATX_LOGIN_WAIT", str(20 * 60)))
 STEP_TIMEOUT_MS = 30_000
 
 
@@ -43,52 +43,149 @@ class BrowserManager:
         self.profile_dir = Path(profile_dir) if profile_dir else default_profile_dir(provider)
         self.debug_root = Path(debug_root)
         self._pw = None
+        self._browser = None
         self._context = None
         self._page = None
+        self._spawned = None
 
     # ---- lifecycle -----------------------------------------------------
-    def _launch_channel(self):
-        """Prefer browsers already installed on the machine (Chrome, then
-        Edge - preinstalled on Windows) over Playwright's own Chromium build.
-        No downloads, no version-pinned 300 MB cache. Falls back to the
-        bundled build for portable/offline packages that ship one."""
+    def _chrome_candidates(self):
+        """Real browsers installed on this machine, most preferred first.
+        The executable may be overridden with PATX_CHROME / CPQUERY_CHROME."""
         import sys
-        last_error = None
-        channels = ["chrome", "msedge"]
+        override = os.environ.get("PATX_CHROME") or os.environ.get("CPQUERY_CHROME")
+        if override:
+            return [override]
+        if sys.platform.startswith("win"):
+            return [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            ]
         if sys.platform == "darwin":
-            channels = ["chrome"]          # no Edge on locked-down macOS
-        for channel in channels:
+            return [
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            ]
+        return ["google-chrome", "chromium-browser", "chromium", "microsoft-edge"]
+
+    def _attach(self, port, timeout_ms=2000):
+        self._browser = self._pw.chromium.connect_over_cdp(
+            f"http://127.0.0.1:{port}", timeout=timeout_ms)
+        self._context = self._browser.contexts[0] if self._browser.contexts else             self._browser.new_context()
+        self._adopt_page()
+        return True
+
+    def _adopt_page(self):
+        """Prefer the tab actually on the cpquery origin; the SPA and the
+        identity platform open several tabs and the spawned browser starts
+        with a blank one."""
+        pages = [p for p in self._context.pages if not p.is_closed()]
+        for p in pages:
             try:
-                self._context = self._pw.chromium.launch_persistent_context(
-                    str(self.profile_dir), headless=self.headless, channel=channel)
-                return True
-            except Exception as exc:       # channel not installed
-                last_error = exc
+                if "cpquery" in p.url:
+                    self._page = p
+                    return
+            except Exception:
+                continue
+        for p in pages:
+            try:
+                if p.url and p.url != "about:blank":
+                    self._page = p
+                    return
+            except Exception:
+                continue
+        self._page = pages[-1] if pages else self._context.new_page()
+
+    def has_cpquery_token(self) -> bool:
+        """True when the adopted tab sits on the cpquery origin with an
+        ACCESS_TOKEN - the only state that counts as logged in."""
         try:
-            self._context = self._pw.chromium.launch_persistent_context(
-                str(self.profile_dir), headless=self.headless)
-            return True
+            if "cpquery" not in self._page.url:
+                return False
+            return bool(self._page.evaluate("localStorage.getItem('ACCESS_TOKEN')"))
         except Exception:
-            raise last_error
+            return False
+
+    def _spawn_and_attach(self):
+        """Launch a REAL browser ourselves with a debug port, then attach via
+        CDP - identical to how the field-tested takeover works. The browser
+        carries no automation flags (navigator.webdriver stays false, no
+        --enable-automation), which is the only shape the Ruishu-protected
+        site serves; a Playwright-spawned browser gets blocked."""
+        import subprocess
+        import sys
+        import time as _time
+        import socket as _socket
+        exe_found = None
+        for exe in self._chrome_candidates():
+            if os.path.isfile(exe):
+                exe_found = exe
+                break
+            from shutil import which
+            if which(exe):
+                exe_found = exe
+                break
+        if exe_found is None:
+            return False
+        for port in range(9333, 9341):
+            with _socket.socket() as probe:
+                if probe.connect_ex(("127.0.0.1", port)) == 0:
+                    continue          # occupied by something else
+            self._spawned = subprocess.Popen(
+                [exe_found, f"--remote-debugging-port={port}",
+                 f"--user-data-dir={self.profile_dir}",
+                 "--no-first-run", "--no-default-browser-check", "about:blank"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = _time.monotonic() + 20
+            while _time.monotonic() < deadline:
+                try:
+                    return self._attach(port, timeout_ms=3000)
+                except Exception:
+                    _time.sleep(0.5)
+            return False
+        return False
 
     def launch(self):
-        if self._context is not None:
+        if self._page is not None:
             return True
         from playwright.sync_api import sync_playwright
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
-        self._launch_channel()
-        self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
+        # 1) a browser from a previous run may still be up with our profile -
+        #    attach to it (keeps the logged-in session warm)
+        for port in range(9333, 9341):
+            try:
+                return self._attach(port, timeout_ms=1500)
+            except Exception:
+                continue
+        # 2) spawn a real browser and attach (takeover mode)
+        if self._spawn_and_attach():
+            return True
+        # 3) last resort: Playwright's bundled Chromium (works for friendly
+        #    sites and fixtures; the Ruishu-protected site will refuse it)
+        self._context = self._pw.chromium.launch_persistent_context(
+            str(self.profile_dir), headless=self.headless)
+        self._adopt_page()
         return True
 
     def close(self):
-        for closer in (self._context, self._pw):
+        # Detach first; then close a browser we spawned ourselves (the login
+        # session lives in the profile dir, so closing keeps it).
+        for closer in (self._browser, self._pw):
             try:
                 if closer is not None:
                     closer.close()
             except Exception:
                 pass
-        self._context = self._pw = self._page = None
+        if self._spawned is not None:
+            try:
+                self._spawned.terminate()
+            except Exception:
+                pass
+        self._browser = self._context = self._pw = self._page = None
+        self._spawned = None
 
     # ---- pages ---------------------------------------------------------
     def open_page(self, url: str, cancel) -> Optional[object]:
@@ -123,32 +220,77 @@ class BrowserManager:
         return False
 
     # ---- login -----------------------------------------------------------
-    def ensure_login(self, url: str, is_logged_in_fn, cancel) -> object:
-        """Opens a VISIBLE browser at the login page and waits until the page
-        looks authenticated. The user types credentials/captchas themselves;
-        we only poll the page state - no password ever passes through us."""
+    def ensure_login(self, url: str, is_logged_in_fn, cancel,
+                     login_entry_selectors=()) -> object:
+        """Opens a VISIBLE browser and waits until the user completes their
+        own login. The QR scan happens on a SEPARATE identity domain and may
+        land the session on any tab, so every tab is polled. We only click
+        the login ENTRY (navigation); credentials/captcha stay with the user.
+        No password ever passes through us."""
         from ..models import ResultCode
-        was_headless = self.headless
-        self.headless = False   # authentication always happens headful
+        try:
+            self.launch()
+        except Exception:
+            return ResultCode.NETWORK_ERROR
+        if is_logged_in_fn(self._page):
+            return ResultCode.OK
         try:
             page = self.open_page(url, cancel)
-            if page is None:
-                return ResultCode.NETWORK_ERROR
-            deadline = time.monotonic() + LOGIN_WAIT_TIMEOUT_SECONDS
-            while time.monotonic() < deadline:
-                if cancel is not None and cancel.is_set():
-                    return ResultCode.TEMPORARY_ERROR if not is_logged_in_fn(
-                        page.content()) else ResultCode.OK
+        except Exception:
+            page = None
+        if page is None:
+            return ResultCode.NETWORK_ERROR
+
+        # navigate to the identity login (user takes it from there)
+        for sel in login_entry_selectors:
+            try:
+                loc = page.locator(sel)
+                if loc.count() and loc.first.is_visible():
+                    loc.first.click(timeout=5000)
+                    page.wait_for_timeout(2000)
+                    break
+            except Exception:
+                continue
+
+        deadline = time.monotonic() + LOGIN_WAIT_TIMEOUT_SECONDS
+        debug = os.environ.get("PATX_LOGIN_DEBUG") == "1"
+        last_shot = 0.0
+        n = 0
+        while time.monotonic() < deadline:
+            if cancel is not None and cancel.is_set():
+                return ResultCode.TEMPORARY_ERROR
+            try:
+                pages = [p for p in self._context.pages if not p.is_closed()]
+            except Exception:
+                pages = []
+            if debug:
+                n += 1
+                if n % 2 == 1:   # every other poll (~6s): state line
+                    try:
+                        print("[login-wait] tabs: " + " | ".join(
+                            (p.url or "?")[:60] for p in pages), file=sys.stderr, flush=True)
+                        for p in pages:
+                            if "cpquery" in (p.url or ""):
+                                keys = p.evaluate("Object.keys(localStorage).join(',')")
+                                print(f"[login-wait] cpquery localStorage keys: {keys}",
+                                      file=sys.stderr, flush=True)
+                    except Exception:
+                        pass
+                if time.monotonic() - last_shot > 20:
+                    last_shot = time.monotonic()
+                    try:
+                        self.capture_debug_artifacts(self._page, "LOGIN_WAIT", "poll")
+                    except Exception:
+                        pass
+            for p in pages:
                 try:
-                    if is_logged_in_fn(page.content()):
+                    if is_logged_in_fn(p):
+                        self._page = p      # adopt the authenticated tab
                         return ResultCode.OK
                 except Exception:
-                    pass
-                time.sleep(3)
-            return ResultCode.AUTH_REQUIRED
-        finally:
-            # keep headful for this session; next provider start may go headless
-            self.headless = was_headless
+                    continue
+            time.sleep(3)
+        return ResultCode.AUTH_REQUIRED
 
     # ---- diagnostics -------------------------------------------------------
     def capture_debug_artifacts(self, page, error_code: str, case_no: str):

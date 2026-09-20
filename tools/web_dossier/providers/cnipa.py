@@ -434,18 +434,43 @@ class CNIPAWebProvider(DossierProvider):
         page = self._manager.open_page(BASE_URL, cancel)
         if page is None:
             return ResultCode.NETWORK_ERROR
+        try:
+            page.wait_for_timeout(3000)   # let the SPA settle / redirect
+        except Exception:
+            pass
+        if self._manager.has_cpquery_token():
+            return ResultCode.OK
+        try:
+            for p in self._manager._context.pages:
+                if not p.is_closed() and "cpquery" in p.url:
+                    if p.evaluate("localStorage.getItem('ACCESS_TOKEN')"):
+                        self._manager._page = p
+                        return ResultCode.OK
+        except Exception:
+            pass
         html = page.content()
         if looks_blocked(html):
             return ResultCode.RATE_LIMITED
-        if looks_like_login_page(html) and not looks_logged_in(html):
-            return ResultCode.AUTH_REQUIRED
-        return ResultCode.OK
+        return ResultCode.AUTH_REQUIRED
 
     def ensure_login(self, cancel) -> ResultCode:
         """Visible browser; the user does their own login/captcha."""
         if self._fixture_dir.name:
             return ResultCode.OK   # fixture mode is always "logged in"
-        return self._manager.ensure_login(BASE_URL, looks_logged_in, cancel)
+
+        def _done(page) -> bool:
+            # Only the cpquery origin holding an ACCESS_TOKEN counts as
+            # logged in - the identity platform's post-scan page does not.
+            try:
+                if "cpquery" not in page.url:
+                    return False
+                return bool(page.evaluate("localStorage.getItem('ACCESS_TOKEN')"))
+            except Exception:
+                return False
+
+        return self._manager.ensure_login(
+            BASE_URL, _done, cancel,
+            login_entry_selectors=("text=自然人登录", "text=登录", "text=请登录"))
 
     # ---- case resolution --------------------------------------------------
     def resolve_case(self, application_number: str, publication_number: str,
