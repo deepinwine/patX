@@ -422,6 +422,19 @@ int MigrateNotesPrefixesToColumns(sqlite3* db) {
     return migrated_fields;
 }
 
+bool ApplyV3ToV4(sqlite3* db) {
+    // Phase-2 dossier download bookkeeping: where the PDF/PNG landed.
+    if (!HasColumn(db, "prosecution_documents", "local_path") &&
+        !Exec(db, "ALTER TABLE prosecution_documents ADD COLUMN local_path TEXT;")) {
+        return false;
+    }
+    if (!HasColumn(db, "prosecution_documents", "downloaded_at") &&
+        !Exec(db, "ALTER TABLE prosecution_documents ADD COLUMN downloaded_at INTEGER DEFAULT 0;")) {
+        return false;
+    }
+    return true;
+}
+
 SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_path) {
     SchemaMigrationResult result;
     if (!db) {
@@ -557,6 +570,33 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
             }
             version = 3;
             PATX_LOG_INFO("Schema migration v2 -> v3 committed");
+        } else if (version == 3) {
+            PATX_LOG_INFO("Applying schema migration v3 -> v4");
+            if (!Exec(db, "BEGIN TRANSACTION;", &result.error)) {
+                result.ok = false;
+                return result;
+            }
+            if (!ApplyV3ToV4(db)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v3->v4 migration failed (rolled back)";
+                return result;
+            }
+            if (!HasColumn(db, "prosecution_documents", "local_path")) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v3->v4 verification failed (rolled back)";
+                return result;
+            }
+            if (!Exec(db, "DELETE FROM schema_info;", &result.error) ||
+                !Exec(db, "INSERT INTO schema_info (version) VALUES (4);", &result.error) ||
+                !Exec(db, "COMMIT;", &result.error)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                return result;
+            }
+            version = 4;
+            PATX_LOG_INFO("Schema migration v3 -> v4 committed");
         } else {
             result.ok = false;
             result.error = "unknown schema version " + std::to_string(version);

@@ -258,6 +258,8 @@ void Database::InitTables() {
             fingerprint TEXT,
             first_seen_at INTEGER,
             last_seen_at INTEGER,
+            local_path TEXT,
+            downloaded_at INTEGER DEFAULT 0,
             raw_metadata TEXT,
             UNIQUE (source, application_number, fingerprint)
         )
@@ -1758,4 +1760,11 @@ bool Database::UpdateOASyncFields(int oa_id, const std::string& issue_date_if_em
     }
     sql += " WHERE id = " + std::to_string(oa_id);
     return Execute(sql);
+}
+
+bool Database::UpdateProsecutionDocumentDownload(int document_id, const std::string& local_path) {
+    return Execute("UPDATE prosecution_documents SET local_path = '" +
+                   EscapeString(local_path) + "', downloaded_at = " +
+                   std::to_string(static_cast<long long>(time(nullptr))) +
+                   " WHERE id = " + std::to_string(document_id));
 }

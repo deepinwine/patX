@@ -17,7 +17,7 @@ namespace patx {
 
 // Bump when adding a migration step. Fresh databases jump straight to this
 // version; existing databases step up one version at a time.
-inline constexpr int kSchemaVersionCurrent = 3;
+inline constexpr int kSchemaVersionCurrent = 4;
 
 struct SchemaMigrationResult {
     bool ok = true;

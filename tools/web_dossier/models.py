@@ -142,6 +142,8 @@ class ProsecutionDocument:
     download_available: bool = False
     confidence: Confidence = Confidence.HIGH
     oa_ordinal: int = 0
+    ds: str = ""                         # cpquery list kind (TZS/ZJWJ/SQWJ)
+    wenjiandm: str = ""                  # cpquery document code
 
     def to_dict(self) -> dict:
         return {
@@ -160,6 +162,8 @@ class ProsecutionDocument:
             "download_available": self.download_available,
             "confidence": self.confidence.value,
             "oa_ordinal": self.oa_ordinal,
+            "ds": self.ds,
+            "wenjiandm": self.wenjiandm,
             "fingerprint": self.fingerprint_value(),
         }
 

@@ -207,6 +207,8 @@ bool Manager::ParseCaseResult(const std::string& json_body, RemoteCaseResult& ou
                 doc.fingerprint = d.value("fingerprint", "");
                 doc.confidence = d.value("confidence", "HIGH");
                 doc.oa_ordinal = d.value("oa_ordinal", 0);
+                doc.ds = d.value("ds", "");
+                doc.wenjiandm = d.value("wenjiandm", "");
                 out.documents.push_back(std::move(doc));
             }
         }
@@ -225,6 +227,8 @@ bool Manager::ParseCaseResult(const std::string& json_body, RemoteCaseResult& ou
             out.latest_oa.fingerprint = lo.value("fingerprint", "");
             out.latest_oa.confidence = lo.value("confidence", "HIGH");
             out.latest_oa.oa_ordinal = lo.value("oa_ordinal", 0);
+            out.latest_oa.ds = lo.value("ds", "");
+            out.latest_oa.wenjiandm = lo.value("wenjiandm", "");
         }
         return true;
     } catch (const std::exception&) {
@@ -252,6 +256,7 @@ CaseSyncReport Manager::ApplyRemoteResult(const Patent& patent, const RemoteCase
     std::string app_no = remote.resolved_application_number.empty()
                              ? patent.application_number
                              : remote.resolved_application_number;
+    int latest_oa_doc_id = 0;
     for (const auto& d : remote.documents) {
         ProsecutionDocumentRecord rec;
         rec.patent_id = patent.id;
@@ -269,8 +274,12 @@ CaseSyncReport Manager::ApplyRemoteResult(const Patent& patent, const RemoteCase
         rec.download_available = d.download_available;
         rec.fingerprint = d.fingerprint;
         bool created = false;
-        db_.UpsertProsecutionDocument(rec, &created);
+        int doc_row = db_.UpsertProsecutionDocument(rec, &created);
         if (created) report.documents_new++;
+        if (remote.has_latest_oa && !remote.latest_oa.fingerprint.empty() &&
+            remote.latest_oa.fingerprint == d.fingerprint) {
+            latest_oa_doc_id = doc_row;   // remember for the download step
+        }
     }
     report.documents_total = static_cast<int>(remote.documents.size());
 
@@ -345,6 +354,45 @@ CaseSyncReport Manager::ApplyRemoteResult(const Patent& patent, const RemoteCase
                     report.code = ResultCode::NewOfficeAction;
                     report.oa_created_id = id;
                     report.message = "发现新的审查意见: " + canonical + " @ " + oa_doc.official_date;
+
+                    // Phase 2: fetch the notice itself. Strictly optional -
+                    // the OA is already recorded; a download failure only
+                    // annotates the report.
+                    if (!oa_doc.remote_document_id.empty()) {
+                        std::string folder = db_.GetConfig("web_dossier_folder");
+                        if (folder.empty()) folder = "data/dossiers/CN";
+                        json dl_args;
+                        dl_args["provider"] = "cnipa";
+                        dl_args["application_number"] = app_no;
+                        dl_args["rid"] = oa_doc.remote_document_id;
+                        dl_args["ds"] = oa_doc.ds.empty() ? "TZS" : oa_doc.ds;
+                        dl_args["wenjiandm"] = oa_doc.wenjiandm.empty() ? "100000" : oa_doc.wenjiandm;
+                        dl_args["official_date"] = oa_doc.official_date;
+                        dl_args["title"] = canonical;
+                        dl_args["dest_dir"] = folder;
+                        std::string dl_resp;
+                        if (Rpc("download_document", dl_args.dump(), dl_resp)) {
+                            try {
+                                auto dl = json::parse(dl_resp);
+                                if (dl.value("ok", false)) {
+                                    report.downloaded_path = dl.value("saved_path", "");
+                                    if (latest_oa_doc_id > 0 && !report.downloaded_path.empty()) {
+                                        db_.UpdateProsecutionDocumentDownload(
+                                            latest_oa_doc_id, report.downloaded_path);
+                                    }
+                                    report.message += "，PDF已下载: " + report.downloaded_path;
+                                } else {
+                                    report.message += "（PDF下载失败: " +
+                                                      dl.value("code", "") + " " +
+                                                      dl.value("message", "") + "）";
+                                }
+                            } catch (...) {
+                                report.message += "（PDF下载响应解析失败）";
+                            }
+                        } else {
+                            report.message += "（PDF下载未执行：sidecar 通信失败）";
+                        }
+                    }
                 }
             }
         }

@@ -1,0 +1,13 @@
+{
+  "code": 200,
+  "data": {
+    "ossLujingList": [
+      {"osslujing": "tzs/2024/rid-tzs-2/000001.PNG", "timestamp": "1789000000", "sign": "abc==", "isDN": true},
+      {"osslujing": "tzs/2024/rid-tzs-2/000002.PNG", "timestamp": "1789000000", "sign": "def==", "isDN": false},
+      {"osslujing": "tzs/2024/rid-tzs-2/000003.PNG", "timestamp": "1789000000", "sign": "ghi==", "isDN": false}
+    ],
+    "wenjianhzm": "PNG",
+    "ds": "TZS",
+    "wenjiandm": "100000"
+  }
+}

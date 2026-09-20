@@ -66,6 +66,8 @@ struct RemoteDocument {
     std::string fingerprint;
     std::string confidence;          // HIGH / MEDIUM / LOW
     int oa_ordinal = 0;              // 1/2/3.. for 第N次审查意见通知书
+    std::string ds;                  // cpquery list kind (TZS/ZJWJ)
+    std::string wenjiandm;           // cpquery document code
 };
 
 struct CaseSyncReport {
@@ -80,6 +82,7 @@ struct CaseSyncReport {
     int documents_new = 0;           // newly stored prosecution_documents
     int oa_created_id = 0;           // oa_records.id when a new OA was inserted
     bool date_conflict = false;      // existing OA flagged, needs the user
+    std::string downloaded_path;     // set when the OA PDF was fetched (Phase 2)
 };
 
 struct BatchSummary {

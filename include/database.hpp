@@ -333,6 +333,8 @@ public:
     // Dedup key: (source, application_number, fingerprint). Sets *created
     // when the row is new; otherwise only last_seen_at is refreshed.
     int UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* created = nullptr);
+    // Records where a downloaded dossier file landed (schema v4 columns).
+    bool UpdateProsecutionDocumentDownload(int document_id, const std::string& local_path);
     bool UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at);
     bool UpsertDossierSyncState(const DossierSyncState& state);
     std::vector<DossierSyncState> GetDossierSyncStates(int limit = 200);

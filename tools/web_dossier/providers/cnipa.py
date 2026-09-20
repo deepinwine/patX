@@ -55,7 +55,11 @@ BASE_URL = os.environ.get("PATX_CNIPA_BASE_URL",
 # cpquery JSON list APIs (page-context fetch; see module docstring)
 API_TZS = "/api/view/gn/scxx/tzs"      # 通知书（审查意见/授权/驳回…）
 API_ZJWJ = "/api/view/gn/scxx/zjwj"    # 中间文件（意见陈述/补正/替换文件…）
+API_FILE_INFOS = "/api/view/gn/fetch-file-infos"        # 案卷页清单
+API_FILE_PAGE = "/api/pcshoss/view/fetch-file"          # 页本体（OSS 签名 URL）
 LIST_RETRY_PAUSE_SECONDS = 7           # field-tested: transient blocks clear
+
+DS_LABELS = {"TZS": "通知书", "ZJWJ": "中间文件", "SQWJ": "申请文件"}
 
 # Markers of the login wall vs an authenticated page (multi-fallback; the
 # QR-login page exposes label.title-item-btn and button.qrImg per the
@@ -263,6 +267,8 @@ def parse_cpquery_list_response(bodies, application_number="", publication_numbe
                 download_available=bool(add.get("rid")),
                 confidence=Confidence.HIGH if date else Confidence.MEDIUM,
                 oa_ordinal=ordinal,
+                ds=str(row.get("ds") or add.get("ds") or ""),
+                wenjiandm=str(add.get("wenjiandm") or ""),
             ))
     if not docs:
         return SyncOutcome(code=ResultCode.PAGE_STRUCTURE_CHANGED,
@@ -287,6 +293,93 @@ _PAGE_FETCH_JS = """async (payload) => {
     });
     const text = await resp.text();
     return {status: resp.status, text: text.slice(0, 500000)};
+}"""
+
+
+
+# ---------------------------------------------------------------------------
+# Document download (pure helpers, unit-tested)
+# ---------------------------------------------------------------------------
+
+def build_fetch_file_url(params: dict) -> str:
+    """Manual concatenation on purpose: URLSearchParams would encode the '/'
+    characters inside osslujing as %2F, which 404s on the OSS endpoint
+    (field-tested pitfall). Values here contain no reserved characters."""
+    parts = []
+    for key in ("osslujing", "wenjianhzm", "timestamp", "sign", "isDN",
+                "ds", "wenjiandm"):
+        value = params.get(key)
+        if value is not None:
+            parts.append(f"{key}={value}")
+    return API_FILE_PAGE + "?" + "&".join(parts)
+
+
+def sniff_format(data: bytes) -> str:
+    """The manifest's wenjianhzm lies (says PNG, body is PDF): trust the
+    magic bytes instead."""
+    if data[:4] == b"%PDF":
+        return "pdf"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    return "unknown"
+
+
+def build_document_filename(official_date: str, ds: str, title: str,
+                            suffix: str, exists_fn, pages=None) -> str:
+    """'<日期>_<类别>_<名称>_<N>页.ext', _2/_3 on duplicate display names so
+    every dossier record keeps its own file."""
+    date = official_date or "无日期"
+    label = DS_LABELS.get(ds, ds or "文件")
+    safe = re.sub(r'[\\/:*?"<>| ]+', "_", title).strip("_")[:60] or "文档"
+    base = f"{date}_{label}_{safe}" + (f"_{pages}页" if pages else "")
+    name = base + suffix
+    n = 2
+    while exists_fn(name):
+        name = f"{base}_{n}{suffix}"
+        n += 1
+    return name
+
+
+def parse_file_infos(body: str):
+    """Parses a fetch-file-infos response into (page_params, wenjianhzm).
+    page_params: list of dicts for build_fetch_file_url. Errors return
+    (None, error_message)."""
+    if looks_like_intercept(body):
+        return None, "页清单返回拦截页/空响应（瞬时）"
+    try:
+        import json as _json
+        payload = _json.loads(body)
+    except ValueError:
+        return None, "页清单响应不是 JSON"
+    data = payload.get("data") or {}
+    paths = data.get("ossLujingList") or []
+    if not paths:
+        return None, "页清单为空"
+    pages = []
+    for p in paths:
+        pages.append({
+            "osslujing": p.get("osslujing", ""),
+            "timestamp": p.get("timestamp", ""),
+            "sign": p.get("sign", ""),
+            "isDN": "true" if p.get("isDN") else "false",
+            "wenjianhzm": data.get("wenjianhzm", ""),
+            "ds": data.get("ds", ""),
+            "wenjiandm": data.get("wenjiandm", ""),
+        })
+    return pages, data.get("wenjianhzm", "")
+
+
+# Binary in-page fetch: returns base64 (page bodies are PDF/PNG streams).
+_PAGE_BINARY_JS = """async (payload) => {
+    const resp = await fetch(payload.url, {method: 'GET'});
+    const buf = await resp.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return {status: resp.status, b64: btoa(binary)};
 }"""
 
 def looks_like_login_page(html: str) -> bool:
@@ -495,16 +588,20 @@ class CNIPAWebProvider(DossierProvider):
         except Exception:
             return False
 
-    def _page_fetch_list(self, page, api: str, app13: str, cancel):
+    def _page_fetch_list(self, page, api: str, app13: str, cancel, extra=None):
         """One in-page fetch of a list API; None on intercept/empty/failure."""
         if cancel is not None and cancel.is_set():
             return None
+        if api == API_FILE_INFOS:
+            body = {"zhuanlisqh": app13, "anjianbh": ""}
+            body.update(extra or {})
+        else:
+            body = {"zhuanlisqh": app13, "anjianbh": "",
+                    "nodeId": "aj_gk_scxx_" + ("tzs" if api == API_TZS else "zjwj")}
         try:
             result = page.evaluate(
                 _PAGE_FETCH_JS,
-                {"path": api,
-                 "body": {"zhuanlisqh": app13, "anjianbh": "",
-                          "nodeId": "aj_gk_scxx_" + ("tzs" if api == API_TZS else "zjwj")}})
+                {"path": api, "body": body})
         except Exception:
             return None
         body = (result or {}).get("text", "")
@@ -513,6 +610,100 @@ class CNIPAWebProvider(DossierProvider):
         return body
 
     def download_document(self, document: ProsecutionDocument, dest_path: str,
-                          cancel) -> ResultCode:
-        # Phase 2; metadata sync works without it by design.
-        return ResultCode.UNSUPPORTED_JURISDICTION
+                          cancel):
+        """Downloads one dossier document into dest_path (a directory).
+
+        Metadata sync never depends on this. Returns (ResultCode, info dict)
+        where info carries saved_path / page_count / message for the caller.
+        """
+        info = {"saved_path": "", "page_count": 0, "message": ""}
+        app13 = api_application_number(document.application_number)
+        rid = document.remote_document_id
+        if not app13 or not rid:
+            return ResultCode.RESOLVE_FAILED, {**info, "message": "缺少申请号或文档 rid"}
+
+        if self._fixture_dir.name:
+            # Fixtures carry no binary payloads; live-only by design.
+            return ResultCode.UNSUPPORTED_JURISDICTION, {**info, "message": "fixture 模式不提供下载"}
+
+        import base64
+        from pathlib import Path as _Path
+        ds = document.ds or "TZS"
+        wenjiandm = document.wenjiandm or "100000"
+        with self._lock:
+            self._pace()
+            page = self._manager.open_page(BASE_URL, cancel)
+            if page is None:
+                return ResultCode.NETWORK_ERROR, {**info, "message": "站点打开失败"}
+            try:
+                body = None
+                for attempt in (1, 2):   # same transient-intercept discipline
+                    body = self._page_fetch_list(page, API_FILE_INFOS, app13, cancel,
+                                                 extra={"rid": rid, "ds": ds,
+                                                        "wenjiandm": wenjiandm})
+                    if body is not None:
+                        break
+                    if attempt == 1:
+                        time.sleep(LIST_RETRY_PAUSE_SECONDS)
+                if body is None:
+                    return ResultCode.RATE_LIMITED, {**info, "message": "页清单请求被拦截"}
+                pages, err = parse_file_infos(body)
+                if pages is None:
+                    return ResultCode.PAGE_STRUCTURE_CHANGED, {**info, "message": err}
+
+                blobs = []
+                for p in pages:
+                    if cancel is not None and cancel.is_set():
+                        return ResultCode.TEMPORARY_ERROR, {**info, "message": "已取消"}
+                    url = BASE_URL + build_fetch_file_url(p)
+                    try:
+                        result = page.evaluate(_PAGE_BINARY_JS, {"url": url})
+                        data = base64.b64decode((result or {}).get("b64", "") or "")
+                    except Exception:
+                        data = b""
+                    if not data:
+                        return ResultCode.TEMPORARY_ERROR, \
+                            {**info, "message": "文档页下载失败（瞬时），可重试"}
+                    blobs.append(data)
+            except Exception as exc:   # noqa: BLE001
+                return ResultCode.TEMPORARY_ERROR, \
+                    {**info, "message": f"下载交互失败: {type(exc).__name__}"}
+
+        dest = _Path(dest_path)
+        dest.mkdir(parents=True, exist_ok=True)
+        fmt = sniff_format(blobs[0])
+        if fmt == "pdf":
+            name = build_document_filename(
+                document.official_date, ds, document.document_title, ".pdf",
+                lambda n: (dest / n).exists(), pages=len(blobs))
+            out = dest / name
+            out.write_bytes(blobs[0] if len(blobs) == 1 else b"".join(blobs))
+            return ResultCode.OK, {**info, "saved_path": str(out),
+                                   "page_count": len(blobs), "message": ""}
+        if fmt == "png":
+            try:
+                import img2pdf
+                name = build_document_filename(
+                    document.official_date, ds, document.document_title, ".pdf",
+                    lambda n: (dest / n).exists(), pages=len(blobs))
+                out = dest / name
+                out.write_bytes(img2pdf.convert(blobs))
+                return ResultCode.OK, {**info, "saved_path": str(out),
+                                       "page_count": len(blobs), "message": ""}
+            except ImportError:
+                # Without img2pdf keep the PNG pages rather than failing the
+                # whole download; the caller reports what was saved.
+                saved = []
+                for i, blob in enumerate(blobs, 1):
+                    name = build_document_filename(
+                        document.official_date, ds,
+                        f"{document.document_title}_{i:02d}", ".png",
+                        lambda n: (dest / n).exists())
+                    out = dest / name
+                    out.write_bytes(blob)
+                    saved.append(out.name)
+                return ResultCode.OK, {**info, "saved_path": str(dest / saved[0]),
+                                       "page_count": len(blobs),
+                                       "message": "img2pdf 未安装，PNG 分页保存"}
+        return ResultCode.PAGE_STRUCTURE_CHANGED, \
+            {**info, "message": f"未知文件格式（魔数不匹配），共 {len(blobs)} 页"}
