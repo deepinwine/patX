@@ -44,3 +44,16 @@ def test_provider_plumbing():
     assert p.check_auth(None) == ResultCode.RESOLVE_FAILED
     out = p.list_documents("x", "y", None)
     assert out.code == ResultCode.UNSUPPORTED_JURISDICTION
+
+
+def test_family_parsing_against_live_response():
+    # Regression fixture captured from the real OPS gateway (EP1000000A1),
+    # namespace-prefixed keys and all.
+    obj = json.loads((FIXTURES / "family_ep1000000_real.json").read_text("utf-8"))
+    members = parse_family(obj)
+    assert len(members) == 6
+    ep = [m for m in members if m.authority == "EP"]
+    assert ep, "EP member missing"
+    assert ep[0].application_number == "EP99203729"
+    assert ep[0].application_date == "1999-11-08"
+    assert ep[0].publication_number == "EP1000000A1"

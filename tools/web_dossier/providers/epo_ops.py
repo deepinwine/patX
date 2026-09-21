@@ -29,6 +29,10 @@ from ..models import ResultCode
 from ..number_resolver import normalize_cn_identifier
 
 OPS_BASE = "https://ops.epo.org/3.2"
+_TOKEN_CACHE: dict = {}
+# Data endpoints live under /rest-services on the current gateway (auth does
+# not); verified live 2026-09 and cross-checked against patent-dev/epo-ops.
+DATA_BASE = OPS_BASE + "/rest-services"
 
 
 @dataclass
@@ -69,7 +73,8 @@ class EpoOpsProvider(DossierProvider):
                  base_url: str = OPS_BASE):
         self.key = consumer_key or ""
         self.secret = consumer_secret or ""
-        self.base = base_url.rstrip("/")
+        self.base = base_url.rstrip("/")           # auth base
+        self.data_base = self.base + "/rest-services"
         self._token = ""
         self._token_expiry = 0.0
         self.last_family: List[FamilyMember] = []
@@ -92,32 +97,46 @@ class EpoOpsProvider(DossierProvider):
     def _fetch_token(self) -> Optional[str]:
         if self._token and time.monotonic() < self._token_expiry:
             return self._token
+        # Module-level cache: the sidecar builds a fresh provider per request,
+        # and the token endpoint throttles frequent fetches - reuse the token
+        # across instances for the same credentials.
+        cached = _TOKEN_CACHE.get(self.key)
+        if cached and time.monotonic() < cached[1]:
+            self._token, self._token_expiry = cached
+            return self._token
         basic = base64.b64encode(f"{self.key}:{self.secret}".encode()).decode()
         body = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
-        req = urllib.request.Request(
-            self.base + "/auth/accesstoken", data=body,
-            headers={"Authorization": "Basic " + basic,
-                     "Content-Type": "application/x-www-form-urlencoded"})
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                payload = json.loads(resp.read().decode("utf-8", "replace"))
-            self._token = payload.get("access_token", "")
-            ttl = int(payload.get("expires_in", "1200") or 1200)
-            self._token_expiry = time.monotonic() + max(60, ttl - 120)
-            return self._token or None
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
+        for attempt in range(3):
+            req = urllib.request.Request(
+                self.base + "/auth/accesstoken", data=body,
+                headers={"Authorization": "Basic " + basic,
+                         "Content-Type": "application/x-www-form-urlencoded"})
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    payload = json.loads(resp.read().decode("utf-8", "replace"))
+                token = payload.get("access_token", "")
+                ttl = int(payload.get("expires_in", "1200") or 1200)
+                expiry = time.monotonic() + max(60, ttl - 120)
+                if token:
+                    self._token, self._token_expiry = token, expiry
+                    _TOKEN_CACHE[self.key] = (token, expiry)
+                return token or None
+            except urllib.error.HTTPError as exc:
+                if exc.code in (429, 500, 502, 503):
+                    time.sleep(2 ** attempt)
+                    continue
                 return None
-            return None
-        except Exception:
-            return None
+            except Exception:
+                time.sleep(1)
+                continue
+        return None
 
     def _get_json(self, path: str):
         """GET with bearer token, JSON accepted; (status, obj-or-None, raw)."""
         token = self._fetch_token()
         if not token:
             return 401, None, ""
-        url = self.base + path
+        url = self.data_base + path
         last_status = 0
         for attempt in range(3):
             req = urllib.request.Request(
@@ -144,25 +163,20 @@ class EpoOpsProvider(DossierProvider):
         if not epodoc:
             return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
                                message=f"无法识别公开号 {publication_number}")
-        status, obj, _ = self._get_json(
-            "/number-service/application/epodoc/" + urllib.parse.quote(epodoc))
-        if status == 404:
-            # Token OK but every service 404s = the app has no OPS product
-            # attached on the developer portal (only auth is routed).
-            return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
-                               message=f"EPO 数据服务 404：应用可能未订阅 OPS 产品"
-                                       f"（developers.epo.org → 你的应用 → Products 添加），"
-                                       f"或 {epodoc} 无记录")
-        if status != 200 or obj is None:
-            return SyncOutcome(code=ResultCode.NETWORK_ERROR,
-                               message=f"EPO 号码服务 HTTP {status}")
-        apps = parse_number_service(obj)
-        if not apps:
-            return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
-                               message=f"{epodoc} 未解析出申请号")
-        return SyncOutcome(code=ResultCode.OK,
-                           resolved_application_number=apps[0],
-                           message="; ".join(apps))
+        # number-service only accepts POST batches on the current gateway;
+        # the family response carries the same information (each member's
+        # application-reference), so resolve through it and skip the flaky
+        # service entirely.
+        out = self.family(publication_number)
+        if not out.ok:
+            return out
+        wanted = epodoc.upper()
+        for m in self.last_family:
+            if m.publication_number.upper() == wanted and m.application_number:
+                return SyncOutcome(code=ResultCode.OK,
+                                   resolved_application_number=m.application_number)
+        return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
+                           message=f"{epodoc} 未在同族中解析出申请号")
 
     def resolve_case(self, application_number: str, publication_number: str,
                      cancel) -> SyncOutcome:
@@ -227,6 +241,20 @@ def _walk(obj, key):
             yield from _walk(item, key)
 
 
+def _walk_keys(obj, keys):
+    """Like _walk but matches local names ignoring the XML namespace prefix
+    (live responses carry ops:family-member, fixtures may not)."""
+    suffixes = tuple(":" + k for k in keys)
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k in keys or k.endswith(suffixes):
+                yield v
+            yield from _walk_keys(v, keys)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from _walk_keys(item, keys)
+
+
 def _doc_ids(entry) -> List[dict]:
     ids = []
     for v in _walk(entry, "document-id"):
@@ -246,12 +274,20 @@ def _id_text(doc_id: dict) -> str:
     return f"{g('country')}{g('doc-number')}{g('kind')}"
 
 
+def _is_docdb(doc_id: dict) -> bool:
+    """The docdb discriminator moved between generations: fixtures use
+    @format, live responses use @document-id-type."""
+    return doc_id.get("@format") == "docdb" or \
+        doc_id.get("@document-id-type") == "docdb"
+
+
 def parse_number_service(obj) -> List[str]:
     """Extracts application numbers from a number-service response."""
     apps = []
     for doc in _walk(obj, "exchange-document"):
         for doc_id in _doc_ids(doc):
-            if doc_id.get("@format") == "epodoc" and str(
+            if (doc_id.get("@format") == "epodoc" or
+                    doc_id.get("@document-id-type") == "epodoc") and str(
                     doc_id.get("type", "")) != "publication":
                 text = _id_text(doc_id)
                 if text and text not in apps:
@@ -264,7 +300,7 @@ def parse_family(obj) -> List[FamilyMember]:
     contributes its earliest publication and its application reference."""
     members: List[FamilyMember] = []
     raw_members: List = []
-    for value in _walk(obj, "family-member"):
+    for value in _walk_keys(obj, ("family-member",)):
         if isinstance(value, list):
             raw_members.extend(value)
         else:
@@ -274,7 +310,7 @@ def parse_family(obj) -> List[FamilyMember]:
         refs = _walk(fm, "application-reference")
         for ref in refs:
             for doc_id in _doc_ids(ref):
-                if doc_id.get("@format") == "docdb":
+                if _is_docdb(doc_id):
                     def g(name, d=doc_id):
                         v = d.get(name)
                         if isinstance(v, dict):
@@ -282,16 +318,19 @@ def parse_family(obj) -> List[FamilyMember]:
                         return str(v) if v is not None else ""
                     member.authority = g("country")
                     member.application_number = g("country") + g("doc-number")
-                    date = ref.get("date") or doc_id.get("date")
+                    date = doc_id.get("date") or ref.get("date")
                     if isinstance(date, dict):
                         date = date.get("$")
-                    member.application_date = str(date or "")[:10]
+                    date = str(date or "")[:10]
+                    if len(date) == 8 and date.isdigit():   # 19991108 -> ISO
+                        date = date[:4] + "-" + date[4:6] + "-" + date[6:]
+                    member.application_date = date
                     break
             if member.application_number:
                 break
         pubs = []
         for doc_id in _doc_ids(fm):
-            if doc_id.get("@format") == "docdb":
+            if _is_docdb(doc_id):
                 pubs.append(_id_text(doc_id))
         if pubs:
             member.publication_number = pubs[0]
