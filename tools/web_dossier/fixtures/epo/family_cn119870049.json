@@ -1,0 +1,46 @@
+{
+  "ops:world-patent-data": {
+    "ops:family": {
+      "@authority": "CN",
+      "family-member": [
+        {
+          "publication-reference": {
+            "document-id": [
+              {"@format": "docdb", "country": {"$": "CN"}, "doc-number": {"$": "119870049"}, "kind": {"$": "A"}},
+              {"@format": "epodoc", "country": {"$": "CN"}, "doc-number": {"$": "119870049"}, "kind": {"$": "A"}}
+            ]
+          },
+          "application-reference": {
+            "@format": "docdb",
+            "document-id": {"@format": "docdb", "country": {"$": "CN"}, "doc-number": {"$": "202410123457"}, "kind": {"$": "A"}},
+            "date": {"$": "2024-01-19"}
+          }
+        },
+        {
+          "publication-reference": {
+            "document-id": [
+              {"@format": "docdb", "country": {"$": "US"}, "doc-number": {"$": "20240270309"}, "kind": {"$": "A1"}}
+            ]
+          },
+          "application-reference": {
+            "@format": "docdb",
+            "document-id": {"@format": "docdb", "country": {"$": "US"}, "doc-number": {"$": "18403211"}, "kind": {"$": "A"}},
+            "date": {"$": "2024-01-18"}
+          }
+        },
+        {
+          "publication-reference": {
+            "document-id": [
+              {"@format": "docdb", "country": {"$": "EP"}, "doc-number": {"$": "4412345"}, "kind": {"$": "A1"}}
+            ]
+          },
+          "application-reference": {
+            "@format": "docdb",
+            "document-id": {"@format": "docdb", "country": {"$": "EP"}, "doc-number": {"$": "24160000"}, "kind": {"$": "A"}},
+            "date": {"$": "2024-04-30"}
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "ops:world-patent-data": {
+    "exchange-documents": {
+      "exchange-document": [
+        {
+          "@country": "CN", "@doc-number": "119870049", "@kind": "A",
+          "application-reference": {
+            "document-id": [
+              {"@format": "epodoc", "country": {"$": "CN"}, "doc-number": {"$": "202410123457"}, "kind": {"$": "A"}}
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

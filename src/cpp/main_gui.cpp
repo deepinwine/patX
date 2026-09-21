@@ -240,7 +240,8 @@ private:
         ID_DOSSIER_SYNC_GRANTED,
         ID_DOSSIER_LOGIN,
         ID_DOSSIER_HISTORY,
-        ID_DOSSIER_ERRORS
+        ID_DOSSIER_ERRORS,
+        ID_EPO_FAMILY
     };
 
     // Toolbar buttons stored for language switching
@@ -293,6 +294,7 @@ private:
         tools_menu->Append(ID_SYNC, LANG_STR("&Sync with NAS", "NAS同步(&N)"));
         tools_menu->Append(ID_NAS_CONFIG, LANG_STR("NAS &Configuration...", "NAS配置(&C)..."));
         tools_menu->AppendSeparator();
+        tools_menu->Append(ID_EPO_FAMILY, LANG_STR("Patent &Family (EPO)...", "同族查询(&F) (EPO)..."));
         tools_menu->Append(ID_BACKUP, LANG_STR("&Backup Database", "备份数据库(&B)"));
         tools_menu->Append(ID_RESTORE, LANG_STR("&Restore Backup...", "恢复备份(&R)..."));
         tools_menu->AppendSeparator();
@@ -343,6 +345,7 @@ private:
         Bind(wxEVT_MENU, &PatXFrame::OnDossierLogin, this, ID_DOSSIER_LOGIN);
         Bind(wxEVT_MENU, &PatXFrame::OnDossierHistory, this, ID_DOSSIER_HISTORY);
         Bind(wxEVT_MENU, &PatXFrame::OnDossierErrors, this, ID_DOSSIER_ERRORS);
+        Bind(wxEVT_MENU, &PatXFrame::OnEpoFamily, this, ID_EPO_FAMILY);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(0); }, ID_THEME_LIGHT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(1); }, ID_THEME_DARK);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(2); }, ID_THEME_EYE);
@@ -2346,6 +2349,17 @@ private:
     void OnDossierLogin(wxCommandEvent&) { dossier_controller->Login(); }
     void OnDossierHistory(wxCommandEvent&) { dossier_controller->ShowHistory(); }
     void OnDossierErrors(wxCommandEvent&) { dossier_controller->ShowErrorCases(); }
+
+    void OnEpoFamily(wxCommandEvent&) {
+        // prefill from the selected patent when possible
+        std::string pub;
+        long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+        if (idx >= 0) {
+            Patent p = db->GetPatentById(static_cast<int>(patent_list->GetItemData(idx)));
+            pub = !p.publication_number.empty() ? p.publication_number : p.application_number;
+        }
+        dossier_controller->ShowFamily(pub);
+    }
 
     void OnExit(wxCommandEvent&) {
         PATX_LOG_INFO("patX shutting down");

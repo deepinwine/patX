@@ -134,6 +134,11 @@ public:
                          const std::function<bool(int, int, const std::string&)>& progress,
                          std::atomic<bool>& cancel);
 
+    // EPO OPS helpers (pure REST; credentials from the config table).
+    // epo_op: "resolve" | "family". Returns false on transport failure.
+    bool EpoCall(const std::string& epo_op, const std::string& publication_number,
+                 std::string& response);
+
     int check_interval_days() const;
     void set_check_interval_days(int days);
 

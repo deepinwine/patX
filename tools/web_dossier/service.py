@@ -99,6 +99,26 @@ def _op_sync_case(args, cancel):
     return response
 
 
+def _op_epo(args, cancel):
+    """epo_resolve / epo_family. Credentials come per-call from the C++ side
+    (local git-ignored config); they are used once and never logged."""
+    from web_dossier.providers.epo_ops import EpoOpsProvider
+    provider = EpoOpsProvider(args.get("consumer_key", ""), args.get("consumer_secret", ""))
+    op = args.get("epo_op", "")
+    if not provider.health_check():
+        return {"ok": False, "code": "RESOLVE_FAILED",
+                "message": "未配置 EPO consumer key/secret（developers.epo.org 注册应用获取）"}
+    if op == "resolve":
+        out = provider.resolve_publication(args.get("publication_number", ""))
+        return {"ok": out.ok, "code": out.code.value, "message": out.message,
+                "resolved_application_number": out.resolved_application_number}
+    if op == "family":
+        out = provider.family(args.get("publication_number", ""))
+        return {"ok": out.ok, "code": out.code.value, "message": out.message,
+                "members": [m.to_dict() for m in provider.last_family]}
+    return {"ok": False, "code": "TEMPORARY_ERROR", "message": f"unknown epo_op {op!r}"}
+
+
 def _op_download_document(args, cancel):
     provider, err = _get_provider(args.get("provider", "cnipa"))
     if err:
@@ -179,6 +199,8 @@ def main() -> int:
             run_op(_op_sync_case, args)
         elif op == "download_document":
             run_op(_op_download_document, args)
+        elif op == "epo":
+            run_op(_op_epo, args)
         else:
             send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
                   "message": f"unknown op: {op}"})

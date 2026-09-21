@@ -1,4 +1,5 @@
 #include "ui/web_dossier_dialogs.hpp"
+#include "ui/epo_family_dialog.hpp"
 
 #include <wx/filename.h>
 #include <wx/stdpaths.h>
@@ -414,6 +415,16 @@ void WebDossierController::OnBatchDone(wxThreadEvent& event) {
             UTF8_STR("CNIPA 登录状态已失效。\n点击对话框中的【打开浏览器登录】完成登录后重试。"),
             UTF8_STR("需要登录"), wxOK | wxICON_WARNING, parent_);
     }
+}
+
+void WebDossierController::ShowFamily(const std::string& publication) {
+    std::string error;
+    if (!EnsureManager(error)) {
+        wxMessageBox(wxString::FromUTF8(error.c_str()), UTF8_STR("EPO OPS"),
+                     wxOK | wxICON_ERROR, parent_);
+        return;
+    }
+    ShowEpoFamilyDialog(parent_, db_, *manager_, publication);
 }
 
 void WebDossierController::ShowHistory() {

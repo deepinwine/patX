@@ -171,6 +171,16 @@ bool Manager::Rpc(const std::string& op, const std::string& json_payload,
     return sidecar_->Call(req.dump(), timeout, response, no_cancel);
 }
 
+bool Manager::EpoCall(const std::string& epo_op, const std::string& publication_number,
+                      std::string& response) {
+    json args;
+    args["epo_op"] = epo_op;
+    args["publication_number"] = publication_number;
+    args["consumer_key"] = db_.GetConfig("epo_consumer_key");
+    args["consumer_secret"] = db_.GetConfig("epo_consumer_secret");
+    return Rpc("epo", args.dump(), response);
+}
+
 ResultCode Manager::Login(const std::string& provider, std::atomic<bool>& cancel) {
     std::string response;
     if (!Rpc("login", "{\"provider\":\"" + provider + "\"}", response)) {

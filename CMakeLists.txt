@@ -119,6 +119,7 @@ if(PATX_BUILD_GUI)
             src/cpp/ui/edit_dialogs.cpp
             src/cpp/web_dossier.cpp
             src/cpp/ui/web_dossier_dialogs.cpp
+            src/cpp/ui/epo_family_dialog.cpp
         )
         if(WIN32)
             set_target_properties(patx PROPERTIES WIN32_EXECUTABLE TRUE)

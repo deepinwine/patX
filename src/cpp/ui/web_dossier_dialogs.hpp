@@ -31,6 +31,8 @@ public:
     void SyncAllActive(bool include_granted);
     void Login();
     void ShowHistory();
+    // EPO OPS family lookup dialog (needs the sidecar for the REST relay).
+    void ShowFamily(const std::string& publication);
     void ShowErrorCases();
 
     // Called on the main thread after every finished batch (new OAs may have
