@@ -147,8 +147,12 @@ class EpoOpsProvider(DossierProvider):
         status, obj, _ = self._get_json(
             "/number-service/application/epodoc/" + urllib.parse.quote(epodoc))
         if status == 404:
+            # Token OK but every service 404s = the app has no OPS product
+            # attached on the developer portal (only auth is routed).
             return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
-                               message=f"EPO 号码服务无 {epodoc} 记录")
+                               message=f"EPO 数据服务 404：应用可能未订阅 OPS 产品"
+                                       f"（developers.epo.org → 你的应用 → Products 添加），"
+                                       f"或 {epodoc} 无记录")
         if status != 200 or obj is None:
             return SyncOutcome(code=ResultCode.NETWORK_ERROR,
                                message=f"EPO 号码服务 HTTP {status}")
