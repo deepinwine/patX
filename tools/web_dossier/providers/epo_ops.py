@@ -26,7 +26,7 @@ from typing import List, Optional
 from .base import DossierProvider, SyncOutcome
 
 from ..models import ResultCode
-from ..number_resolver import normalize_cn_identifier
+from ..number_resolver import api_application_number, normalize_cn_identifier
 
 OPS_BASE = "https://ops.epo.org/3.2"
 _TOKEN_CACHE: dict = {}
@@ -78,6 +78,8 @@ class EpoOpsProvider(DossierProvider):
         self._token = ""
         self._token_expiry = 0.0
         self.last_family: List[FamilyMember] = []
+        self.last_events: List[dict] = []
+        self.last_citations: List[str] = []
 
     # ---- auth ----------------------------------------------------------
     def health_check(self) -> bool:
@@ -204,6 +206,64 @@ class EpoOpsProvider(DossierProvider):
         self.last_family = members
         return SyncOutcome(code=ResultCode.OK,
                            message=f"同族 {len(members)} 件")
+
+
+    # ---- legal status (INPADOC) ------------------------------------------
+    def legal_status(self, application_number: str, publication_number: str = "") -> SyncOutcome:
+        """INPADOC events for the case (CN events included: 实审进入/驳回/
+        授权/年费等)。Any event newer than `since` (YYYY-MM-DD) counts as an
+        update signal. Results land in self.last_events."""
+        app13 = api_application_number(application_number)
+        if not app13:
+            epodoc = _epodoc_publication(publication_number)
+            if not epodoc:
+                return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
+                                   message="缺少可识别的申请号/公开号")
+            docdb = epodoc_to_docdb(epodoc)
+            path = "/legal/publication/docdb/" + urllib.parse.quote(docdb)
+        else:
+            path = "/legal/application/docdb/" + \
+                urllib.parse.quote(f"CN.{app13[:12]}.A")
+        status, obj, _ = self._get_json(path)
+        if status == 404:
+            self.last_events = []
+            return SyncOutcome(code=ResultCode.CASE_NOT_FOUND, message="EPO 无法律状态记录")
+        if status != 200 or obj is None:
+            return SyncOutcome(code=ResultCode.NETWORK_ERROR,
+                               message=f"EPO 法律状态 HTTP {status}")
+        events = parse_legal_events(obj)
+        self.last_events = events
+        if not events:
+            return SyncOutcome(code=ResultCode.OK, message="法律状态事件为空")
+        return SyncOutcome(code=ResultCode.OK,
+                           message=f"{len(events)} 条法律事件，最新 {events[0]['date']}")
+
+    # ---- cited documents (对比文件) ---------------------------------------
+    def citations(self, application_number: str, publication_number: str = "") -> SyncOutcome:
+        """DOCDB 引用文献（审查检索/对比文件）。Results in self.last_citations."""
+        app13 = api_application_number(application_number)
+        if app13:
+            path = "/published-data/application/docdb/" + \
+                urllib.parse.quote(f"CN.{app13[:12]}.A") + "/biblio"
+        else:
+            epodoc = _epodoc_publication(publication_number)
+            if not epodoc:
+                return SyncOutcome(code=ResultCode.RESOLVE_FAILED,
+                                   message="缺少可识别的申请号/公开号")
+            path = "/published-data/publication/docdb/" + \
+                urllib.parse.quote(epodoc_to_docdb(epodoc)) + "/biblio"
+        status, obj, _ = self._get_json(path)
+        if status == 404:
+            self.last_citations = []
+            return SyncOutcome(code=ResultCode.CASE_NOT_FOUND, message="EPO 无书目记录")
+        if status != 200 or obj is None:
+            return SyncOutcome(code=ResultCode.NETWORK_ERROR,
+                               message=f"EPO 书目 HTTP {status}")
+        cites = parse_citations(obj)
+        self.last_citations = cites
+        return SyncOutcome(code=ResultCode.OK,
+                           message=f"{len(cites)} 件引用文献" if cites else "无引用文献记录")
+
 
     # ---- DossierProvider plumbing (CNIPA does the OA dossier) ------------
     def list_documents(self, application_number: str, publication_number: str,
@@ -339,3 +399,46 @@ def parse_family(obj) -> List[FamilyMember]:
         if member.application_number or member.publication_number:
             members.append(member)
     return members
+
+
+def parse_legal_events(obj) -> List[dict]:
+    """INPADOC events from a /legal response. Each event dict carries
+    date/code/description; sorted newest first."""
+    events: List[dict] = []
+    for value in _walk_keys(obj, ("legal",)):
+        items = value if isinstance(value, list) else [value]
+        for e in items:
+            if not isinstance(e, dict) or "@code" not in e:
+                continue
+            date = ""
+            gazette = e.get("ops:L007EP")
+            if isinstance(gazette, dict):
+                date = str(gazette.get("$", ""))[:10]
+            if not date or date.startswith("0001"):
+                date = str(e.get("@dateMigr", ""))[:10]
+            events.append({
+                "date": date,
+                "code": str(e.get("@code", "")).strip(),
+                "description": str(e.get("@desc", "")).strip(),
+            })
+    events.sort(key=lambda e: e["date"], reverse=True)
+    return events
+
+
+def parse_citations(obj) -> List[str]:
+    """Docdb cited documents (对比文件) from a biblio response."""
+    cited: List[str] = []
+    for rc in _walk_keys(obj, ("references-cited",)):
+        for cid in _walk_keys(rc, ("citation",)):
+            items = cid if isinstance(cid, list) else [cid]
+            for c in items:
+                if not isinstance(c, dict):
+                    continue
+                for did_list in _walk_keys(c, ("document-id",)):
+                    dis = did_list if isinstance(did_list, list) else [did_list]
+                    for d in dis:
+                        if isinstance(d, dict) and _is_docdb(d):
+                            text = _id_text(d)
+                            if text and text not in cited:
+                                cited.append(text)
+    return cited

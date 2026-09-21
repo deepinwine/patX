@@ -116,6 +116,16 @@ def _op_epo(args, cancel):
         out = provider.family(args.get("publication_number", ""))
         return {"ok": out.ok, "code": out.code.value, "message": out.message,
                 "members": [m.to_dict() for m in provider.last_family]}
+    if op == "legal":
+        out = provider.legal_status(args.get("application_number", ""),
+                                    args.get("publication_number", ""))
+        return {"ok": out.ok, "code": out.code.value, "message": out.message,
+                "events": provider.last_events}
+    if op == "citations":
+        out = provider.citations(args.get("application_number", ""),
+                                 args.get("publication_number", ""))
+        return {"ok": out.ok, "code": out.code.value, "message": out.message,
+                "citations": provider.last_citations}
     return {"ok": False, "code": "TEMPORARY_ERROR", "message": f"unknown epo_op {op!r}"}
 
 

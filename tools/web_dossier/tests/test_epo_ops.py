@@ -57,3 +57,23 @@ def test_family_parsing_against_live_response():
     assert ep[0].application_number == "EP99203729"
     assert ep[0].application_date == "1999-11-08"
     assert ep[0].publication_number == "EP1000000A1"
+
+
+def test_legal_events_from_live_response():
+    from web_dossier.providers.epo_ops import parse_legal_events
+    obj = json.loads((FIXTURES / "legal_cn201510375387_real.json").read_text("utf-8"))
+    events = parse_legal_events(obj)
+    assert events, "no events parsed"
+    codes = [e["code"] for e in events]
+    assert "C10" in codes                     # entry into substantive examination
+    top = events[0]
+    assert top["date"] >= events[-1]["date"]  # sorted newest first
+    assert any("SUBSTANTIVE" in e["description"] for e in events)
+
+
+def test_citations_from_live_response():
+    from web_dossier.providers.epo_ops import parse_citations
+    obj = json.loads((FIXTURES / "biblio_cn201510375387_real.json").read_text("utf-8"))
+    cites = parse_citations(obj)
+    assert "CN101308266A" in cites
+    assert "CN103353699A" in cites
