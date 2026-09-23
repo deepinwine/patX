@@ -41,10 +41,39 @@ def test_final_is_not_an_oa_ordinal():
     )
 
 
+def test_final_rejection_without_decision_is_still_a_rejection():
+    assert classify_official_document("Final rejection (ORIGINAL)", "") == (
+        DocumentType.REJECTION_DECISION,
+        0,
+        Confidence.HIGH,
+    )
+
+
+def test_final_rejection_conflicts_with_first_oa_code():
+    assert classify_official_document(
+        "Final rejection (ORIGINAL)", "210401-CN"
+    ) == (DocumentType.UNKNOWN, 0, Confidence.LOW)
+
+
 def test_code_and_title_conflict_requires_manual_classification():
     assert classify_official_document(
         "Second notice of examination opinions (ORIGINAL)", "210401-CN"
     ) == (DocumentType.UNKNOWN, 0, Confidence.LOW)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Notification to grant (ORIGINAL)",
+        "Registration formalities (ORIGINAL)",
+    ],
+)
+def test_additional_explicit_grant_titles(title):
+    assert classify_official_document(title, "") == (
+        DocumentType.GRANT_NOTICE,
+        0,
+        Confidence.HIGH,
+    )
 
 
 @pytest.mark.parametrize(
@@ -149,8 +178,8 @@ def test_chinese_classification_and_canonical_titles_remain_compatible():
     [
         (DocumentType.OFFICE_ACTION_SECOND, 2, "", "第二次审查意见通知书"),
         (DocumentType.REJECTION_DECISION, 0, "", "驳回决定"),
-        (DocumentType.GRANT_NOTICE, 0, "", "授予专利权通知书"),
-        (DocumentType.CORRECTION_NOTICE, 0, "", "补正通知书"),
+        (DocumentType.GRANT_NOTICE, 0, "", "授权通知"),
+        (DocumentType.CORRECTION_NOTICE, 0, "", "补正通知"),
         (DocumentType.SEARCH_REPORT, 0, "检索报告原文", "检索报告原文"),
         (DocumentType.UNKNOWN, 0, "", "其他官方通知"),
     ],

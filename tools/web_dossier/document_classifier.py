@@ -103,9 +103,13 @@ def _classify_english_title(raw_title: str):
     if not title:
         return None
 
-    if re.search(r"\b(?:final\s+rejection\s+decision|decision\s+to\s+reject)\b", title):
+    if re.search(r"\b(?:final\s+rejection(?:\s+decision)?|decision\s+to\s+reject)\b", title):
         return DocumentType.REJECTION_DECISION, 0, Confidence.HIGH
-    if "grant" in title and re.search(r"\bpatent\s+right\b", title):
+    if re.search(
+        r"\b(?:grant\s+patent\s+right|notification\s+to\s+grant|"
+        r"registration\s+formalities)\b",
+        title,
+    ):
         return DocumentType.GRANT_NOTICE, 0, Confidence.HIGH
     if re.search(r"\b(?:rectification|correction)\b", title):
         return DocumentType.CORRECTION_NOTICE, 0, Confidence.HIGH
@@ -171,8 +175,8 @@ def event_title_cn(
         return oa_title_cn(document_type, ordinal)
     fixed_titles = {
         DocumentType.REJECTION_DECISION: "驳回决定",
-        DocumentType.GRANT_NOTICE: "授予专利权通知书",
-        DocumentType.CORRECTION_NOTICE: "补正通知书",
+        DocumentType.GRANT_NOTICE: "授权通知",
+        DocumentType.CORRECTION_NOTICE: "补正通知",
     }
     return fixed_titles.get(document_type, fallback_title or "其他官方通知")
 
