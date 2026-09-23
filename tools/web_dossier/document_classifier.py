@@ -112,20 +112,24 @@ def _classify_english_title(raw_title: str):
         return DocumentType.UNKNOWN, 0, Confidence.LOW
     if re.search(r"\bnon(?:-|\s+)final\s+rejection\b", title):
         return DocumentType.UNKNOWN, 0, Confidence.LOW
-    if re.search(r"\b(?:final\s+rejection(?:\s+decision)?|decision\s+to\s+reject)\b", title):
+    if re.fullmatch(r"(?:final rejection(?: decision)?|decision to reject)", title):
         return DocumentType.REJECTION_DECISION, 0, Confidence.HIGH
-    if re.search(
-        r"\b(?:grant\s+patent\s+right|notification\s+to\s+grant|"
-        r"registration\s+formalities)\b",
+    if re.fullmatch(
+        r"(?:grant patent right|notification to grant(?: patent right)?|"
+        r"registration formalities)",
         title,
     ):
         return DocumentType.GRANT_NOTICE, 0, Confidence.HIGH
-    if re.search(r"\b(?:rectification|correction)\b", title):
+    if re.fullmatch(
+        r"(?:notification to make rectification|rectification notice|"
+        r"correction notice)",
+        title,
+    ):
         return DocumentType.CORRECTION_NOTICE, 0, Confidence.HIGH
 
-    ordinal_match = re.search(
-        r"\b(" + "|".join(_EN_ORDINALS) + r")\b.*"
-        r"\b(?:examination\s+opinions?|office\s+actions?)\b",
+    ordinal_match = re.fullmatch(
+        r"(" + "|".join(_EN_ORDINALS) + r") "
+        r"(?:notice of examination opinions?|examination opinions?|office action)",
         title,
     )
     if ordinal_match:

@@ -139,6 +139,17 @@ def _event_title_token(
     return fixed_tokens.get(document_type, normalize_title(document_title))
 
 
+def _event_application_number(jurisdiction: str, application_number: str) -> str:
+    raw_number = application_number or ""
+    if (jurisdiction or "").strip().upper() == "CN":
+        from .number_resolver import normalize_cn_identifier
+
+        identifier = normalize_cn_identifier(raw_number)
+        if identifier.number_type == "application":
+            return identifier.normalized_number.upper()
+    return re.sub(r"\s+", "", raw_number).upper()
+
+
 @dataclass
 class ProsecutionDocument:
     jurisdiction: str = "CN"
@@ -192,7 +203,7 @@ class ProsecutionDocument:
         """Cross-provider identity for one official prosecution event."""
         basis = "|".join([
             (self.jurisdiction or "").strip().upper(),
-            (self.application_number or "").strip(),
+            _event_application_number(self.jurisdiction, self.application_number),
             self.document_type.value,
             str(self.oa_ordinal),
             (self.official_date or "").strip(),

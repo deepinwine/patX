@@ -90,6 +90,23 @@ def test_applicant_english_titles_are_not_official_events(title):
     )
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Applicant response to final rejection decision",
+        "Reply to notification to grant patent right",
+        "Petition for correction",
+        "Submission in response to final rejection decision",
+    ],
+)
+def test_embedded_official_phrases_are_not_official_titles(title):
+    assert classify_official_document(title, "") == (
+        DocumentType.UNKNOWN,
+        0,
+        Confidence.LOW,
+    )
+
+
 def test_code_and_title_conflict_requires_manual_classification():
     assert classify_official_document(
         "Second notice of examination opinions (ORIGINAL)", "210401-CN"
@@ -201,6 +218,28 @@ def test_event_key_normalizes_stable_identity_text_fields():
         official_date=" 2026-05-23 ",
     )
     assert document.event_key() == noisy.event_key()
+
+
+@pytest.mark.parametrize(
+    "application_number",
+    [
+        "202510469601.5",
+        "cn202510469601.5",
+        "CN 202510469601.5",
+        "CN２０２５１０４６９６０１．５",
+    ],
+)
+def test_event_key_normalizes_cn_application_number_variants(application_number):
+    document = ProsecutionDocument(
+        jurisdiction="CN",
+        application_number="CN202510469601.5",
+        document_type=DocumentType.REJECTION_DECISION,
+        official_date="2026-05-23",
+        document_title="驳回决定",
+    )
+    assert document.event_key() == replace(
+        document, application_number=application_number
+    ).event_key()
 
 
 def test_event_key_uses_all_official_event_identity_fields():
