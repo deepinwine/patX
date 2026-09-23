@@ -274,7 +274,8 @@ protected:
                 default:
                     summary.failed++;
                     summary.failures.push_back(report);
-                    if (report.code == webdossier::ResultCode::RateLimited ||
+                    if (report.rate_limited_upstream ||
+                        report.code == webdossier::ResultCode::RateLimited ||
                         report.code == webdossier::ResultCode::PageStructureChanged ||
                         report.code == webdossier::ResultCode::NetworkError ||
                         report.code == webdossier::ResultCode::AccessDenied)

@@ -44,6 +44,8 @@ def fetch_html_public(url: str) -> Tuple[int, str]:
         except Exception:
             body = ""
         return exc.code, body
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0, ""     # transport trouble: NETWORK_ERROR, never a crash
 
 
 class _RegisterDocParser(HTMLParser):

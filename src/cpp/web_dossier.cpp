@@ -203,6 +203,12 @@ bool Manager::ParseCaseResult(const std::string& json_body, RemoteCaseResult& ou
         out.resolved_application_number = parsed.value("resolved_application_number", "");
         out.auth_state = parsed.value("auth_state", "");
         out.provider_used = parsed.value("provider_used", "");
+        if (parsed.contains("attempts") && parsed["attempts"].is_array()) {
+            for (const auto& a : parsed["attempts"]) {
+                out.attempts.emplace_back(a.value("provider", ""),
+                                          a.value("code", ""));
+            }
+        }
         if (parsed.contains("documents") && parsed["documents"].is_array()) {
             for (const auto& d : parsed["documents"]) {
                 RemoteDocument doc;
@@ -285,6 +291,12 @@ CaseSyncReport Manager::ApplyRemoteResult(const Patent& patent, const RemoteCase
     report.geke_code = patent.geke_code;
     report.provider_used = remote.provider_used.empty() ? "cnipa" : remote.provider_used;
     report.code = ResultCodeFromString(remote.code);
+    for (const auto& [provider, code] : remote.attempts) {
+        if (code == "RATE_LIMITED") {
+            report.rate_limited_upstream = true;
+            break;
+        }
+    }
 
     long long now = static_cast<long long>(time(nullptr));
     std::string provider = report.provider_used;
@@ -401,6 +413,9 @@ CaseSyncReport Manager::SyncCase(const Patent& patent, std::atomic<bool>& cancel
         // already stopped at CNIPA - the login browser only opens when the
         // user explicitly asks for it.
         report.code = ResultCode::AuthRequired;
+        for (const auto& [provider, code] : remote.attempts) {
+            if (code == "RATE_LIMITED") report.rate_limited_upstream = true;
+        }
         report.provider_used = remote.provider_used.empty() ? "cnipa" : remote.provider_used;
         report.message = remote.provider_used == "cnipa" || remote.provider_used.empty()
                              ? "CNIPA 需要登录"
@@ -463,7 +478,7 @@ BatchSummary Manager::SyncAll(bool include_granted, int limit,
             default:
                 summary.failed++;
                 summary.failures.push_back(r);
-                if (IsBatchAbortingCode(r.code)) return summary;
+                if (r.rate_limited_upstream || IsBatchAbortingCode(r.code)) return summary;
                 break;
         }
     }

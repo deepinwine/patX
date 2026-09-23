@@ -89,6 +89,8 @@ struct CaseSyncReport {
     int documents_new = 0;           // newly stored prosecution_documents
     int oa_created_id = 0;           // oa_records.id when a new event was inserted
     bool date_conflict = false;      // existing OA flagged, needs the user
+    bool rate_limited_upstream = false;  // ANY source answered RATE_LIMITED -
+                                         // the batch must stop and wait
 };
 
 struct BatchSummary {
@@ -181,6 +183,7 @@ private:
         std::string resolved_application_number;
         std::string auth_state;
         std::string provider_used;           // source that answered
+        std::vector<std::pair<std::string, std::string>> attempts;  // (provider, code)
         std::vector<RemoteDocument> documents;
         // Latest remindable official event (OA / rejection / grant /
         // correction / other); falls back to a legacy sidecar's latest_oa.

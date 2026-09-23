@@ -72,6 +72,8 @@ def fetch_json_public(url: str, post_body: Optional[str] = None) -> Tuple[int, s
         except Exception:
             body = ""
         return exc.code, body
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return 0, ""     # transport trouble: NETWORK_ERROR, never a crash
 
 
 def _parse_us_date(text: str) -> str:
@@ -197,9 +199,13 @@ class UsptoGlobalDossierProvider(DossierProvider):
         if status == 429:
             return SyncOutcome(code=ResultCode.RATE_LIMITED,
                                message="USPTO Global Dossier 限流（429）")
+        if status == 404:
+            return SyncOutcome(code=ResultCode.CASE_NOT_FOUND,
+                               message="USPTO Global Dossier 未收录该案件（可能尚未公开）")
         if status != 200:
             return SyncOutcome(code=ResultCode.NETWORK_ERROR,
-                               message=f"USPTO Global Dossier HTTP {status}")
+                               message=f"USPTO Global Dossier HTTP {status}"
+                               if status else "USPTO Global Dossier 连接失败")
         outcome = parse_uspto_doc_payload(body, ident.normalized_number,
                                           publication_number)
         if outcome.code == ResultCode.CASE_NOT_FOUND:

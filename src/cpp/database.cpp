@@ -1556,7 +1556,8 @@ std::vector<Patent> Database::GetPatentsForDossierCheck(bool include_granted, in
         "application_status NOT LIKE '%失效%' AND "
         "application_status NOT LIKE '%撤回%' AND "
         "application_status NOT LIKE '%视撤%' AND "
-        "application_status NOT LIKE '%终止%'";
+        "application_status NOT LIKE '%终止%' AND "
+        "application_status NOT LIKE '%已获证书%'";
     if (!include_granted) {
         sql += " AND (application_status IS NULL OR (application_status NOT LIKE '%授权%' "
                "AND application_status NOT LIKE '%Granted%'))";
@@ -1765,7 +1766,8 @@ std::vector<Patent> Database::GetPatentsDueForDossierCheck(bool include_granted,
         "application_status NOT LIKE '%失效%' AND "
         "application_status NOT LIKE '%撤回%' AND "
         "application_status NOT LIKE '%视撤%' AND "
-        "application_status NOT LIKE '%终止%'";
+        "application_status NOT LIKE '%终止%' AND "
+        "application_status NOT LIKE '%已获证书%'";
     if (!include_granted) {
         sql += " AND (application_status IS NULL OR (application_status NOT LIKE '%授权%' "
                "AND application_status NOT LIKE '%Granted%'))";
