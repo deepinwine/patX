@@ -135,7 +135,7 @@ def test_all_candidate_official_dates_failing_is_date_parse_failed():
     assert outcome.documents == []
 
 
-def test_non_remindable_official_row_still_counts_for_date_failure():
+def test_non_remindable_official_row_date_failure_does_not_block():
     html = _document_page(
         _row(
             "pending",
@@ -145,26 +145,69 @@ def test_non_remindable_official_row_still_counts_for_date_failure():
         )
     )
     outcome = parse_uspto_document_list(html, "CN202510469601.5", "")
+    assert outcome.code == ResultCode.OK
+    assert outcome.documents == []
+
+
+def test_invalid_remindable_date_is_not_masked_by_valid_non_remindable_row():
+    rows = _row(
+        "pending",
+        "First notice of examination opinions (ORIGINAL)",
+        remote_id="bad-oa-date",
+    ) + _row(
+        "2026-05-23",
+        "检索报告 (ORIGINAL)",
+        code="110101-CN",
+        remote_id="valid-search-date",
+    )
+    outcome = parse_uspto_document_list(_document_page(rows))
     assert outcome.code == ResultCode.DATE_PARSE_FAILED
     assert outcome.documents == []
 
 
+def test_applicant_to_office_direction_is_not_official():
+    html = _document_page(
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+            direction="Applicant to Office",
+        )
+    )
+    outcome = parse_uspto_document_list(html, "CN202510469601.5", "")
+    assert outcome.code == ResultCode.OK
+    assert outcome.documents == []
+
+
 class _FakePage:
-    def __init__(self, html: str):
+    def __init__(self, html: str, *, ready_html: str = "", wait_error=None):
         self._html = html
+        self._ready_html = ready_html
+        self._wait_error = wait_error
         self.waited_for = None
+        self.waited_for_function = None
 
     def wait_for_load_state(self, state, timeout):
         self.waited_for = (state, timeout)
+
+    def wait_for_function(self, expression, *, timeout):
+        self.waited_for_function = (expression, timeout)
+        if self._wait_error is not None:
+            raise self._wait_error
+        if self._ready_html:
+            self._html = self._ready_html
 
     def content(self):
         return self._html
 
 
 class _FakeBrowserManager:
-    def __init__(self, html: str):
-        self.page = _FakePage(html)
+    def __init__(self, html: str, *, status=None, ready_html: str = "",
+                 wait_error=None):
+        self.page = _FakePage(
+            html, ready_html=ready_html, wait_error=wait_error
+        )
         self.urls = []
+        self.last_navigation_status = status
 
     def open_page(self, url, cancel):
         self.urls.append(url)
@@ -180,6 +223,39 @@ def test_provider_prefers_normalized_application_url():
     assert outcome.code == ResultCode.OK
     assert manager.urls == [APP_URL.format(application="202510469601.5")]
     assert manager.page.waited_for[0] == "domcontentloaded"
+    assert manager.page.waited_for_function is not None
+
+
+def test_provider_waits_for_spa_document_state_before_reading_html():
+    shell = "<html><body><h1>Global Dossier</h1><div id='app'></div></body></html>"
+    manager = _FakeBrowserManager(
+        shell,
+        ready_html=FIXTURE.read_text(encoding="utf-8"),
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert len(outcome.documents) == 1
+    expression, timeout = manager.page.waited_for_function
+    assert "table" in expression
+    assert "no documents" in expression.lower()
+    assert "sign in to global dossier" in expression.lower()
+    assert timeout > 0
+
+
+def test_provider_spa_wait_timeout_is_structure_changed():
+    manager = _FakeBrowserManager(
+        "<html><body><h1>Global Dossier</h1><div id='app'></div></body></html>",
+        wait_error=TimeoutError("document state did not appear"),
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert manager.page.waited_for_function is not None
 
 
 def test_provider_uses_publication_url_when_application_is_unusable():
@@ -208,6 +284,40 @@ def test_provider_open_failure_is_network_error():
     assert outcome.code == ResultCode.NETWORK_ERROR
 
 
+def test_provider_navigation_exception_is_network_error():
+    manager = _FakeBrowserManager("")
+
+    def raise_navigation_error(url, cancel):
+        raise OSError("navigation failed")
+
+    manager.open_page = raise_navigation_error
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.NETWORK_ERROR
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (401, ResultCode.ACCESS_DENIED),
+        (403, ResultCode.ACCESS_DENIED),
+        (429, ResultCode.RATE_LIMITED),
+    ],
+)
+def test_provider_maps_navigation_block_status(status, expected):
+    manager = _FakeBrowserManager(
+        "<html><body><div id='app'></div></body></html>", status=status
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == expected
+    assert manager.page.waited_for_function is None
+
+
 def test_provider_public_page_auth_and_download_contract():
     provider = UsptoGlobalDossierProvider(
         browser_manager=_FakeBrowserManager(FIXTURE.read_text(encoding="utf-8"))
@@ -223,7 +333,7 @@ def test_provider_public_page_auth_and_download_contract():
     )
 
 
-def test_browser_manager_can_skip_system_browser_takeover(monkeypatch, tmp_path):
+def test_browser_manager_without_system_browser_forces_headless(monkeypatch, tmp_path):
     launched = {}
 
     class FakePage:
@@ -254,7 +364,6 @@ def test_browser_manager_can_skip_system_browser_takeover(monkeypatch, tmp_path)
     manager = BrowserManager(
         "uspto_global_dossier",
         prefer_system_browser=False,
-        headless=True,
         profile_dir=str(tmp_path / "profile"),
     )
     monkeypatch.setattr(
@@ -271,3 +380,22 @@ def test_browser_manager_can_skip_system_browser_takeover(monkeypatch, tmp_path)
         "profile_dir": str(tmp_path / "profile"),
         "headless": True,
     }
+
+
+def test_browser_manager_exposes_navigation_http_status(tmp_path):
+    class FakeResponse:
+        status = 403
+
+    class FakePage:
+        def goto(self, url, *, timeout, wait_until):
+            return FakeResponse()
+
+    manager = BrowserManager(
+        "uspto_global_dossier",
+        prefer_system_browser=False,
+        profile_dir=str(tmp_path / "profile"),
+    )
+    manager._page = FakePage()
+
+    assert manager.open_page("https://example.invalid", None) is manager._page
+    assert manager.last_navigation_status == 403

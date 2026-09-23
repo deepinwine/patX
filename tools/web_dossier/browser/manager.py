@@ -49,6 +49,7 @@ class BrowserManager:
         self._context = None
         self._page = None
         self._spawned = None
+        self.last_navigation_status: Optional[int] = None
 
     # ---- lifecycle -----------------------------------------------------
     def _chrome_candidates(self):
@@ -169,7 +170,9 @@ class BrowserManager:
         # 3) Playwright's bundled Chromium (works for friendly public
         #    sites and fixtures; the Ruishu-protected site will refuse it)
         self._context = self._pw.chromium.launch_persistent_context(
-            str(self.profile_dir), headless=self.headless)
+            str(self.profile_dir),
+            headless=True if not self.prefer_system_browser else self.headless,
+        )
         self._adopt_page()
         return True
 
@@ -197,7 +200,12 @@ class BrowserManager:
             self.launch()
             if cancel is not None and cancel.is_set():
                 return None
-            self._page.goto(url, timeout=STEP_TIMEOUT_MS, wait_until="domcontentloaded")
+            self.last_navigation_status = None
+            response = self._page.goto(
+                url, timeout=STEP_TIMEOUT_MS, wait_until="domcontentloaded"
+            )
+            status = getattr(response, "status", None)
+            self.last_navigation_status = status if isinstance(status, int) else None
             return self._page
         except Exception:
             return None

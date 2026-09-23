@@ -47,6 +47,32 @@ _REMINDABLE_TYPES = {
     DocumentType.CORRECTION_NOTICE,
 }
 
+_OFFICIAL_DIRECTIONS = {
+    "official",
+    "office",
+    "patent office",
+    "office to applicant",
+    "patent office to applicant",
+}
+
+_DOCUMENT_STATE_SCRIPT = r"""
+() => {
+  const bodyText = (document.body?.innerText || '').toLowerCase();
+  const hasDocumentTable = Array.from(document.querySelectorAll('table')).some(
+    (table) => {
+      const firstRow = table.querySelector('thead') || table.querySelector('tr');
+      const header = (firstRow?.innerText || '').toLowerCase();
+      return /\bdate\b/.test(header) &&
+             /(description|document title)/.test(header) &&
+             /(document code|\bcode\b)/.test(header);
+    }
+  );
+  const hasEmptyState = /\b(?:no documents|no records)\b/.test(bodyText);
+  const hasBlockedState = /(access denied|request rejected|forbidden|sign in to global dossier|login required|security verification|verify you are human|captcha)/.test(bodyText);
+  return hasDocumentTable || hasEmptyState || hasBlockedState;
+}
+"""
+
 
 class _DocumentListParser(HTMLParser):
     """Collect semantic tables plus visible empty-state containers."""
@@ -151,6 +177,11 @@ def _normal_number(raw: str, number_type: str) -> str:
     return ""
 
 
+def _is_official_direction(raw: str) -> bool:
+    normalized = re.sub(r"[^a-z]+", " ", (raw or "").lower()).strip()
+    return normalized in _OFFICIAL_DIRECTIONS
+
+
 def parse_uspto_document_list(
     html: str, application_number: str = "", publication_number: str = ""
 ) -> SyncOutcome:
@@ -223,16 +254,10 @@ def parse_uspto_document_list(
     for row in target_rows:
         title_cell = _cell(row, indexes["title"])
         raw_title = title_cell["text"]
-        direction_text = _cell(row, indexes["direction"])["text"].strip().lower()
+        direction_text = _cell(row, indexes["direction"])["text"]
         if not re.search(r"\(\s*original\s*\)\s*$", raw_title, re.IGNORECASE):
             continue
-        if not re.search(r"\bofficial\b|\bpatent office\b|\boffice\b", direction_text):
-            continue
-
-        official_candidates += 1
-        official_date = normalize_date(_cell(row, indexes["date"])["text"])
-        if not official_date:
-            date_failures += 1
+        if not _is_official_direction(direction_text):
             continue
 
         document_code = _cell(row, indexes["code"])["text"].strip()
@@ -240,6 +265,12 @@ def parse_uspto_document_list(
             raw_title, document_code
         )
         if confidence != Confidence.HIGH or document_type not in _REMINDABLE_TYPES:
+            continue
+
+        official_candidates += 1
+        official_date = normalize_date(_cell(row, indexes["date"])["text"])
+        if not official_date:
+            date_failures += 1
             continue
 
         remote_cell = _cell(row, indexes["remote_id"])
@@ -345,14 +376,40 @@ class UsptoGlobalDossierProvider(DossierProvider):
             )
         try:
             page = self._manager.open_page(url, cancel)
-            if page is None:
-                raise RuntimeError("page open failed")
+        except Exception:
+            page = None
+        if page is None:
+            return SyncOutcome(
+                code=ResultCode.NETWORK_ERROR,
+                message="无法打开 USPTO Global Dossier 页面",
+            )
+
+        navigation_status = getattr(self._manager, "last_navigation_status", None)
+        if navigation_status in (401, 403):
+            return SyncOutcome(
+                code=ResultCode.ACCESS_DENIED,
+                message=f"USPTO Global Dossier 导航被拒绝（HTTP {navigation_status}）",
+            )
+        if navigation_status == 429:
+            return SyncOutcome(
+                code=ResultCode.RATE_LIMITED,
+                message="USPTO Global Dossier 请求受限（HTTP 429）",
+            )
+
+        try:
             page.wait_for_load_state("domcontentloaded", timeout=30_000)
+            page.wait_for_function(_DOCUMENT_STATE_SCRIPT, timeout=30_000)
+        except Exception:
+            return SyncOutcome(
+                code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                message="等待 Global Dossier 文档状态超时或页面结构已变化",
+            )
+        try:
             html = page.content()
         except Exception:
             return SyncOutcome(
                 code=ResultCode.NETWORK_ERROR,
-                message="无法打开 USPTO Global Dossier 页面",
+                message="无法读取 USPTO Global Dossier 页面",
             )
         return parse_uspto_document_list(html, application_number, publication_number)
 
