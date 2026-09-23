@@ -15,7 +15,9 @@ from typing import Optional
 class ResultCode(str, Enum):
     OK = "OK"
     NO_CHANGE = "NO_CHANGE"
+    # Legacy value: only accepted when parsing old sidecar responses.
     NEW_OFFICE_ACTION = "NEW_OFFICE_ACTION"
+    NEW_OFFICIAL_EVENT = "NEW_OFFICIAL_EVENT"
     AUTH_REQUIRED = "AUTH_REQUIRED"
     SESSION_EXPIRED = "SESSION_EXPIRED"
     CASE_NOT_FOUND = "CASE_NOT_FOUND"
@@ -144,6 +146,9 @@ class ProsecutionDocument:
     oa_ordinal: int = 0
     ds: str = ""                         # cpquery list kind (TZS/ZJWJ/SQWJ)
     wenjiandm: str = ""                  # cpquery document code
+    document_code: str = ""              # stable code from Global Dossier sources
+    document_version: str = "ORIGINAL"   # ORIGINAL / TRANSLATED
+    source_trace: list = field(default_factory=list)  # providers that saw this event
 
     def to_dict(self) -> dict:
         return {
@@ -164,6 +169,10 @@ class ProsecutionDocument:
             "oa_ordinal": self.oa_ordinal,
             "ds": self.ds,
             "wenjiandm": self.wenjiandm,
+            "document_code": self.document_code,
+            "document_version": self.document_version,
+            "source_trace": list(self.source_trace),
+            "event_key": self.event_key(),
             "fingerprint": self.fingerprint_value(),
         }
 
@@ -171,6 +180,20 @@ class ProsecutionDocument:
         return fingerprint(self.jurisdiction, self.application_number,
                            self.document_title, self.official_date,
                            self.remote_document_id)
+
+    def event_key(self) -> str:
+        """Cross-provider dedup key: provider ids and sources excluded on
+        purpose so the same official event seen on USPTO/EPO/CNIPA collapses
+        into one row."""
+        basis = "|".join([
+            self.jurisdiction,
+            self.application_number,
+            self.document_type.value,
+            str(self.oa_ordinal),
+            self.official_date,
+            normalize_title(self.document_title),
+        ])
+        return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
 def pick_latest_office_action(documents):

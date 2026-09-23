@@ -103,3 +103,73 @@ def direction_for(document_type: DocumentType) -> str:
                          DocumentType.OTHER_APPLICANT):
         return "applicant"
     return "official"
+
+
+# --------------------------------------------------------------------------
+# Global Dossier (USPTO/EPO) English titles
+# --------------------------------------------------------------------------
+
+_CODE_TYPES = {
+    "210401-CN": (DocumentType.OFFICE_ACTION_FIRST, 1),
+}
+
+_EN_FINAL_RE = re.compile(r"final rejection|decision to reject")
+_EN_GRANT_RE = re.compile(r"grant patent right|notification to grant|registration formalities")
+_EN_CORRECTION_RE = re.compile(r"rectification|correction notice")
+_EN_OA_RE = re.compile(r"examination opinions|office action")
+_EN_ORDINALS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+                "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10}
+
+
+def _classify_en(raw_title: str):
+    """English title -> (document_type, ordinal) or None when not official."""
+    compact = re.sub(r"\s+", " ", (raw_title or "").strip()).lower()
+    if not compact:
+        return None
+    if _EN_FINAL_RE.search(compact):
+        return DocumentType.REJECTION_DECISION, 0
+    for word, ordinal in _EN_ORDINALS.items():
+        if re.search(rf"\b{word}\b.*{_EN_OA_RE.pattern}", compact):
+            doc_type = (DocumentType.OFFICE_ACTION_FIRST if ordinal == 1 else
+                        DocumentType.OFFICE_ACTION_SECOND if ordinal == 2 else
+                        DocumentType.OFFICE_ACTION_NTH)
+            return doc_type, ordinal
+    if _EN_GRANT_RE.search(compact):
+        return DocumentType.GRANT_NOTICE, 0
+    if _EN_CORRECTION_RE.search(compact):
+        return DocumentType.CORRECTION_NOTICE, 0
+    return None
+
+
+def classify_official_document(raw_title: str, document_code: str = "") -> Tuple[DocumentType, int, Confidence]:
+    """Classify from an English Global Dossier title and/or a stable document
+    code, falling back to the Chinese rules for CNIPA titles.
+
+    When both inputs are present and disagree the answer is UNKNOWN/LOW so the
+    caller raises MANUAL_REVIEW_REQUIRED instead of guessing.
+    """
+    code = (document_code or "").strip().upper()
+    code_result = _CODE_TYPES.get(code)
+    title_result = _classify_en(raw_title)
+
+    if code_result is None:
+        if title_result is not None:
+            return title_result[0], title_result[1], Confidence.HIGH
+        return classify_cn_title(raw_title)
+    if title_result is None or title_result == code_result:
+        return code_result[0], code_result[1], Confidence.HIGH
+    return DocumentType.UNKNOWN, 0, Confidence.LOW
+
+
+def event_title_cn(document_type: DocumentType, ordinal: int,
+                   fallback_title: str = "") -> str:
+    """Canonical Chinese display name for any official event."""
+    if document_type.is_office_action:
+        cn = oa_title_cn(document_type, ordinal)
+        if cn:
+            return cn
+    return {
+        DocumentType.REJECTION_DECISION: "驳回决定",
+        DocumentType.GRANT_NOTICE: "授权通知",
+        DocumentType.CORRECTION_NOTICE: "补正通知",
+    }.get(document_type, fallback_title or "其他官方通知")
