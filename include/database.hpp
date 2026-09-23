@@ -226,6 +226,14 @@ struct ProsecutionDocumentRecord {
     long long first_seen_at = 0;      // unix epoch
     long long last_seen_at = 0;
     std::string raw_metadata;         // small JSON blob, never credentials
+    // v5: cross-source identity of one official event
+    std::string raw_title;            // title as served by the source
+    std::string document_code;        // stable doc code (e.g. 210401-CN)
+    std::string document_version = "ORIGINAL";   // ORIGINAL / TRANSLATED
+    std::string event_key;            // sha256 over (jurisdiction, app, type,
+                                      // ordinal, date, normalized title);
+                                      // empty rows keep the legacy dedup rule
+    std::string source_trace;         // comma-joined providers that saw it
 };
 
 // Per-patent sync bookkeeping for one provider.
@@ -330,9 +338,18 @@ public:
     // statuses (放弃/失效/撤回/视撤/终止) are skipped; granted cases only
     // when include_granted (they are checked on the slow cycle).
     std::vector<Patent> GetPatentsForDossierCheck(bool include_granted, int limit = 0);
-    // Dedup key: (source, application_number, fingerprint). Sets *created
-    // when the row is new; otherwise only last_seen_at is refreshed.
+    // Due queue for the background scheduler: same status filter as above,
+    // restricted to cases with a recognizable CN identifier whose
+    // next_dossier_check_at has arrived (0/NULL = never checked = due now).
+    std::vector<Patent> GetPatentsDueForDossierCheck(bool include_granted,
+                                                     long long now, int limit = 0);
+    // Dedup key: event_key first (cross-source, one row per official event);
+    // rows with an empty event_key fall back to (source, application_number,
+    // fingerprint). Sets *created when the row is new; otherwise only
+    // last_seen_at / raw_metadata / source_trace are refreshed.
     int UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* created = nullptr);
+    // Full v5 read of one prosecution document (id == 0 when absent).
+    ProsecutionDocumentRecord GetProsecutionDocumentById(int id);
     // Records where a downloaded dossier file landed (schema v4 columns).
     bool UpdateProsecutionDocumentDownload(int document_id, const std::string& local_path);
     bool UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at);

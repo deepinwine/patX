@@ -52,6 +52,166 @@ TEST(database_fresh_schema_is_versioned) {
     std::filesystem::remove(path);
 }
 
+namespace {
+
+bool TableHasColumn(sqlite3* raw, const std::string& table, const std::string& col) {
+    sqlite3_stmt* stmt = nullptr;
+    std::string sql = "PRAGMA table_info(" + table + ");";
+    bool found = false;
+    if (sqlite3_prepare_v2(raw, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* name = (const char*)sqlite3_column_text(stmt, 1);
+            if (name && col == name) found = true;
+        }
+        sqlite3_finalize(stmt);
+    }
+    return found;
+}
+
+} // namespace
+
+TEST(database_v5_cross_source_event_dedup_and_due_queue) {
+    std::string path = TempDbPath("v5");
+    std::filesystem::remove(path);
+    {
+        Database db(path);
+        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK(TableHasColumn(db.GetHandle(), "prosecution_documents", "event_key"));
+        CHECK(TableHasColumn(db.GetHandle(), "prosecution_documents", "source_trace"));
+        CHECK(TableHasColumn(db.GetHandle(), "prosecution_documents", "raw_title"));
+        CHECK(TableHasColumn(db.GetHandle(), "prosecution_documents", "document_code"));
+        CHECK(TableHasColumn(db.GetHandle(), "prosecution_documents", "document_version"));
+
+        Patent due_cn = MakePatent();
+        due_cn.geke_code = "DUE-CN";
+        due_cn.application_number = "CN202510469601.5";
+        due_cn.application_status = "实质审查";
+        int due_id = db.InsertPatent(due_cn);
+        CHECK(due_id > 0);
+
+        Patent later_cn = MakePatent();
+        later_cn.geke_code = "LATER-CN";
+        later_cn.application_number = "202510000002.X";
+        later_cn.application_status = "实质审查";
+        int later_id = db.InsertPatent(later_cn);
+        CHECK(db.UpdatePatentDossierCheck(later_id, 100, 999999));
+
+        Patent us_case = MakePatent();
+        us_case.geke_code = "DUE-US";
+        us_case.application_number = "US17/123456";
+        us_case.application_status = "pending";
+        db.InsertPatent(us_case);
+
+        auto due = db.GetPatentsDueForDossierCheck(false, 1000, 0);
+        CHECK_EQ(due.size(), 1u);
+        CHECK_STR_EQ(due[0].geke_code, "DUE-CN");
+
+        ProsecutionDocumentRecord uspto;
+        uspto.patent_id = due_id;
+        uspto.jurisdiction = "CN";
+        uspto.application_number = "CN202510469601.5";
+        uspto.source = "uspto_global_dossier";
+        uspto.remote_document_id = "uspto-123";
+        uspto.document_type = "OFFICE_ACTION_FIRST";
+        uspto.document_title = "第一次审查意见通知书";
+        uspto.official_date = "2026-05-23";
+        uspto.event_key = "same-event";
+        uspto.source_trace = "uspto_global_dossier";
+        uspto.document_version = "ORIGINAL";
+        bool created = false;
+        int id1 = db.UpsertProsecutionDocument(uspto, &created);
+        CHECK(created);
+        CHECK(id1 > 0);
+
+        ProsecutionDocumentRecord epo = uspto;
+        epo.source = "epo_global_dossier";
+        epo.remote_document_id = "epo-456";
+        epo.source_trace = "epo_global_dossier";
+        int id2 = db.UpsertProsecutionDocument(epo, &created);
+        CHECK(id2 == id1);
+        CHECK(!created);
+
+        auto stored = db.GetProsecutionDocumentById(id1);
+        CHECK_EQ(stored.id, id1);
+        CHECK(stored.source_trace.find("epo_global_dossier") != std::string::npos);
+        CHECK(stored.source_trace.find("uspto_global_dossier") != std::string::npos);
+        CHECK_STR_EQ(stored.event_key, "same-event");
+        CHECK_STR_EQ(stored.document_version, "ORIGINAL");
+
+        auto missing = db.GetProsecutionDocumentById(999999);
+        CHECK_EQ(missing.id, 0);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(database_v4_to_v5_migration_preserves_documents) {
+    std::string path = TempDbPath("v4");
+    std::filesystem::remove(path);
+    {
+        sqlite3* raw = nullptr;
+        if (sqlite3_open(path.c_str(), &raw) != SQLITE_OK) {
+            sqlite3_close(raw);
+            Fail("cannot create v4 test db");
+        }
+        const char* v4_schema =
+            "CREATE TABLE patents ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " geke_code TEXT, application_number TEXT, application_status TEXT,"
+            " publication_number TEXT DEFAULT '',"
+            " next_dossier_check_at INTEGER DEFAULT 0,"
+            " last_dossier_check_at INTEGER DEFAULT 0);"
+            "CREATE TABLE prosecution_documents ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " patent_id INTEGER, jurisdiction TEXT, application_number TEXT,"
+            " publication_number TEXT, source TEXT, remote_document_id TEXT,"
+            " document_type TEXT, document_title TEXT, official_date TEXT,"
+            " direction TEXT, source_url TEXT, download_url TEXT,"
+            " download_available INTEGER DEFAULT 0, fingerprint TEXT,"
+            " first_seen_at INTEGER, last_seen_at INTEGER, local_path TEXT,"
+            " downloaded_at INTEGER DEFAULT 0, raw_metadata TEXT,"
+            " UNIQUE (source, application_number, fingerprint));"
+            "CREATE TABLE schema_info (version INTEGER NOT NULL);"
+            "INSERT INTO schema_info (version) VALUES (4);"
+            "INSERT INTO prosecution_documents (patent_id, jurisdiction,"
+            " application_number, source, document_type, document_title,"
+            " official_date, fingerprint) VALUES (1, 'CN', 'CN202510469601.5',"
+            " 'cnipa', 'OFFICE_ACTION_FIRST', '第一次审查意见通知书',"
+            " '2026-05-23', 'legacy-fp');";
+        char* err = nullptr;
+        if (sqlite3_exec(raw, v4_schema, nullptr, nullptr, &err) != SQLITE_OK) {
+            std::string msg = err ? err : "v4 setup failed";
+            sqlite3_free(err);
+            sqlite3_close(raw);
+            Fail(msg);
+        }
+        sqlite3_close(raw);
+    }
+
+    {
+        Database db(path);
+        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK(TableHasColumn(db.GetHandle(), "prosecution_documents", "event_key"));
+        // the legacy row survives with an empty event_key and still dedups
+        // through the old (source, application_number, fingerprint) rule
+        ProsecutionDocumentRecord legacy;
+        legacy.patent_id = 1;
+        legacy.jurisdiction = "CN";
+        legacy.application_number = "CN202510469601.5";
+        legacy.source = "cnipa";
+        legacy.document_type = "OFFICE_ACTION_FIRST";
+        legacy.document_title = "第一次审查意见通知书";
+        legacy.official_date = "2026-05-23";
+        legacy.fingerprint = "legacy-fp";
+        bool created = false;
+        int id = db.UpsertProsecutionDocument(legacy, &created);
+        CHECK(!created);
+        CHECK(id > 0);
+        auto stored = db.GetProsecutionDocumentById(id);
+        CHECK_STR_EQ(stored.fingerprint, "legacy-fp");
+    }
+    std::filesystem::remove(path);
+}
+
 TEST(database_patent_full_field_roundtrip) {
     std::string path = TempDbPath("patent");
     std::filesystem::remove(path);

@@ -261,11 +261,18 @@ void Database::InitTables() {
             local_path TEXT,
             downloaded_at INTEGER DEFAULT 0,
             raw_metadata TEXT,
+            raw_title TEXT DEFAULT '',
+            document_code TEXT DEFAULT '',
+            document_version TEXT DEFAULT 'ORIGINAL',
+            event_key TEXT DEFAULT '',
+            source_trace TEXT DEFAULT '',
             UNIQUE (source, application_number, fingerprint)
         )
     )");
     Execute("CREATE INDEX IF NOT EXISTS idx_prosecution_docs_patent "
             "ON prosecution_documents(patent_id)");
+    Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_prosecution_docs_event_key "
+            "ON prosecution_documents(patent_id, event_key) WHERE event_key <> ''");
 
     Execute(R"(
         CREATE TABLE IF NOT EXISTS dossier_sync_state (
@@ -1597,34 +1604,80 @@ int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* cr
     if (created) *created = false;
     long long now = static_cast<long long>(time(nullptr));
 
-    // Fingerprint already known? Only refresh last_seen_at.
+    // Cross-source identity first: one row per official event, whatever the
+    // provider. Falls back to the legacy (source, app, fingerprint) rule for
+    // rows that carry no event_key (older data / sites without stable ids).
+    std::string find = "SELECT id, source_trace FROM prosecution_documents WHERE ";
+    if (!doc.event_key.empty()) {
+        find += "patent_id = ? AND event_key = ?";
+    } else {
+        find += "source = ? AND application_number = ? AND fingerprint = ?";
+    }
     sqlite3_stmt* stmt;
-    std::string find = "SELECT id FROM prosecution_documents WHERE source = ? AND "
-                       "application_number = ? AND fingerprint = ?";
     if (sqlite3_prepare_v2(db_, find.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, doc.source.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, doc.application_number.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, doc.fingerprint.c_str(), -1, SQLITE_TRANSIENT);
+        if (!doc.event_key.empty()) {
+            sqlite3_bind_int(stmt, 1, doc.patent_id);
+            sqlite3_bind_text(stmt, 2, doc.event_key.c_str(), -1, SQLITE_TRANSIENT);
+        } else {
+            sqlite3_bind_text(stmt, 1, doc.source.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 2, doc.application_number.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 3, doc.fingerprint.c_str(), -1, SQLITE_TRANSIENT);
+        }
         int existing = 0;
-        if (sqlite3_step(stmt) == SQLITE_ROW) existing = sqlite3_column_int(stmt, 0);
+        std::string existing_trace;
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            existing = sqlite3_column_int(stmt, 0);
+            const char* trace = (const char*)sqlite3_column_text(stmt, 1);
+            if (trace) existing_trace = trace;
+        }
         sqlite3_finalize(stmt);
         if (existing > 0) {
+            std::string merged_trace = existing_trace;
+            auto append_if_new = [&merged_trace](const std::string& item) {
+                if (item.empty()) return;
+                size_t start = 0;
+                while (start <= merged_trace.size()) {
+                    size_t end = merged_trace.find(',', start);
+                    std::string token = merged_trace.substr(
+                        start, end == std::string::npos ? std::string::npos : end - start);
+                    if (token == item) return;
+                    if (end == std::string::npos) break;
+                    start = end + 1;
+                }
+                merged_trace += merged_trace.empty() ? item : "," + item;
+            };
+            append_if_new(doc.source);
+            if (!doc.source_trace.empty()) {
+                size_t start = 0;
+                while (start <= doc.source_trace.size()) {
+                    size_t end = doc.source_trace.find(',', start);
+                    std::string token = doc.source_trace.substr(
+                        start, end == std::string::npos ? std::string::npos : end - start);
+                    append_if_new(token);
+                    if (end == std::string::npos) break;
+                    start = end + 1;
+                }
+            }
             Execute("UPDATE prosecution_documents SET last_seen_at = " + std::to_string(now) +
                     ", raw_metadata = '" + EscapeString(doc.raw_metadata) + "'" +
+                    ", source_trace = '" + EscapeString(merged_trace) + "'" +
                     " WHERE id = " + std::to_string(existing));
             doc.id = existing;
             doc.last_seen_at = now;
+            doc.source_trace = merged_trace;
             return existing;
         }
     }
 
+    if (doc.source_trace.empty()) doc.source_trace = doc.source;
     doc.first_seen_at = now;
     doc.last_seen_at = now;
     std::string sql =
         "INSERT INTO prosecution_documents (patent_id, jurisdiction, application_number, "
         "publication_number, source, remote_document_id, document_type, document_title, "
         "official_date, direction, source_url, download_url, download_available, fingerprint, "
-        "first_seen_at, last_seen_at, raw_metadata) VALUES (" +
+        "first_seen_at, last_seen_at, raw_metadata, raw_title, document_code, "
+        "document_version, event_key, source_trace) VALUES (" +
         std::to_string(doc.patent_id) + ",'" +
         EscapeString(doc.jurisdiction) + "','" +
         EscapeString(doc.application_number) + "','" +
@@ -1641,13 +1694,123 @@ int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* cr
         EscapeString(doc.fingerprint) + "'," +
         std::to_string(doc.first_seen_at) + "," +
         std::to_string(doc.last_seen_at) + ",'" +
-        EscapeString(doc.raw_metadata) + "')";
+        EscapeString(doc.raw_metadata) + "','" +
+        EscapeString(doc.raw_title) + "','" +
+        EscapeString(doc.document_code) + "','" +
+        EscapeString(doc.document_version) + "','" +
+        EscapeString(doc.event_key) + "','" +
+        EscapeString(doc.source_trace) + "')";
     if (Execute(sql)) {
         doc.id = sqlite3_last_insert_rowid(db_);
         if (created) *created = true;
         return doc.id;
     }
     return 0;
+}
+
+ProsecutionDocumentRecord Database::GetProsecutionDocumentById(int id) {
+    ProsecutionDocumentRecord doc;
+    if (id <= 0) return doc;
+    sqlite3_stmt* stmt;
+    std::string sql = "SELECT id, patent_id, jurisdiction, application_number, "
+                      "publication_number, source, remote_document_id, document_type, "
+                      "document_title, official_date, direction, source_url, download_url, "
+                      "download_available, fingerprint, first_seen_at, last_seen_at, "
+                      "raw_metadata, raw_title, document_code, document_version, "
+                      "event_key, source_trace FROM prosecution_documents WHERE id = " +
+                      std::to_string(id);
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            auto text = [&stmt](int i) -> std::string {
+                const char* v = (const char*)sqlite3_column_text(stmt, i);
+                return v ? v : "";
+            };
+            doc.id = sqlite3_column_int(stmt, 0);
+            doc.patent_id = sqlite3_column_int(stmt, 1);
+            doc.jurisdiction = text(2);
+            doc.application_number = text(3);
+            doc.publication_number = text(4);
+            doc.source = text(5);
+            doc.remote_document_id = text(6);
+            doc.document_type = text(7);
+            doc.document_title = text(8);
+            doc.official_date = text(9);
+            doc.direction = text(10);
+            doc.source_url = text(11);
+            doc.download_url = text(12);
+            doc.download_available = sqlite3_column_int(stmt, 13) != 0;
+            doc.fingerprint = text(14);
+            doc.first_seen_at = sqlite3_column_int64(stmt, 15);
+            doc.last_seen_at = sqlite3_column_int64(stmt, 16);
+            doc.raw_metadata = text(17);
+            doc.raw_title = text(18);
+            doc.document_code = text(19);
+            doc.document_version = text(20);
+            doc.event_key = text(21);
+            doc.source_trace = text(22);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return doc;
+}
+
+std::vector<Patent> Database::GetPatentsDueForDossierCheck(bool include_granted,
+                                                           long long now, int limit) {
+    // Same status window as GetPatentsForDossierCheck, narrowed to cases the
+    // CN dossier chain can actually query and whose check slot has arrived.
+    std::vector<Patent> results;
+    std::string sql =
+        "SELECT * FROM patents WHERE "
+        "(application_status IS NULL OR application_status NOT LIKE '%放弃%') AND "
+        "application_status NOT LIKE '%失效%' AND "
+        "application_status NOT LIKE '%撤回%' AND "
+        "application_status NOT LIKE '%视撤%' AND "
+        "application_status NOT LIKE '%终止%'";
+    if (!include_granted) {
+        sql += " AND (application_status IS NULL OR (application_status NOT LIKE '%授权%' "
+               "AND application_status NOT LIKE '%Granted%'))";
+    }
+    sql += " AND (next_dossier_check_at IS NULL OR next_dossier_check_at = 0"
+           " OR next_dossier_check_at <= " + std::to_string(now) + ")";
+    sql += " AND (application_number LIKE 'CN%' OR application_number GLOB '[0-9]*'"
+           " OR publication_number LIKE 'CN%')";
+    sql += " ORDER BY next_dossier_check_at ASC, id ASC";
+    if (limit > 0) sql += " LIMIT " + std::to_string(limit);
+
+    sqlite3_stmt* stmt;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            Patent p;
+            auto cs = [&](int col) -> std::string {
+                return (const char*)sqlite3_column_text(stmt, col) ? (const char*)sqlite3_column_text(stmt, col) : "";
+            };
+            p.id = sqlite3_column_int(stmt, 0);
+            p.geke_code = cs(1);
+            p.application_number = cs(2);
+            p.title = cs(3);
+            p.proposal_name = cs(4);
+            p.application_status = cs(5);
+            p.patent_type = cs(6);
+            p.patent_level = cs(7);
+            p.application_date = cs(8);
+            p.authorization_date = cs(9);
+            p.expiration_date = cs(10);
+            p.geke_handler = cs(11);
+            p.rd_department = cs(12);
+            p.agency_firm = cs(13);
+            p.original_applicant = cs(14);
+            p.current_applicant = cs(15);
+            p.inventor = cs(16);
+            p.notes = cs(17);
+            p.class_level1 = cs(18);
+            p.class_level2 = cs(19);
+            p.class_level3 = cs(20);
+            p.publication_number = ColByName(stmt, "publication_number");
+            results.push_back(p);
+        }
+        sqlite3_finalize(stmt);
+    }
+    return results;
 }
 
 bool Database::UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at) {

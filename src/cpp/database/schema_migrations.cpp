@@ -435,6 +435,32 @@ bool ApplyV3ToV4(sqlite3* db) {
     return true;
 }
 
+bool ApplyV4ToV5(sqlite3* db) {
+    // Cross-source official-event identity: the same CN event seen on USPTO
+    // Global Dossier, EPO register and CNIPA collapses into one row keyed by
+    // event_key; source_trace keeps the audit trail of who reported it.
+    const std::vector<std::pair<std::string, std::string>> doc_cols = {
+        {"raw_title", "TEXT DEFAULT ''"},
+        {"document_code", "TEXT DEFAULT ''"},
+        {"document_version", "TEXT DEFAULT 'ORIGINAL'"},
+        {"event_key", "TEXT DEFAULT ''"},
+        {"source_trace", "TEXT DEFAULT ''"},
+    };
+    for (const auto& [column, type] : doc_cols) {
+        if (!HasColumn(db, "prosecution_documents", column) &&
+            !Exec(db, "ALTER TABLE prosecution_documents ADD COLUMN " + column + " " + type + ";")) {
+            return false;
+        }
+    }
+    if (!Exec(db,
+              "CREATE UNIQUE INDEX IF NOT EXISTS idx_prosecution_docs_event_key "
+              "ON prosecution_documents(patent_id, event_key) "
+              "WHERE event_key <> '';")) {
+        return false;
+    }
+    return true;
+}
+
 SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_path) {
     SchemaMigrationResult result;
     if (!db) {
@@ -453,10 +479,15 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
     if (version == 0) {
         const bool has_v2_shape =
             HasTable(db, "patents") && HasColumn(db, "patents", "technology_route");
+        // The fast path stamps the current version directly, so it must be
+        // sure the database already has the CURRENT shape - a v4 database
+        // (prosecution_documents without event_key) still has to step through
+        // v4 -> v5.
         const bool has_current_shape = has_v2_shape &&
             HasColumn(db, "patents", "publication_number") &&
             HasColumn(db, "oa_records", "sync_flag") &&
-            HasTable(db, "prosecution_documents") && HasTable(db, "dossier_sync_state");
+            HasTable(db, "prosecution_documents") && HasTable(db, "dossier_sync_state") &&
+            HasColumn(db, "prosecution_documents", "event_key");
         if (has_current_shape || !HasTable(db, "patents")) {
             // Fresh database (or one without business tables): nothing to
             // migrate, stamp the current version.
@@ -597,6 +628,34 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
             }
             version = 4;
             PATX_LOG_INFO("Schema migration v3 -> v4 committed");
+        } else if (version == 4) {
+            PATX_LOG_INFO("Applying schema migration v4 -> v5");
+            if (!Exec(db, "BEGIN TRANSACTION;", &result.error)) {
+                result.ok = false;
+                return result;
+            }
+            if (!ApplyV4ToV5(db)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v4->v5 migration failed (rolled back)";
+                return result;
+            }
+            if (!HasColumn(db, "prosecution_documents", "event_key") ||
+                !HasColumn(db, "prosecution_documents", "source_trace")) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v4->v5 verification failed (rolled back)";
+                return result;
+            }
+            if (!Exec(db, "DELETE FROM schema_info;", &result.error) ||
+                !Exec(db, "INSERT INTO schema_info (version) VALUES (5);", &result.error) ||
+                !Exec(db, "COMMIT;", &result.error)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                return result;
+            }
+            version = 5;
+            PATX_LOG_INFO("Schema migration v4 -> v5 committed");
         } else {
             result.ok = false;
             result.error = "unknown schema version " + std::to_string(version);
