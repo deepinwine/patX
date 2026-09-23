@@ -277,11 +277,163 @@ static void TestOaMergeRules() {
     std::filesystem::remove(path);
 }
 
+// ---------------------------------------------------------------------------
+// Official-event merge (OA + rejection/grant/correction/other)
+// ---------------------------------------------------------------------------
+
+static void TestOfficialEventTitleCn() {
+    RemoteDocument oa;
+    oa.document_type = "OFFICE_ACTION_FIRST";
+    oa.document_title = "第一次审查意见通知书";
+    CHECK_STR_EQ(OfficialEventTitleCn(oa), "第一次审查意见通知书");
+
+    RemoteDocument rejection;
+    rejection.document_type = "REJECTION_DECISION";
+    CHECK_STR_EQ(OfficialEventTitleCn(rejection), "驳回决定");
+
+    RemoteDocument grant;
+    grant.document_type = "GRANT_NOTICE";
+    CHECK_STR_EQ(OfficialEventTitleCn(grant), "授权通知");
+
+    RemoteDocument correction;
+    correction.document_type = "CORRECTION_NOTICE";
+    CHECK_STR_EQ(OfficialEventTitleCn(correction), "补正通知");
+
+    RemoteDocument other;
+    other.document_type = "OTHER_OFFICIAL";
+    other.document_title = "费用减缴审批通知书";
+    CHECK_STR_EQ(OfficialEventTitleCn(other), "费用减缴审批通知书");
+    other.document_title = "";
+    CHECK_STR_EQ(OfficialEventTitleCn(other), "其他官方通知");
+}
+
+static void TestMergeOfficialEvent() {
+    std::string path = TempDb();
+    {
+        Database db(path);
+        Patent p;
+        p.geke_code = "GC-270";
+        p.title = "图像处理装置";
+        p.application_status = "实质审查中";
+        p.application_number = "CN201510375387.3";
+        p.id = db.InsertPatent(p, false);
+        CHECK(p.id > 0);
+
+        // --- grant event: creates an OA row, never touches application_status
+        RemoteDocument grant;
+        grant.source = "epo_global_dossier";
+        grant.document_type = "GRANT_NOTICE";
+        grant.document_title = "授权通知";
+        grant.raw_title = "Notification to grant patent right (ORIGINAL)";
+        grant.official_date = "2026-08-10";
+        grant.remote_document_id = "epo-grant-1";
+        grant.event_key = "grant-event";
+        grant.confidence = "HIGH";
+        auto merged = MergeOfficialEvent(db, p, grant);
+        CHECK(merged.code == ResultCode::NewOfficialEvent);
+        CHECK(merged.oa_created_id > 0);
+        {
+            auto oas = db.GetOAsForPatentId(p.id);
+            CHECK(oas.size() == 1);
+            CHECK_STR_EQ(oas.back().oa_type, "授权通知");
+            CHECK_STR_EQ(oas.back().issue_date, "2026-08-10");
+            CHECK_STR_EQ(oas.back().source, "epo_global_dossier");
+        }
+        Patent stored = db.GetPatentById(p.id);
+        CHECK_STR_EQ(stored.application_status, "实质审查中");
+
+        // --- same event from another source: same event_key -> NO duplicate
+        auto again = MergeOfficialEvent(db, p, grant);
+        CHECK(again.code == ResultCode::NoChange);
+        CHECK(db.GetOAsForPatentId(p.id).size() == 1);
+
+        // --- rejection: another new event type
+        RemoteDocument rejection;
+        rejection.source = "uspto_global_dossier";
+        rejection.document_type = "REJECTION_DECISION";
+        rejection.document_title = "驳回决定";
+        rejection.official_date = "2026-09-01";
+        rejection.event_key = "reject-event";
+        rejection.confidence = "HIGH";
+        auto rej = MergeOfficialEvent(db, p, rejection);
+        CHECK(rej.code == ResultCode::NewOfficialEvent);
+        CHECK(db.GetOAsForPatentId(p.id).size() == 2);
+
+        // --- OA with a human record: date conflict never overwrites
+        OARecord human;
+        human.patent_id = p.id;
+        human.geke_code = "GC-270";
+        human.oa_type = "第一次审查意见通知书";
+        human.issue_date = "2026-05-23";
+        human.handler = "张三";
+        human.oa_summary = "人工摘要";
+        int human_id = db.InsertOA(human, false);
+        CHECK(human_id > 0);
+
+        RemoteDocument oa_remote;
+        oa_remote.source = "uspto_global_dossier";
+        oa_remote.document_type = "OFFICE_ACTION_FIRST";
+        oa_remote.document_title = "第一次审查意见通知书";
+        oa_remote.official_date = "2026-06-01";     // different from local
+        oa_remote.event_key = "oa1-event";
+        oa_remote.confidence = "HIGH";
+        auto conflict = MergeOfficialEvent(db, p, oa_remote);
+        CHECK(conflict.code == ResultCode::DateConflict);
+        CHECK(conflict.date_conflict);
+        {
+            auto stored_oa = db.GetOAById(human_id);
+            CHECK_STR_EQ(stored_oa.issue_date, "2026-05-23");   // untouched
+            CHECK_STR_EQ(stored_oa.handler, "张三");
+            CHECK_STR_EQ(stored_oa.oa_summary, "人工摘要");
+            CHECK_STR_EQ(stored_oa.sync_flag, "date_conflict");
+        }
+
+        // --- OA record without a date gets it filled automatically
+        OARecord undated;
+        undated.patent_id = p.id;
+        undated.oa_type = "第二次审查意见通知书";
+        int undated_id = db.InsertOA(undated, false);
+        RemoteDocument oa2;
+        oa2.document_type = "OFFICE_ACTION_SECOND";
+        oa2.document_title = "第二次审查意见通知书";
+        oa2.official_date = "2026-07-15";
+        oa2.event_key = "oa2-event";
+        oa2.confidence = "HIGH";
+        auto filled = MergeOfficialEvent(db, p, oa2);
+        CHECK(filled.code == ResultCode::NoChange);
+        auto stored2 = db.GetOAById(undated_id);
+        CHECK_STR_EQ(stored2.issue_date, "2026-07-15");
+        CHECK_STR_EQ(stored2.sync_flag, "auto_filled_date");
+
+        // --- LOW confidence never writes
+        RemoteDocument low;
+        low.document_type = "GRANT_NOTICE";
+        low.document_title = "授权通知";
+        low.official_date = "2026-09-20";
+        low.confidence = "LOW";
+        auto lowres = MergeOfficialEvent(db, p, low);
+        CHECK(lowres.code == ResultCode::ManualReviewRequired);
+        CHECK(lowres.oa_created_id == 0);
+
+        // --- missing date never writes
+        RemoteDocument undated_remote;
+        undated_remote.document_type = "CORRECTION_NOTICE";
+        undated_remote.document_title = "补正通知";
+        undated_remote.official_date = "";
+        undated_remote.confidence = "HIGH";
+        auto nores = MergeOfficialEvent(db, p, undated_remote);
+        CHECK(nores.code == ResultCode::DateParseFailed);
+    }
+    std::filesystem::remove(path);
+}
+
 int main() {
     TestNormalizeOaType();
     TestQueueFilter();
     TestFingerprintDedup();
     TestOaMergeRules();
+    TestOfficialEventTitleCn();
+    TestMergeOfficialEvent();
     if (g_failures == 0) {
         std::cout << "all web dossier rule tests passed" << std::endl;
         return 0;

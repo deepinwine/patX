@@ -9,7 +9,7 @@ const char* ToString(ResultCode c) {
     switch (c) {
         case ResultCode::Ok: return "OK";
         case ResultCode::NoChange: return "NO_CHANGE";
-        case ResultCode::NewOfficeAction: return "NEW_OFFICE_ACTION";
+        case ResultCode::NewOfficialEvent: return "NEW_OFFICIAL_EVENT";
         case ResultCode::AuthRequired: return "AUTH_REQUIRED";
         case ResultCode::SessionExpired: return "SESSION_EXPIRED";
         case ResultCode::CaseNotFound: return "CASE_NOT_FOUND";
@@ -34,7 +34,9 @@ ResultCode ResultCodeFromString(const std::string& name) {
     static const std::pair<const char*, ResultCode> map[] = {
         {"OK", ResultCode::Ok},
         {"NO_CHANGE", ResultCode::NoChange},
-        {"NEW_OFFICE_ACTION", ResultCode::NewOfficeAction},
+        // NEW_OFFICE_ACTION is the legacy sidecar spelling of the same event
+        {"NEW_OFFICIAL_EVENT", ResultCode::NewOfficialEvent},
+        {"NEW_OFFICE_ACTION", ResultCode::NewOfficialEvent},
         {"AUTH_REQUIRED", ResultCode::AuthRequired},
         {"SESSION_EXPIRED", ResultCode::SessionExpired},
         {"CASE_NOT_FOUND", ResultCode::CaseNotFound},
@@ -153,6 +155,104 @@ std::string NormalizeOaTypeCn(const std::string& raw) {
     int ordinal = OaTypeOrdinalCn(compact);
     if (ordinal >= 1) return "第" + OrdinalToChinese(ordinal) + "次审查意见通知书";
     return "审查意见通知书";
+}
+
+std::string OfficialEventTitleCn(const RemoteDocument& document) {
+    if (document.document_type.rfind("OFFICE_ACTION_", 0) == 0) {
+        return NormalizeOaTypeCn(document.document_title);
+    }
+    if (document.document_type == "REJECTION_DECISION") return "驳回决定";
+    if (document.document_type == "GRANT_NOTICE") return "授权通知";
+    if (document.document_type == "CORRECTION_NOTICE") return "补正通知";
+    if (document.document_type == "OTHER_OFFICIAL") {
+        return document.document_title.empty() ? "其他官方通知" : document.document_title;
+    }
+    return document.document_title.empty() ? document.raw_title : document.document_title;
+}
+
+EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
+                                    const RemoteDocument& document) {
+    EventMergeResult result;
+    result.canonical_title = OfficialEventTitleCn(document);
+
+    if (document.confidence != "HIGH") {
+        result.code = ResultCode::ManualReviewRequired;
+        result.message = "置信度 " + document.confidence + "，待人工确认: " +
+                         result.canonical_title + " @ " + document.official_date;
+        return result;
+    }
+    if (document.official_date.empty()) {
+        result.code = ResultCode::DateParseFailed;
+        result.message = "官方发文缺少可解析的官文日: " + result.canonical_title;
+        return result;
+    }
+
+    const bool is_oa_family = document.document_type.rfind("OFFICE_ACTION_", 0) == 0;
+    auto existing = db.GetOAsForPatentId(patent.id);
+    const OARecord* same_type = nullptr;
+    const OARecord* same_date = nullptr;
+    for (const auto& e : existing) {
+        std::string e_canonical = NormalizeOaTypeCn(e.oa_type);
+        bool type_match = is_oa_family
+            ? (e_canonical == result.canonical_title && IsOfficeActionTypeCn(e_canonical))
+            : (e_canonical == result.canonical_title && !e_canonical.empty());
+        if (type_match) same_type = &e;
+        bool date_match = !e.issue_date.empty() && e.issue_date == document.official_date;
+        if (is_oa_family) {
+            // date takes precedence across the whole OA family
+            if (date_match && (IsOfficeActionTypeCn(e_canonical) || e.oa_type.empty()))
+                same_date = &e;
+        } else if (type_match && date_match) {
+            same_date = &e;
+        }
+    }
+
+    if (same_date) {
+        if (same_type && same_type->issue_date.empty()) {
+            db.UpdateOASyncFields(same_type->id, document.official_date, "auto_filled_date");
+            result.message = "已补入官文日 " + document.official_date;
+        } else {
+            result.code = ResultCode::NoChange;
+        }
+        return result;
+    }
+    if (same_type) {
+        if (same_type->issue_date.empty()) {
+            db.UpdateOASyncFields(same_type->id, document.official_date, "auto_filled_date");
+            result.code = ResultCode::NoChange;
+            result.message = "已补入官文日 " + document.official_date;
+        } else {
+            // Same event, different local date: never overwrite.
+            db.UpdateOASyncFields(same_type->id, "", "date_conflict");
+            result.code = ResultCode::DateConflict;
+            result.date_conflict = true;
+            result.message = "本地 " + result.canonical_title + " 官文日 " +
+                             same_type->issue_date + "，官网 " + document.official_date +
+                             "，待人工确认";
+        }
+        return result;
+    }
+
+    OARecord oa;
+    oa.patent_id = patent.id;
+    oa.geke_code = patent.geke_code;
+    oa.patent_title = patent.title;
+    oa.oa_type = result.canonical_title;
+    oa.issue_date = document.official_date;
+    oa.source = document.source.empty() ? "cnipa" : document.source;
+    oa.remote_document_id = document.remote_document_id;
+    oa.sync_flag = "web_new";
+    int id = db.InsertOA(oa, /*log_undo=*/true);
+    if (id > 0) {
+        result.code = ResultCode::NewOfficialEvent;
+        result.oa_created_id = id;
+        result.message = "发现新的官方发文: " + result.canonical_title + " @ " +
+                         document.official_date;
+    } else {
+        result.code = ResultCode::TemporaryError;
+        result.message = "官方发文写入失败: " + result.canonical_title;
+    }
+    return result;
 }
 
 } // namespace webdossier

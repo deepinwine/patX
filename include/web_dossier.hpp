@@ -30,7 +30,7 @@ namespace webdossier {
 enum class ResultCode {
     Ok = 0,
     NoChange,
-    NewOfficeAction,
+    NewOfficialEvent,
     AuthRequired,
     SessionExpired,
     CaseNotFound,
@@ -68,6 +68,12 @@ struct RemoteDocument {
     int oa_ordinal = 0;              // 1/2/3.. for 第N次审查意见通知书
     std::string ds;                  // cpquery list kind (TZS/ZJWJ)
     std::string wenjiandm;           // cpquery document code
+    // v5 cross-source identity
+    std::string source;              // provider that reported the event
+    std::string document_code;       // stable code (210401-CN / wenjiandm)
+    std::string document_version;    // ORIGINAL / TRANSLATED
+    std::string event_key;           // sha256 cross-provider dedup key
+    std::string source_trace;        // comma-joined providers (audit)
 };
 
 struct CaseSyncReport {
@@ -76,24 +82,24 @@ struct CaseSyncReport {
     std::string identifier_used;     // application or publication number
     ResultCode code = ResultCode::Ok;
     std::string message;             // human-readable, for the sync log UI
+    std::string provider_used;       // source that answered the query
     std::string latest_remote_oa_type;
     std::string latest_remote_oa_date;
     int documents_total = 0;
     int documents_new = 0;           // newly stored prosecution_documents
-    int oa_created_id = 0;           // oa_records.id when a new OA was inserted
+    int oa_created_id = 0;           // oa_records.id when a new event was inserted
     bool date_conflict = false;      // existing OA flagged, needs the user
-    std::string downloaded_path;     // set when the OA PDF was fetched (Phase 2)
 };
 
 struct BatchSummary {
     int total = 0;
     int checked = 0;
-    int new_oa = 0;
+    int new_events = 0;
     int no_change = 0;
     int auth_required = 0;
     int failed = 0;
     int manual_review = 0;           // MEDIUM/LOW confidence, not applied
-    std::vector<CaseSyncReport> findings;   // new OA + conflicts
+    std::vector<CaseSyncReport> findings;   // new events + conflicts
     std::vector<CaseSyncReport> failures;
 };
 
@@ -104,6 +110,26 @@ std::string NormalizeOaTypeCn(const std::string& raw);
 bool IsOfficeActionTypeCn(const std::string& normalized);
 // OA ordinal (第一次->1, 第二次->2, 第3次->3); 0 when unknown.
 int OaTypeOrdinalCn(const std::string& raw);
+
+// Canonical Chinese display name for ANY official event (OA, 驳回决定,
+// 授权通知, 补正通知, 其他官方通知).
+std::string OfficialEventTitleCn(const RemoteDocument& document);
+
+// Outcome of merging one remote official event into the local OA records.
+struct EventMergeResult {
+    ResultCode code = ResultCode::NoChange;
+    int oa_created_id = 0;
+    bool date_conflict = false;
+    std::string canonical_title;
+    std::string message;
+};
+
+// Safe merge of one official event into oa_records, under the same rules the
+// old OA-only path enforced: HIGH confidence only, empty dates get filled,
+// conflicting dates only get flagged, human fields are never touched, and
+// grant/rejection events never change Patent.application_status.
+EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
+                                    const RemoteDocument& document);
 
 class SidecarProcess;   // pimpl - hides wxProcess from this header
 
@@ -154,10 +180,12 @@ private:
         std::string message;
         std::string resolved_application_number;
         std::string auth_state;
+        std::string provider_used;           // source that answered
         std::vector<RemoteDocument> documents;
-        // Latest true Office Action (only OFFICE_ACTION_* types):
-        bool has_latest_oa = false;
-        RemoteDocument latest_oa;
+        // Latest remindable official event (OA / rejection / grant /
+        // correction / other); falls back to a legacy sidecar's latest_oa.
+        bool has_latest_event = false;
+        RemoteDocument latest_event;
     };
 
     CaseSyncReport ApplyRemoteResult(const Patent& patent, const RemoteCaseResult& remote);
@@ -166,7 +194,7 @@ private:
     Database& db_;
     std::string script_dir_;
     SidecarProcess* sidecar_ = nullptr;
-    int check_interval_days_ = 7;
+    int check_interval_days_ = 1;
 };
 
 } // namespace webdossier
