@@ -13,7 +13,8 @@ from typing import Optional, Tuple
 
 from ..document_classifier import (classify_official_document, direction_for,
                                    event_title_cn)
-from ..models import Confidence, ProsecutionDocument, ResultCode, normalize_date
+from ..models import (REMINDABLE_TYPES, Confidence, ProsecutionDocument,
+                      ResultCode, normalize_date)
 from ..number_resolver import normalize_cn_identifier
 from .base import DossierProvider, SyncOutcome
 
@@ -130,6 +131,8 @@ def parse_epo_document_list(html: str, application_number: str,
             continue                      # applicant submission
         if version == "TRANSLATED":
             continue                      # machine translation twin
+        if doc_type not in REMINDABLE_TYPES:
+            continue                      # search reports etc.: not tracked events
         documents.append(ProsecutionDocument(
             jurisdiction="CN",
             application_number=app_no,

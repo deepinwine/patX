@@ -1,8 +1,53 @@
 # patX Web Dossier Sidecar（审查意见网页同步）
 
 Python sidecar，由 patX C++ GUI 通过 stdin/stdout 行 JSON-RPC 驱动。
-用 Playwright 持久化 Chromium profile 访问官方审查信息网站（Phase 1: CNIPA），
-人工登录一次后按人工节奏逐件查询，发现新审查意见后由 C++ 侧按保护规则写入数据库。
+按 **USPTO Global Dossier → EPO Patent Register → CNIPA** 的固定顺序查询 CN 案件的
+官方发文元数据，发现新官方事件后由 C++ 侧按保护规则写入数据库。
+
+## 数据源与降级链（providers/chain.py）
+
+| 顺序 | Provider | 认证 | 方式 |
+|---|---|---|---|
+| 1 | `uspto_global_dossier` | 无 | 公开 JSON API（见下），浏览器 UA 的 urllib 直取 |
+| 2 | `epo_global_dossier` | 无 | urllib 直取 register.epo.org 公共页面 |
+| 3 | `cnipa` | 用户扫码登录 | CDP 接管真实 Chrome，页面内 JSON API |
+
+### 第 1 层实测情报（2026-09 实机验证）
+
+globaldossier.uspto.gov 是 Angular SPA，深链 hash 不会自动渲染，但底层数据服务是
+公开 CloudFront JSON（`app-config.json` 的 `externalapiURL`）：
+
+```
+GET  https://d1kazzu6rbodne.cloudfront.net/patent-family/svc/family/application/CN/{12位申请号}
+POST https://d1kazzu6rbodne.cloudfront.net/doc-list/svc/doclist/process
+     body {"request":[{"docNumber":"202510469601","country":"CN","kindCode":"A"}]}  # SSE
+```
+
+- 请求头需浏览器 UA + `Origin/Referer: https://globaldossier.uspto.gov`，否则 403
+- **限流凶**：连发几次就 `429 CLOUDFRONT RATE LIMITED`——provider 内置最小 2 秒间隔，
+  429 上抛 RATE_LIMITED 由降级链兜底
+- 文书字段：`docCode`（如 `210401-CN`=第一次审查意见）、`docDesc`（英文标题 +
+  `(ORIGINAL)/(TRANSLATED)` 后缀）、`legalDateStr`（`MM/DD/YYYY`）、`docId`
+  （OneDOC 标识，与 EPO register 同源）
+- 同一文书 ORIGINAL 与机翻 TRANSLATED 成对出现，解析器只留 ORIGINAL
+
+### 第 2 层现状（诚实说明）
+
+register.epo.org 部署了 Cloudflare Turnstile 人机验证：headless 与裸 HTTP 均 403，
+headful 真浏览器也会触发交互式挑战。按红线**不做任何验证码绕过**，因此该层在无人
+值守巡检中通常返回 ACCESS_DENIED 并降级到 CNIPA；代码与 fixture 保留（站点不挑战
+时即可工作）。Global Dossier 数据本身第 1 层已完整覆盖（同为 OneDOC 五局共享）。
+
+### 降级规则
+
+- 只在瞬时/结构性错误（NETWORK_ERROR、TEMPORARY_ERROR、RATE_LIMITED、ACCESS_DENIED、
+  PAGE_STRUCTURE_CHANGED、CASE_NOT_FOUND、RESOLVE_FAILED）时降级；任一来源确认数据
+  可读后即使事件列表为空也停止降级
+- CNIPA 返回 AUTH_REQUIRED 时直接上抛——后台巡检**绝不**自动打开登录浏览器
+- 只保留 `ORIGINAL` 官方发文且类型属于可提醒事件（OA/驳回/授权/补正/其他官方）：
+  TRANSLATED 机翻副本、申请人提交文件、检索报告均被解析器丢弃
+- 三个来源的官方事件都规范为同一 event_key（jurisdiction+申请号+类型+次数+官文日+
+  规范化标题 的 sha256），同一事件跨来源只落一行（`source_trace` 记录谁报告过）
 
 ## 设计红线（有意为之，不接受“优化”掉）
 

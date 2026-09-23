@@ -114,9 +114,12 @@ _CODE_TYPES = {
 }
 
 _EN_FINAL_RE = re.compile(r"final rejection|decision to reject")
+_EN_SEARCH_RE = re.compile(r"\bsearch\b|search report")
 _EN_APPLICANT_RE = re.compile(
     r"response to|remarks|observations|amendment|amended claims|substitution of"
-    r"|power of attorney|assignment|withdrawal|request for")
+    r"|power of attorney|assignment|withdrawal|request for"
+    r"|instructions|right-claiming|\bclaims\b|\bdescription\b|\bdrawings\b"
+    r"|\babstract\b")
 _EN_GRANT_RE = re.compile(r"grant patent right|notification to grant|registration formalities")
 _EN_CORRECTION_RE = re.compile(r"rectification|correction notice")
 _EN_OA_RE = re.compile(r"examination opinions|office action")
@@ -133,6 +136,8 @@ def _classify_en(raw_title: str):
         return DocumentType.RESPONSE_TO_OFFICE_ACTION, 0
     if _EN_FINAL_RE.search(compact):
         return DocumentType.REJECTION_DECISION, 0
+    if _EN_SEARCH_RE.search(compact):
+        return DocumentType.SEARCH_REPORT, 0
     for word, ordinal in _EN_ORDINALS.items():
         if re.search(rf"\b{word}\b.*{_EN_OA_RE.pattern}", compact):
             doc_type = (DocumentType.OFFICE_ACTION_FIRST if ordinal == 1 else

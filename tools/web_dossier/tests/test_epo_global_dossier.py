@@ -3,10 +3,11 @@ from pathlib import Path
 
 from web_dossier.models import DocumentType, ResultCode
 from web_dossier.providers.epo_global_dossier import parse_epo_document_list
-from web_dossier.providers.uspto_global_dossier import parse_uspto_document_list
+from web_dossier.providers.uspto_global_dossier import parse_uspto_doc_payload
 
 FIXTURE = Path(__file__).parents[1] / "fixtures/epo_global_dossier/cn202510469601_documents.html"
-USPTO_FIXTURE = Path(__file__).parents[1] / "fixtures/uspto_global_dossier/cn202510469601_documents.html"
+USPTO_FIXTURE = (Path(__file__).parents[1] /
+                 "fixtures/uspto_global_dossier/cn2025469601_payload.json")
 
 
 def test_epo_keeps_original_and_drops_translation():
@@ -26,8 +27,8 @@ def test_epo_keeps_original_and_drops_translation():
 def test_epo_and_uspto_collapse_to_same_event_key():
     epo = parse_epo_document_list(FIXTURE.read_text(encoding="utf-8"),
                                   "CN202510469601.5", "")
-    uspto = parse_uspto_document_list(USPTO_FIXTURE.read_text(encoding="utf-8"),
-                                      "CN202510469601.5", "")
+    uspto = parse_uspto_doc_payload(USPTO_FIXTURE.read_text(encoding="utf-8"),
+                                    "CN202510469601.5", "")
     assert epo.documents[0].event_key() == uspto.documents[0].event_key()
 
 

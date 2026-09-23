@@ -55,17 +55,15 @@ def _get_provider(name: str):
 
 def _get_chain():
     """Lazily build the USPTO -> EPO -> CNIPA chain. Constructing a provider
-    must never open a browser; the USPTO headless context only launches on
-    first use."""
+    must never open a browser - USPTO and EPO are plain HTTP, CNIPA only
+    launches its visible browser on explicit login."""
     global _CHAIN
     if _CHAIN is None:
         from web_dossier.browser.manager import BrowserManager
         from web_dossier.providers.chain import ProviderChain
         from web_dossier.providers.epo_global_dossier import EpoGlobalDossierProvider
         from web_dossier.providers.uspto_global_dossier import UsptoGlobalDossierProvider
-        uspto = UsptoGlobalDossierProvider(
-            BrowserManager("uspto_global_dossier", headless=True,
-                           prefer_system_browser=False))
+        uspto = UsptoGlobalDossierProvider()
         epo = EpoGlobalDossierProvider()
         cnipa = CNIPAWebProvider(browser_manager=BrowserManager("cnipa"))
         _CHAIN = ProviderChain([uspto, epo, cnipa])

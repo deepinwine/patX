@@ -1,0 +1,52 @@
+{
+  "country": "CN",
+  "internal": "false",
+  "corrAppNum": "202510469601",
+  "id": "202510469601",
+  "type": "application",
+  "list": [
+    {
+      "IP5": true,
+      "appDate": 1744603200000,
+      "appDateStr": "04/14/2025",
+      "appNum": "202510469601",
+      "applicantNames": ["Grignard Semiconductor (Shanghai) Ltd., "],
+      "countryCode": "CN",
+      "docList": {
+        "applicantNames": ["Grignard Semiconductor (Shanghai) Ltd., "],
+        "country": "CN",
+        "docNumber": "202510469601.A",
+        "docs": [
+          {"docCode": "100002-CN", "docCodeDesc": "No document group defined for this document",
+           "docDesc": "instructions (ORIGINAL)", "docFormat": "PDF", "docGroupCode": "unknown",
+           "docId": "202510469601510000220250414_CN", "legalDate": 1744603200000,
+           "legalDateStr": "04/14/2025", "mimeTypeData": null, "numberOfPages": 0,
+           "shareable": false},
+          {"docCode": "0-CN", "docCodeDesc": "Search report",
+           "docDesc": "First search (ORIGINAL)", "docFormat": "PDF", "docGroupCode": "search",
+           "docId": "20251046960150202620260523_CN", "legalDate": 1779508800000,
+           "legalDateStr": "05/23/2026", "mimeTypeData": null, "numberOfPages": 0,
+           "shareable": true},
+          {"docCode": "210401", "docCodeDesc": "Notice of examination opinions",
+           "docDesc": "First notice of examination opinions (TRANSLATED)", "docFormat": "PDF",
+           "docGroupCode": "office-action", "docId": "20251046960152104012026052310110680664683123_EN",
+           "legalDate": 1779508800000, "legalDateStr": "05/23/2026", "mimeTypeData": null,
+           "numberOfPages": 8, "shareable": true},
+          {"docCode": "210401-CN", "docCodeDesc": "Notice of examination opinions",
+           "docDesc": "First notice of examination opinions (ORIGINAL)", "docFormat": "PDF",
+           "docGroupCode": "office-action",
+           "docId": "20251046960152104012026052310110680664683123_CN",
+           "legalDate": 1779508800000, "legalDateStr": "05/23/2026", "mimeTypeData": null,
+           "numberOfPages": 8, "shareable": true},
+          {"docCode": "110206-CN", "docCodeDesc": "Response to office action",
+           "docDesc": "Response to first office action (ORIGINAL)", "docFormat": "PDF",
+           "docGroupCode": "applicant",
+           "docId": "2025104696015110206202607012099580664683123_CN",
+           "legalDate": 1751323200000, "legalDateStr": "07/01/2026", "mimeTypeData": null,
+           "numberOfPages": 4, "shareable": false}
+        ]
+      },
+      "kindCode": "A"
+    }
+  ]
+}
