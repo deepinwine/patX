@@ -37,9 +37,11 @@ class BrowserManager:
     """Owns one persistent Chromium context for one provider."""
 
     def __init__(self, provider: str, headless: bool = False,
-                 profile_dir: Optional[str] = None, debug_root: str = "debug/web_dossier"):
+                 profile_dir: Optional[str] = None, debug_root: str = "debug/web_dossier",
+                 prefer_system_browser: bool = True):
         self.provider = provider
         self.headless = headless
+        self.prefer_system_browser = prefer_system_browser
         self.profile_dir = Path(profile_dir) if profile_dir else default_profile_dir(provider)
         self.debug_root = Path(debug_root)
         self._pw = None
@@ -153,6 +155,13 @@ class BrowserManager:
         from playwright.sync_api import sync_playwright
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
+        # 0) public no-login sources skip the takeover dance entirely and use
+        #    Playwright's own headless Chromium (friendly sites only)
+        if not self.prefer_system_browser:
+            self._context = self._pw.chromium.launch_persistent_context(
+                str(self.profile_dir), headless=self.headless)
+            self._adopt_page()
+            return True
         # 1) a browser from a previous run may still be up with our profile -
         #    attach to it (keeps the logged-in session warm)
         for port in range(9333, 9341):
