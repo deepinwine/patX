@@ -156,6 +156,20 @@ public:
         Layout();
     }
 
+    // Opens the dialog parked on the login step (background batches surface
+    // login needs this way instead of opening a browser unasked).
+    void ShowLoginPrompt() {
+        login_btn_->Show(true);
+        login_btn_->Enable(true);
+        current_->SetLabel(
+            UTF8_STR("CNIPA 登录状态已失效。点击【打开浏览器登录】完成登录后重试同步。"));
+        close_btn_->SetLabel(UTF8_STR("关闭"));
+        close_btn_->Enable(true);
+        Layout();
+        Show(true);
+        Raise();
+    }
+
 private:
     void UpdateStats() {
         stats_->SetLabel(wxString::Format(
@@ -369,29 +383,36 @@ void WebDossierController::Login() {
     StartWorker({}, true);
 }
 
-void WebDossierController::StartWorker(const std::vector<Patent>& queue, bool is_login_only) {
+void WebDossierController::StartWorker(const std::vector<Patent>& queue, bool is_login_only,
+                                        bool show_dialog, bool background_run) {
     if (running_.load()) {
-        wxMessageBox(UTF8_STR("已有同步任务在进行中"), UTF8_STR("审查信息同步"),
-                     wxOK | wxICON_INFORMATION, parent_);
+        if (show_dialog) {
+            wxMessageBox(UTF8_STR("已有同步任务在进行中"), UTF8_STR("审查信息同步"),
+                         wxOK | wxICON_INFORMATION, parent_);
+        }
         return;
     }
     cancel_ = false;
     running_ = true;
+    background_run_ = background_run;
 
-    if (!active_dialog_) active_dialog_ = new WebDossierSyncDialog(parent_, *this);
-    if (is_login_only) {
-        active_dialog_->Show(true);
-        active_dialog_->Raise();
-    } else {
-        active_dialog_->BeginBatch(static_cast<int>(queue.size()));
-        active_dialog_->Show(true);
-        active_dialog_->Raise();
+    if (show_dialog) {
+        if (!active_dialog_) active_dialog_ = new WebDossierSyncDialog(parent_, *this);
+        if (is_login_only) {
+            active_dialog_->Show(true);
+            active_dialog_->Raise();
+        } else {
+            active_dialog_->BeginBatch(static_cast<int>(queue.size()));
+            active_dialog_->Show(true);
+            active_dialog_->Raise();
+        }
     }
 
     auto* worker = new DossierWorker(*manager_, queue, is_login_only, cancel_, this);
     if (worker->Create() != wxTHREAD_NO_ERROR) {
         delete worker;
         running_ = false;
+        background_run_ = false;
         wxMessageBox("failed to start worker", "Error", wxOK | wxICON_ERROR, parent_);
     } else {
         worker->Run();
@@ -408,6 +429,13 @@ void WebDossierController::OnBatchDone(wxThreadEvent& event) {
     }
     running_ = false;
     auto summary = event.GetPayload<webdossier::BatchSummary>();
+    if (background_run_) {
+        background_run_ = false;
+        last_summary_ = summary;
+        if (on_finished_) on_finished_();   // refresh the OA list silently
+        ShowBatchNotification(summary);
+        return;
+    }
     if (active_dialog_) active_dialog_->OnBatchDone(summary);
     if (on_finished_) on_finished_();
     if (summary.auth_required > 0) {
@@ -500,4 +528,107 @@ void WebDossierController::ShowErrorCases() {
     sizer->Add(ok, 0, wxALL | wxALIGN_RIGHT, 8);
     dlg.SetSizer(sizer);
     dlg.ShowModal();
+}
+
+void WebDossierController::SyncDueInBackground() {
+    if (running_.load()) return;   // a manual or previous sweep is busy
+    auto queue = db_.GetPatentsDueForDossierCheck(
+        false, static_cast<long long>(time(nullptr)), 0);
+    if (queue.empty()) return;
+    std::string error;
+    if (!EnsureManager(error)) {
+        // silent: the next 30-minute sweep retries automatically
+        wxLogWarning("background dossier sweep skipped: %s", error.c_str());
+        return;
+    }
+    StartWorker(queue, false, /*show_dialog=*/false, /*background_run=*/true);
+}
+
+void WebDossierController::ShowSettings() {
+    int current = atoi(db_.GetConfig("web_dossier_interval_days").c_str());
+    if (current != 1 && current != 3 && current != 7) current = 1;
+    const wxString choices[] = {UTF8_STR("每天检查一次"),
+                                UTF8_STR("每 3 天检查一次"),
+                                UTF8_STR("每 7 天检查一次")};
+    wxSingleChoiceDialog dlg(parent_, UTF8_STR("后台自动检查官方发文的频率："),
+                             UTF8_STR("审查提醒设置"), 3, choices);
+    dlg.SetSelection(current == 1 ? 0 : (current == 3 ? 1 : 2));
+    if (dlg.ShowModal() != wxID_OK) return;
+    static const int days[] = {1, 3, 7};
+    db_.SetConfig("web_dossier_interval_days", std::to_string(days[dlg.GetSelection()]));
+    wxMessageBox(UTF8_STR("已保存。后台巡检按新频率执行，无需重启。"),
+                 UTF8_STR("审查提醒设置"), wxOK | wxICON_INFORMATION, parent_);
+}
+
+void WebDossierController::ShowLastFindings() {
+    const auto& findings = last_summary_.findings;
+    wxDialog dlg(parent_, wxID_ANY, UTF8_STR("最新巡检发现 / Latest Findings"),
+                 wxDefaultPosition, wxSize(700, 420),
+                 wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+    auto* list = new wxListCtrl(&dlg, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                wxLC_REPORT | wxBORDER_SUNKEN);
+    list->InsertColumn(0, UTF8_STR("案件"), wxLIST_FORMAT_LEFT, 110);
+    list->InsertColumn(1, UTF8_STR("官方事件"), wxLIST_FORMAT_LEFT, 240);
+    list->InsertColumn(2, UTF8_STR("官文日"), wxLIST_FORMAT_LEFT, 110);
+    list->InsertColumn(3, UTF8_STR("状态"), wxLIST_FORMAT_LEFT, 150);
+    int row = 0;
+    for (const auto& r : findings) {
+        long idx = list->InsertItem(row, wxString::FromUTF8(r.geke_code.c_str()));
+        list->SetItem(idx, 1, wxString::FromUTF8(
+            r.latest_remote_oa_type.empty() ? r.message.c_str()
+                                            : r.latest_remote_oa_type.c_str()));
+        list->SetItem(idx, 2, r.latest_remote_oa_date.empty()
+                                  ? "-"
+                                  : wxString::FromUTF8(r.latest_remote_oa_date.c_str()));
+        list->SetItem(idx, 3, r.code == webdossier::ResultCode::NewOfficialEvent
+                                  ? UTF8_STR("★ 新发现")
+                                  : (r.code == webdossier::ResultCode::DateConflict
+                                         ? UTF8_STR("日期冲突待确认")
+                                         : UTF8_STR("待人工确认")));
+        list->SetItemData(idx, r.patent_id);
+        row++;
+    }
+    sizer->Add(list, 1, wxALL | wxEXPAND, 10);
+    auto* ok = new wxButton(&dlg, wxID_OK, UTF8_STR("关闭"));
+    sizer->Add(ok, 0, wxALL | wxALIGN_RIGHT, 8);
+    dlg.SetSizer(sizer);
+    dlg.ShowModal();
+}
+
+void WebDossierController::ShowLoginRequired() {
+    if (!active_dialog_) active_dialog_ = new WebDossierSyncDialog(parent_, *this);
+    active_dialog_->ShowLoginPrompt();
+}
+
+void WebDossierController::ShowBatchNotification(const webdossier::BatchSummary& summary) {
+    int conflicts = 0;
+    for (const auto& r : summary.findings) {
+        if (r.code == webdossier::ResultCode::DateConflict) conflicts++;
+    }
+    bool has_new = summary.new_events > 0;
+    bool needs_attention = conflicts > 0 || summary.manual_review > 0;
+    if (!has_new && !needs_attention && summary.auth_required == 0) return;   // silent
+
+    wxString message;
+    if (has_new) {
+        message = wxString::Format(UTF8_STR("发现 %d 件新官方事件"), summary.new_events);
+        if (needs_attention) {
+            message += wxString::Format(UTF8_STR("，%d 件待人工确认"),
+                                        conflicts + summary.manual_review);
+        }
+    } else if (summary.auth_required > 0) {
+        message = UTF8_STR("CNIPA 登录状态已失效，需要重新登录");
+    } else {
+        message = wxString::Format(UTF8_STR("%d 件官方发文待人工确认"),
+                                   conflicts + summary.manual_review);
+    }
+
+    notification_ = std::make_unique<wxNotificationMessage>(
+        UTF8_STR("审查提醒"), message, parent_);
+    notification_->Bind(wxEVT_NOTIFICATION_MESSAGE_CLICK, [this](wxCommandEvent&) {
+        if (last_summary_.auth_required > 0) ShowLoginRequired();
+        else ShowLastFindings();
+    });
+    notification_->Show();
 }

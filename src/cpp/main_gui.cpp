@@ -172,8 +172,16 @@ public:
         SetupUI();
         LoadAllData();
 
-        // Auto-sync check timer (fires every 30 min; the panel decides
-        // whether the configured interval has elapsed)
+        // Background dossier sweep: first run ~30s after startup so the app
+        // settles, then the scheduler ticks every 30 minutes and the due
+        // queue (next_dossier_check_at) decides what actually gets checked.
+        auto_sync_timer_ = new wxTimer(this);
+        Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
+            if (dossier_controller) dossier_controller->SyncDueInBackground();
+            if (auto_sync_timer_->IsOneShot())
+                auto_sync_timer_->Start(30 * 60 * 1000);   // switch to periodic
+        }, auto_sync_timer_->GetId());
+        auto_sync_timer_->StartOnce(30 * 1000);
     }
 
 private:
@@ -241,6 +249,7 @@ private:
         ID_DOSSIER_LOGIN,
         ID_DOSSIER_HISTORY,
         ID_DOSSIER_ERRORS,
+        ID_DOSSIER_SETTINGS,
         ID_EPO_FAMILY
     };
 
@@ -312,6 +321,9 @@ private:
         dossier_menu->Append(ID_DOSSIER_LOGIN, LANG_STR("CNIPA &Login...", "CNIPA 登录(&L)..."));
         dossier_menu->Append(ID_DOSSIER_HISTORY, LANG_STR("Sync &History", "同步历史(&H)"));
         dossier_menu->Append(ID_DOSSIER_ERRORS, LANG_STR("&Problem Cases", "异常案件(&P)"));
+        dossier_menu->AppendSeparator();
+        dossier_menu->Append(ID_DOSSIER_SETTINGS,
+                             LANG_STR("Reminder &Settings...", "审查提醒设置(&S)..."));
         mb->Append(dossier_menu, LANG_STR("&Dossier Sync", "审查信息同步(&D)"));
 
         wxMenu* help_menu = new wxMenu;
@@ -345,6 +357,7 @@ private:
         Bind(wxEVT_MENU, &PatXFrame::OnDossierLogin, this, ID_DOSSIER_LOGIN);
         Bind(wxEVT_MENU, &PatXFrame::OnDossierHistory, this, ID_DOSSIER_HISTORY);
         Bind(wxEVT_MENU, &PatXFrame::OnDossierErrors, this, ID_DOSSIER_ERRORS);
+        Bind(wxEVT_MENU, &PatXFrame::OnDossierSettings, this, ID_DOSSIER_SETTINGS);
         Bind(wxEVT_MENU, &PatXFrame::OnEpoFamily, this, ID_EPO_FAMILY);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(0); }, ID_THEME_LIGHT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { SetTheme(1); }, ID_THEME_DARK);
@@ -2259,6 +2272,7 @@ private:
                 db = std::make_unique<Database>(new_path);
                 dossier_controller = std::make_unique<WebDossierController>(
                     this, *db, [this](const std::string& code) { ShowPatentByCode(code); });
+                dossier_controller->set_on_finished([this]() { LoadOA(); });
                 LoadAllData();
                 status_bar->SetStatusText(wxString("patX v") + PATX_VERSION + " | Database: " +
                                           wxFileName(dlg.GetPath()).GetFullName());
@@ -2280,6 +2294,7 @@ private:
                 db = std::make_unique<Database>("patents.db");
                 dossier_controller = std::make_unique<WebDossierController>(
                     this, *db, [this](const std::string& code) { ShowPatentByCode(code); });
+                dossier_controller->set_on_finished([this]() { LoadOA(); });
                 LoadAllData();
             }
         }
@@ -2349,6 +2364,7 @@ private:
     void OnDossierLogin(wxCommandEvent&) { dossier_controller->Login(); }
     void OnDossierHistory(wxCommandEvent&) { dossier_controller->ShowHistory(); }
     void OnDossierErrors(wxCommandEvent&) { dossier_controller->ShowErrorCases(); }
+    void OnDossierSettings(wxCommandEvent&) { dossier_controller->ShowSettings(); }
 
     void OnEpoFamily(wxCommandEvent&) {
         // prefill from the selected patent when possible
