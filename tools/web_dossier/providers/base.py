@@ -19,6 +19,8 @@ class SyncOutcome:
     auth_state: str = "NOT_INITIALIZED"
     documents: List[ProsecutionDocument] = field(default_factory=list)
     resolved_application_number: str = ""
+    provider_used: str = ""                   # filled by the provider chain
+    attempts: List["ProviderAttempt"] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:

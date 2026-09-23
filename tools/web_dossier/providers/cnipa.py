@@ -269,6 +269,9 @@ def parse_cpquery_list_response(bodies, application_number="", publication_numbe
                 oa_ordinal=ordinal,
                 ds=str(row.get("ds") or add.get("ds") or ""),
                 wenjiandm=str(add.get("wenjiandm") or ""),
+                document_code=str(add.get("wenjiandm") or ""),
+                document_version="ORIGINAL",
+                source_trace=["cnipa"],
             ))
     if not docs:
         return SyncOutcome(code=ResultCode.PAGE_STRUCTURE_CHANGED,
