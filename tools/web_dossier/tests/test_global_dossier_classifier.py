@@ -55,6 +55,21 @@ def test_final_rejection_conflicts_with_first_oa_code():
     ) == (DocumentType.UNKNOWN, 0, Confidence.LOW)
 
 
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Non-final rejection (ORIGINAL)",
+        "Non final rejection (ORIGINAL)",
+    ],
+)
+def test_non_final_rejection_is_not_a_rejection_decision(title):
+    assert classify_official_document(title, "") == (
+        DocumentType.UNKNOWN,
+        0,
+        Confidence.LOW,
+    )
+
+
 def test_code_and_title_conflict_requires_manual_classification():
     assert classify_official_document(
         "Second notice of examination opinions (ORIGINAL)", "210401-CN"

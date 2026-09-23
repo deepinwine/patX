@@ -103,6 +103,8 @@ def _classify_english_title(raw_title: str):
     if not title:
         return None
 
+    if re.search(r"\bnon(?:-|\s+)final\s+rejection\b", title):
+        return None
     if re.search(r"\b(?:final\s+rejection(?:\s+decision)?|decision\s+to\s+reject)\b", title):
         return DocumentType.REJECTION_DECISION, 0, Confidence.HIGH
     if re.search(
