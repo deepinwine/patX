@@ -35,6 +35,8 @@ _DOCUMENT_CODE_MAP = {
     "210401-CN": (DocumentType.OFFICE_ACTION_FIRST, 1, Confidence.HIGH),
 }
 
+_EN_DASHES = str.maketrans({ord(char): "-" for char in "‐‑‒–—―−"})
+
 
 def _ordinal_of(title: str) -> int:
     m = _OA_ORDINAL_RE.search(title)
@@ -99,12 +101,17 @@ def classify_cn_title(raw_title: str) -> Tuple[DocumentType, int, Confidence]:
 
 
 def _classify_english_title(raw_title: str):
-    title = re.sub(r"\s+", " ", raw_title or "").strip().lower()
+    title = re.sub(
+        r"\s+", " ", (raw_title or "").translate(_EN_DASHES)
+    ).strip().lower()
+    title = re.sub(r"\s*\((?:original|translated)\)\s*$", "", title).strip()
     if not title:
         return None
 
+    if re.match(r"^(?:response|request|amendment)\b", title):
+        return DocumentType.UNKNOWN, 0, Confidence.LOW
     if re.search(r"\bnon(?:-|\s+)final\s+rejection\b", title):
-        return None
+        return DocumentType.UNKNOWN, 0, Confidence.LOW
     if re.search(r"\b(?:final\s+rejection(?:\s+decision)?|decision\s+to\s+reject)\b", title):
         return DocumentType.REJECTION_DECISION, 0, Confidence.HIGH
     if re.search(

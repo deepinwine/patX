@@ -126,6 +126,19 @@ def fingerprint(jurisdiction: str, application_number: str, document_title: str,
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
+def _event_title_token(
+    document_type: DocumentType, oa_ordinal: int, document_title: str
+) -> str:
+    if document_type.is_office_action:
+        return f"OFFICE_ACTION:{document_type.value}:{oa_ordinal}"
+    fixed_tokens = {
+        DocumentType.REJECTION_DECISION: "REJECTION_DECISION",
+        DocumentType.GRANT_NOTICE: "GRANT_NOTICE",
+        DocumentType.CORRECTION_NOTICE: "CORRECTION_NOTICE",
+    }
+    return fixed_tokens.get(document_type, normalize_title(document_title))
+
+
 @dataclass
 class ProsecutionDocument:
     jurisdiction: str = "CN"
@@ -178,12 +191,14 @@ class ProsecutionDocument:
     def event_key(self) -> str:
         """Cross-provider identity for one official prosecution event."""
         basis = "|".join([
-            self.jurisdiction or "",
-            self.application_number or "",
+            (self.jurisdiction or "").strip().upper(),
+            (self.application_number or "").strip(),
             self.document_type.value,
             str(self.oa_ordinal),
-            self.official_date or "",
-            normalize_title(self.document_title),
+            (self.official_date or "").strip(),
+            _event_title_token(
+                self.document_type, self.oa_ordinal, self.document_title
+            ),
         ])
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
