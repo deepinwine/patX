@@ -18,6 +18,23 @@ _ZH_NUM = {"一": 1, "1": 1, "二": 2, "两": 2, "2": 2, "三": 3, "3": 3, "四"
 
 _OA_ORDINAL_RE = re.compile(r"第\s*([0-9０-９一二三四五六七八九十两]+)\s*次")
 
+_EN_ORDINALS = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+}
+
+_DOCUMENT_CODE_MAP = {
+    "210401-CN": (DocumentType.OFFICE_ACTION_FIRST, 1, Confidence.HIGH),
+}
+
 
 def _ordinal_of(title: str) -> int:
     m = _OA_ORDINAL_RE.search(title)
@@ -81,6 +98,56 @@ def classify_cn_title(raw_title: str) -> Tuple[DocumentType, int, Confidence]:
     return DocumentType.UNKNOWN, 0, Confidence.LOW
 
 
+def _classify_english_title(raw_title: str):
+    title = re.sub(r"\s+", " ", raw_title or "").strip().lower()
+    if not title:
+        return None
+
+    if re.search(r"\b(?:final\s+rejection\s+decision|decision\s+to\s+reject)\b", title):
+        return DocumentType.REJECTION_DECISION, 0, Confidence.HIGH
+    if "grant" in title and re.search(r"\bpatent\s+right\b", title):
+        return DocumentType.GRANT_NOTICE, 0, Confidence.HIGH
+    if re.search(r"\b(?:rectification|correction)\b", title):
+        return DocumentType.CORRECTION_NOTICE, 0, Confidence.HIGH
+
+    ordinal_match = re.search(
+        r"\b(" + "|".join(_EN_ORDINALS) + r")\b.*"
+        r"\b(?:examination\s+opinions?|office\s+actions?)\b",
+        title,
+    )
+    if ordinal_match:
+        ordinal = _EN_ORDINALS[ordinal_match.group(1)]
+        document_type = (
+            DocumentType.OFFICE_ACTION_FIRST
+            if ordinal == 1
+            else DocumentType.OFFICE_ACTION_SECOND
+            if ordinal == 2
+            else DocumentType.OFFICE_ACTION_NTH
+        )
+        return document_type, ordinal, Confidence.HIGH
+    return None
+
+
+def classify_official_document(
+    raw_title: str, document_code: str = ""
+) -> Tuple[DocumentType, int, Confidence]:
+    """Classify a provider-neutral official document title and stable code."""
+    code_result = _DOCUMENT_CODE_MAP.get((document_code or "").strip().upper())
+    title_result = _classify_english_title(raw_title)
+    if title_result is None:
+        cn_result = classify_cn_title(raw_title)
+        if cn_result[0] != DocumentType.UNKNOWN:
+            title_result = cn_result
+
+    if code_result is not None:
+        if title_result is not None and title_result[:2] != code_result[:2]:
+            return DocumentType.UNKNOWN, 0, Confidence.LOW
+        return code_result
+    if title_result is not None:
+        return title_result
+    return classify_cn_title(raw_title)
+
+
 def oa_title_cn(document_type: DocumentType, ordinal: int) -> str:
     """Canonical Chinese OA title for storing into OARecord.oa_type."""
     zh = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "七", 8: "八", 9: "九"}
@@ -94,6 +161,20 @@ def oa_title_cn(document_type: DocumentType, ordinal: int) -> str:
     if document_type.is_office_action:
         return "审查意见通知书"
     return ""
+
+
+def event_title_cn(
+    document_type: DocumentType, ordinal: int, fallback_title: str
+) -> str:
+    """Canonical Chinese title for a provider-neutral official event."""
+    if document_type.is_office_action:
+        return oa_title_cn(document_type, ordinal)
+    fixed_titles = {
+        DocumentType.REJECTION_DECISION: "驳回决定",
+        DocumentType.GRANT_NOTICE: "授予专利权通知书",
+        DocumentType.CORRECTION_NOTICE: "补正通知书",
+    }
+    return fixed_titles.get(document_type, fallback_title or "其他官方通知")
 
 
 def direction_for(document_type: DocumentType) -> str:

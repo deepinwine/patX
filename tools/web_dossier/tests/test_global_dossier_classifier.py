@@ -1,0 +1,159 @@
+from dataclasses import replace
+
+import pytest
+
+from web_dossier.document_classifier import (
+    classify_cn_title,
+    classify_official_document,
+    event_title_cn,
+    oa_title_cn,
+)
+from web_dossier.models import Confidence, DocumentType, ProsecutionDocument, ResultCode
+
+
+def test_global_dossier_titles_and_codes():
+    assert classify_official_document(
+        "First notice of examination opinions (ORIGINAL)", "210401-CN"
+    ) == (DocumentType.OFFICE_ACTION_FIRST, 1, Confidence.HIGH)
+    assert classify_official_document(
+        "Second notice of examination opinions (ORIGINAL)", ""
+    )[:2] == (DocumentType.OFFICE_ACTION_SECOND, 2)
+    assert classify_official_document("Decision to reject (ORIGINAL)", "")[:2] == (
+        DocumentType.REJECTION_DECISION,
+        0,
+    )
+    assert classify_official_document(
+        "Notification to grant patent right (ORIGINAL)", ""
+    )[:2] == (DocumentType.GRANT_NOTICE, 0)
+    assert classify_official_document(
+        "Notification to make rectification (ORIGINAL)", ""
+    )[:2] == (DocumentType.CORRECTION_NOTICE, 0)
+
+
+def test_final_is_not_an_oa_ordinal():
+    doc_type, ordinal, confidence = classify_official_document(
+        "Final rejection decision (ORIGINAL)", ""
+    )
+    assert (doc_type, ordinal, confidence) == (
+        DocumentType.REJECTION_DECISION,
+        0,
+        Confidence.HIGH,
+    )
+
+
+def test_code_and_title_conflict_requires_manual_classification():
+    assert classify_official_document(
+        "Second notice of examination opinions (ORIGINAL)", "210401-CN"
+    ) == (DocumentType.UNKNOWN, 0, Confidence.LOW)
+
+
+@pytest.mark.parametrize(
+    ("title", "ordinal"),
+    [
+        ("Third notice of examination opinions (ORIGINAL)", 3),
+        ("Fourth office action (ORIGINAL)", 4),
+        ("Tenth examination opinions (ORIGINAL)", 10),
+    ],
+)
+def test_later_english_office_actions_preserve_ordinal(title, ordinal):
+    assert classify_official_document(title, "") == (
+        DocumentType.OFFICE_ACTION_NTH,
+        ordinal,
+        Confidence.HIGH,
+    )
+
+
+def test_cross_provider_event_key_ignores_provider_specific_id():
+    uspto = ProsecutionDocument(
+        source="uspto_global_dossier",
+        application_number="CN202510469601.5",
+        document_type=DocumentType.OFFICE_ACTION_FIRST,
+        document_title="第一次审查意见通知书",
+        official_date="2026-05-23",
+        remote_document_id="uspto-123",
+    )
+    epo = ProsecutionDocument(
+        source="epo_global_dossier",
+        application_number="CN202510469601.5",
+        document_type=DocumentType.OFFICE_ACTION_FIRST,
+        document_title="第一次审查意见通知书",
+        official_date="2026-05-23",
+        remote_document_id="epo-456",
+    )
+    assert uspto.event_key() == epo.event_key()
+    assert event_title_cn(DocumentType.REJECTION_DECISION, 0, "") == "驳回决定"
+
+
+def test_event_key_uses_all_official_event_identity_fields():
+    baseline = ProsecutionDocument(
+        jurisdiction="CN",
+        application_number="CN202510469601.5",
+        source="cnipa",
+        remote_document_id="cnipa-123",
+        document_type=DocumentType.OFFICE_ACTION_NTH,
+        oa_ordinal=3,
+        official_date="2026-05-23",
+        document_title="第三次 审查意见通知书",
+    )
+    equivalent = replace(
+        baseline,
+        source="epo_global_dossier",
+        remote_document_id="epo-456",
+        document_title="第三次审查意见通知书",
+    )
+    assert baseline.event_key() == equivalent.event_key()
+
+    for field_name, value in (
+        ("jurisdiction", "EP"),
+        ("application_number", "CN202510469602.3"),
+        ("document_type", DocumentType.OFFICE_ACTION_SECOND),
+        ("oa_ordinal", 4),
+        ("official_date", "2026-05-24"),
+        ("document_title", "第四次审查意见通知书"),
+    ):
+        assert baseline.event_key() != replace(baseline, **{field_name: value}).event_key()
+
+
+def test_serialization_exposes_official_event_metadata_and_legacy_fingerprint():
+    document = ProsecutionDocument(
+        document_code="210401-CN",
+        document_version="ORIGINAL",
+        source_trace=["uspto_global_dossier", "epo_global_dossier"],
+    )
+    serialized = document.to_dict()
+    assert serialized["document_code"] == "210401-CN"
+    assert serialized["document_version"] == "ORIGINAL"
+    assert serialized["source_trace"] == ["uspto_global_dossier", "epo_global_dossier"]
+    assert serialized["event_key"] == document.event_key()
+    assert serialized["fingerprint"] == document.fingerprint_value()
+    assert ResultCode.NEW_OFFICIAL_EVENT.value == "NEW_OFFICIAL_EVENT"
+    assert ResultCode.NEW_OFFICE_ACTION.value == "NEW_OFFICE_ACTION"
+
+
+def test_chinese_classification_and_canonical_titles_remain_compatible():
+    assert classify_cn_title("第一次审查意见通知书") == (
+        DocumentType.OFFICE_ACTION_FIRST,
+        1,
+        Confidence.HIGH,
+    )
+    assert classify_official_document("第二次审查意见通知书") == (
+        DocumentType.OFFICE_ACTION_SECOND,
+        2,
+        Confidence.HIGH,
+    )
+    assert oa_title_cn(DocumentType.OFFICE_ACTION_NTH, 3) == "第三次审查意见通知书"
+
+
+@pytest.mark.parametrize(
+    ("document_type", "ordinal", "fallback", "expected"),
+    [
+        (DocumentType.OFFICE_ACTION_SECOND, 2, "", "第二次审查意见通知书"),
+        (DocumentType.REJECTION_DECISION, 0, "", "驳回决定"),
+        (DocumentType.GRANT_NOTICE, 0, "", "授予专利权通知书"),
+        (DocumentType.CORRECTION_NOTICE, 0, "", "补正通知书"),
+        (DocumentType.SEARCH_REPORT, 0, "检索报告原文", "检索报告原文"),
+        (DocumentType.UNKNOWN, 0, "", "其他官方通知"),
+    ],
+)
+def test_event_title_cn(document_type, ordinal, fallback, expected):
+    assert event_title_cn(document_type, ordinal, fallback) == expected

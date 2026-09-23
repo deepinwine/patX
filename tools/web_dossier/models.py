@@ -15,6 +15,7 @@ from typing import Optional
 class ResultCode(str, Enum):
     OK = "OK"
     NO_CHANGE = "NO_CHANGE"
+    NEW_OFFICIAL_EVENT = "NEW_OFFICIAL_EVENT"
     NEW_OFFICE_ACTION = "NEW_OFFICE_ACTION"
     AUTH_REQUIRED = "AUTH_REQUIRED"
     SESSION_EXPIRED = "SESSION_EXPIRED"
@@ -144,6 +145,9 @@ class ProsecutionDocument:
     oa_ordinal: int = 0
     ds: str = ""                         # cpquery list kind (TZS/ZJWJ/SQWJ)
     wenjiandm: str = ""                  # cpquery document code
+    document_code: str = ""
+    document_version: str = "ORIGINAL"
+    source_trace: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -164,8 +168,24 @@ class ProsecutionDocument:
             "oa_ordinal": self.oa_ordinal,
             "ds": self.ds,
             "wenjiandm": self.wenjiandm,
+            "document_code": self.document_code,
+            "document_version": self.document_version,
+            "source_trace": self.source_trace,
+            "event_key": self.event_key(),
             "fingerprint": self.fingerprint_value(),
         }
+
+    def event_key(self) -> str:
+        """Cross-provider identity for one official prosecution event."""
+        basis = "|".join([
+            self.jurisdiction or "",
+            self.application_number or "",
+            self.document_type.value,
+            str(self.oa_ordinal),
+            self.official_date or "",
+            normalize_title(self.document_title),
+        ])
+        return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
     def fingerprint_value(self) -> str:
         return fingerprint(self.jurisdiction, self.application_number,
