@@ -25,17 +25,23 @@ class SyncOutcome:
     @property
     def ok(self) -> bool:
         return self.code in (ResultCode.OK, ResultCode.NO_CHANGE,
-                             ResultCode.NEW_OFFICE_ACTION)
+                             ResultCode.NEW_OFFICE_ACTION,
+                             ResultCode.NEW_OFFICIAL_EVENT)
 
-    def to_dict(self, latest_oa: Optional[ProsecutionDocument]) -> dict:
+    def to_dict(self, latest_event: Optional[ProsecutionDocument] = None) -> dict:
         d = {
             "ok": self.ok,
             "code": self.code.value,
             "message": self.message,
             "auth_state": self.auth_state,
+            "provider_used": self.provider_used,
+            "attempts": [a.to_dict() for a in self.attempts],
             "resolved_application_number": self.resolved_application_number,
             "documents": [doc.to_dict() for doc in self.documents],
-            "latest_oa": latest_oa.to_dict() if latest_oa else None,
+            "latest_event": latest_event.to_dict() if latest_event else None,
+            # legacy field kept so old C++ readers still parse responses;
+            # new responders always emit null here
+            "latest_oa": None,
         }
         return d
 

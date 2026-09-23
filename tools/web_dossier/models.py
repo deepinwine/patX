@@ -207,3 +207,34 @@ def pick_latest_office_action(documents):
     if not oas:
         return None
     return max(oas, key=lambda d: (d.official_date, d.oa_ordinal))
+
+
+# official events that deserve an automatic reminder record
+REMINDABLE_TYPES = {
+    DocumentType.OFFICE_ACTION_FIRST,
+    DocumentType.OFFICE_ACTION_SECOND,
+    DocumentType.OFFICE_ACTION_NTH,
+    DocumentType.REJECTION_DECISION,
+    DocumentType.GRANT_NOTICE,
+    DocumentType.CORRECTION_NOTICE,
+    DocumentType.OTHER_OFFICIAL,
+}
+
+
+def pick_latest_official_event(documents):
+    """Latest remindable ORIGINAL official event, or None.
+
+    Only dated, official-direction documents of the remindable types can
+    win; ties break on OA ordinal then remote id for determinism.
+    """
+    candidates = [
+        doc for doc in documents
+        if doc.direction == "official"
+        and doc.document_version == "ORIGINAL"
+        and doc.document_type in REMINDABLE_TYPES
+        and doc.official_date
+    ]
+    return max(candidates,
+               key=lambda doc: (doc.official_date, doc.oa_ordinal,
+                                doc.remote_document_id),
+               default=None)

@@ -8,13 +8,15 @@ Protocol (one JSON object per line):
     -> {"op": "login",        "args": {"provider": "cnipa"}}
     <- {"ok": true, "code": "OK"}
 
-    -> {"op": "sync_case",    "args": {"provider": "cnipa",
-                                       "application_number": "...",
+    -> {"op": "sync_case",    "args": {"application_number": "...",
                                        "publication_number": "..."}}
-    <- {"ok": true, "code": "NO_CHANGE"|"NEW_OFFICE_ACTION"|...,
+    <- {"ok": true, "code": "NO_CHANGE"|"NEW_OFFICIAL_EVENT"|...,
         "message": "...", "auth_state": "...",
+        "provider_used": "uspto_global_dossier"|"epo_global_dossier"|"cnipa",
+        "attempts": [{"provider": ..., "code": ..., "message": ...}],
         "resolved_application_number": "...",
-        "documents": [...], "latest_oa": {...}|null}
+        "documents": [...], "latest_event": {...}|null,
+        "latest_oa": null}
 
     -> {"op": "cancel"}     sets the cancel event for the in-flight call
     -> {"op": "shutdown"}   closes browsers and exits
@@ -34,10 +36,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from web_dossier.models import ResultCode, pick_latest_office_action       # noqa: E402
+from web_dossier.models import ResultCode, pick_latest_official_event     # noqa: E402
 from web_dossier.providers.cnipa import CNIPAWebProvider                    # noqa: E402
 
 _PROVIDERS = {}
+_CHAIN = None
 
 
 def _get_provider(name: str):
@@ -48,6 +51,25 @@ def _get_provider(name: str):
         manager = BrowserManager("cnipa")
         _PROVIDERS[name] = CNIPAWebProvider(browser_manager=manager)
     return _PROVIDERS[name], None
+
+
+def _get_chain():
+    """Lazily build the USPTO -> EPO -> CNIPA chain. Constructing a provider
+    must never open a browser; the USPTO headless context only launches on
+    first use."""
+    global _CHAIN
+    if _CHAIN is None:
+        from web_dossier.browser.manager import BrowserManager
+        from web_dossier.providers.chain import ProviderChain
+        from web_dossier.providers.epo_global_dossier import EpoGlobalDossierProvider
+        from web_dossier.providers.uspto_global_dossier import UsptoGlobalDossierProvider
+        uspto = UsptoGlobalDossierProvider(
+            BrowserManager("uspto_global_dossier", headless=True,
+                           prefer_system_browser=False))
+        epo = EpoGlobalDossierProvider()
+        cnipa = CNIPAWebProvider(browser_manager=BrowserManager("cnipa"))
+        _CHAIN = ProviderChain([uspto, epo, cnipa])
+    return _CHAIN
 
 
 def _op_ping(_args):
@@ -68,34 +90,18 @@ def _op_login(args, cancel):
 
 
 def _op_sync_case(args, cancel):
-    provider, err = _get_provider(args.get("provider", "cnipa"))
-    if err:
-        return {"ok": False, "code": err.value}
+    chain = _get_chain()
     app_no = args.get("application_number", "")
     pub_no = args.get("publication_number", "")
 
-    auth = provider.check_auth(cancel)
-    if auth in (ResultCode.AUTH_REQUIRED, ResultCode.SESSION_EXPIRED):
-        return {"ok": False, "code": auth.value, "auth_state": auth.value,
-                "message": "CNIPA 登录状态已失效，请重新登录"}
-    if auth == ResultCode.RATE_LIMITED:
-        return {"ok": False, "code": auth.value,
-                "message": "站点限流提示，本批已停止，请稍后再试"}
-    if auth != ResultCode.OK:
-        return {"ok": False, "code": auth.value, "message": f"连通性检查失败: {auth.value}"}
-
-    outcome = provider.list_documents(app_no, pub_no, cancel)
+    outcome = chain.list_documents(app_no, pub_no, cancel)
     if outcome.auth_state in ("", "NOT_INITIALIZED") and outcome.ok:
         outcome.auth_state = "AUTHENTICATED"
-    latest_oa = provider.get_latest_office_action(outcome)
-    response = outcome.to_dict(latest_oa)
-    if latest_oa is not None:
-        from web_dossier.document_classifier import oa_title_cn
-        latest_oa.document_title = oa_title_cn(latest_oa.document_type,
-                                               latest_oa.oa_ordinal) or latest_oa.document_title
-        # rebuild fingerprint with the canonical title
-        response["latest_oa"]["document_title"] = latest_oa.document_title
-        response["latest_oa"]["fingerprint"] = latest_oa.fingerprint_value()
+    latest_event = pick_latest_official_event(outcome.documents)
+    response = outcome.to_dict(latest_event)
+    if (outcome.code == ResultCode.AUTH_REQUIRED
+            and outcome.provider_used == "cnipa"):
+        response["message"] = outcome.message or "CNIPA 登录状态已失效，请重新登录"
     return response
 
 
@@ -201,6 +207,14 @@ def main() -> int:
                     provider._manager.close()
                 except Exception:
                     pass
+            if _CHAIN is not None:
+                for provider in _CHAIN.providers:
+                    manager = getattr(provider, "_manager", None)
+                    try:
+                        if manager is not None:
+                            manager.close()
+                    except Exception:
+                        pass
             send({"ok": True, "code": "OK"})
             return 0
         elif op == "login":
