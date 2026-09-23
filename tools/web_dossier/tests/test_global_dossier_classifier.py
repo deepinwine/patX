@@ -224,6 +224,7 @@ def test_event_key_normalizes_stable_identity_text_fields():
     "application_number",
     [
         "202510469601.5",
+        "202510469601",
         "cn202510469601.5",
         "CN 202510469601.5",
         "CN２０２５１０４６９６０１．５",
@@ -233,6 +234,31 @@ def test_event_key_normalizes_cn_application_number_variants(application_number)
     document = ProsecutionDocument(
         jurisdiction="CN",
         application_number="CN202510469601.5",
+        document_type=DocumentType.REJECTION_DECISION,
+        official_date="2026-05-23",
+        document_title="驳回决定",
+    )
+    assert document.event_key() == replace(
+        document, application_number=application_number
+    ).event_key()
+
+
+@pytest.mark.parametrize(
+    "application_number",
+    [
+        "202510469602.x",
+        "CN202510469602X",
+        "CN ２０２５１０４６９６０２．Ｘ",
+    ],
+)
+def test_event_key_normalizes_x_check_digit_variants(application_number):
+    from web_dossier.number_resolver import cn_check_digit
+
+    digits = "202510469602"
+    assert cn_check_digit(digits) == "X"
+    document = ProsecutionDocument(
+        jurisdiction="CN",
+        application_number=f"CN{digits}.X",
         document_type=DocumentType.REJECTION_DECISION,
         official_date="2026-05-23",
         document_title="驳回决定",

@@ -142,11 +142,27 @@ def _event_title_token(
 def _event_application_number(jurisdiction: str, application_number: str) -> str:
     raw_number = application_number or ""
     if (jurisdiction or "").strip().upper() == "CN":
-        from .number_resolver import normalize_cn_identifier
+        from .number_resolver import cn_check_digit, normalize_cn_identifier
+
+        normalized = raw_number.translate(_FULLWIDTH).translate(
+            {ord("Ｘ"): "X", ord("ｘ"): "X"}
+        )
+        normalized = re.sub(r"\s+", "", normalized).upper()
+        number = normalized.removeprefix("CN")
+
+        if re.fullmatch(r"\d{12}", number):
+            return f"CN{number}.{cn_check_digit(number)}"
+        dotted = re.fullmatch(r"(\d{12})\.([0-9X])", number)
+        if dotted:
+            return f"CN{dotted.group(1)}.{dotted.group(2)}"
+        compact = re.fullmatch(r"(\d{12})([0-9X])", number)
+        if compact:
+            return f"CN{compact.group(1)}.{compact.group(2)}"
 
         identifier = normalize_cn_identifier(raw_number)
         if identifier.number_type == "application":
             return identifier.normalized_number.upper()
+        return normalized
     return re.sub(r"\s+", "", raw_number).upper()
 
 
