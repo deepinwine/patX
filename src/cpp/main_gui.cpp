@@ -15,6 +15,7 @@
 #include <wx/aui/auibook.h>
 #include <wx/textfile.h>
 #include <wx/file.h>
+#include <climits>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
 #include <wx/spinctrl.h>
@@ -167,7 +168,7 @@ public:
                       std::to_string(db->SchemaVersion()) + ")");
         dossier_controller = std::make_unique<WebDossierController>(
             this, *db, [this](const std::string& geke_code) { ShowPatentByCode(geke_code); });
-        dossier_controller->set_on_finished([this]() { LoadOA(); });
+        dossier_controller->set_on_finished([this]() { LoadPatents(); });
         SetupMenu();
         SetupUI();
         LoadAllData();
@@ -203,10 +204,7 @@ private:
     wxStaticText* lbl_level;
     wxTextCtrl* patent_detail;
 
-    // OA 区块（集成在国内专利页）：列表、筛选与选中案件作用域
-    wxListCtrl* oa_list;
-    wxComboBox* oa_filter;
-    std::set<int> oa_scope_;
+    // OA 状态直接以列的形式显示在国内申请列表末尾（最新审查意见/绝限日/剩余天数）
 
     // Other tabs
     wxListCtrl* pct_list;
@@ -251,7 +249,8 @@ private:
         ID_DOSSIER_HISTORY,
         ID_DOSSIER_ERRORS,
         ID_DOSSIER_SETTINGS,
-        ID_EPO_FAMILY
+        ID_EPO_FAMILY,
+        ID_OA_MANAGE
     };
 
     // Toolbar buttons stored for language switching
@@ -515,7 +514,14 @@ private:
         tb2->Add(batch_status_btn, 0, wxRIGHT, 5);
         wxButton* calc_exp_btn = new wxButton(panel, wxID_ANY, "Calc Expiration");
         calc_exp_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { CalcExpiration(); });
-        tb2->Add(calc_exp_btn, 0);
+        tb2->Add(calc_exp_btn, 0, wxRIGHT, 5);
+
+        // OA 流程直接以国内申请为对象：选中若干行 -> 查官方最新发文，
+        // 结果写回 oa_records 并刷新本列表的 OA 状态列
+        wxButton* check_oa_btn = new wxButton(
+            panel, wxID_ANY, LANG_STR("Check Latest OA", "查询最新审查意见"));
+        check_oa_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { CheckLatestOAForSelection(); });
+        tb2->Add(check_oa_btn, 0, 0, 0);
         sizer->Add(tb2, 0, wxALL, 5);
 
         wxSplitterWindow* splitter = new wxSplitterWindow(panel, wxID_ANY);
@@ -541,11 +547,12 @@ private:
         patent_list->AppendColumn(UTF8_STR("到期日"), wxLIST_FORMAT_LEFT, 90);
         patent_list->AppendColumn(UTF8_STR("事务所"), wxLIST_FORMAT_LEFT, 80);
         patent_list->AppendColumn(UTF8_STR("备注"), wxLIST_FORMAT_LEFT, 150);
+        // OA 状态列：最新官方发文 + 待办绝限（数据来自 oa_records 聚合）
+        patent_list->AppendColumn(UTF8_STR("最新审查意见"), wxLIST_FORMAT_LEFT, 150);
+        patent_list->AppendColumn(UTF8_STR("绝限日"), wxLIST_FORMAT_LEFT, 95);
+        patent_list->AppendColumn(UTF8_STR("剩余天数"), wxLIST_FORMAT_LEFT, 85);
 
         patent_list->Bind(wxEVT_LIST_ITEM_SELECTED, &PatXFrame::OnPatentSelected, this);
-        // OA 区块跟随专利列表的选中状态（未选择时显示全部 OA）
-        patent_list->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { UpdateOAScope(); });
-        patent_list->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { UpdateOAScope(); });
         patent_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
             long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
@@ -574,6 +581,8 @@ private:
             menu.Append(ID_SET_LEVEL, UTF8_STR("设置等级"));
             menu.Append(ID_COPY_CODE, UTF8_STR("复制编号"));
             menu.Append(ID_COPY_TITLE, UTF8_STR("复制标题"));
+            menu.AppendSeparator();
+            menu.Append(ID_OA_MANAGE, UTF8_STR("OA记录管理..."));
             menu.Bind(wxEVT_MENU, &PatXFrame::OnEditByCurrentTab, this, wxID_EDIT);
             menu.Bind(wxEVT_MENU, &PatXFrame::OnDeleteByCurrentTab, this, wxID_DELETE);
             menu.Bind(wxEVT_MENU, &PatXFrame::OnNewByCurrentTab, this, wxID_NEW);
@@ -607,6 +616,12 @@ private:
                     wxClipboard::Get()->Close();
                 }
             }, ID_COPY_TITLE);
+            menu.Bind(wxEVT_MENU, [this, idx](wxCommandEvent&) {
+                if (idx < 0) return;
+                Patent p = db->GetPatentById(
+                    static_cast<int>(patent_list->GetItemData(idx)));
+                if (p.id > 0) ShowOAManagement(p);
+            }, ID_OA_MANAGE);
             PopupMenu(&menu);
         });
 
@@ -620,12 +635,8 @@ private:
         detail_sizer->Add(patent_detail, 1, wxEXPAND);
         detail_panel->SetSizer(detail_sizer);
 
-        splitter->SplitHorizontally(patent_list, detail_panel, 420);
-        sizer->Add(splitter, 2, wxEXPAND | wxALL, 5);
-
-        // OA 处理区块：不再单独成页，直接集成在国内申请页底部，
-        // 内容跟随上方专利列表的选中状态
-        BuildOASection(panel, sizer);
+        splitter->SplitHorizontally(patent_list, detail_panel, 500);
+        sizer->Add(splitter, 1, wxEXPAND | wxALL, 5);
 
         panel->SetSizer(sizer);
         notebook->AddPage(panel, LANG_STR("Domestic Patents", "国内专利"));
@@ -681,9 +692,11 @@ private:
         QueryFilter f = CurrentQueryFilter();
         // Column-header filters
         const auto& col_filters = g_column_filters[patent_list];
-        auto patents = db->GetPatents(f);
+            auto patents = db->GetPatents(f);
+            auto oa_states = BuildPatentOAStates();
+            int urgent_overdue = 0, urgent_soon = 0;
 
-        int row = 0;
+            int row = 0;
         for (const auto& p : patents) {
             if (!col_filters.empty()) {
                 static const std::vector<std::string> cols = {
@@ -723,6 +736,37 @@ private:
             patent_list->SetItem(idx, 18, DB_STR(p.expiration_date));
             patent_list->SetItem(idx, 19, DB_STR(p.agency_firm));
             patent_list->SetItem(idx, 20, DB_STR(p.notes));
+
+            // OA 状态列：最新官方发文 + 待办绝限 + 剩余天数
+            auto it = oa_states.find(p.geke_code);
+            if (it != oa_states.end()) {
+                const PatentOAState& st = it->second;
+                if (!st.latest_date.empty()) {
+                    patent_list->SetItem(idx, 21,
+                        DB_STR(st.latest_type + " " + st.latest_date));
+                } else {
+                    patent_list->SetItem(idx, 21, "-");
+                }
+                if (!st.pending_deadline.empty()) {
+                    patent_list->SetItem(idx, 22, DB_STR(st.pending_deadline));
+                    if (st.pending_days < 0) {
+                        patent_list->SetItem(idx, 23,
+                            wxString::Format(UTF8_STR("逾期%d天"), -st.pending_days));
+                        urgent_overdue++;
+                    } else {
+                        patent_list->SetItem(idx, 23,
+                            wxString::Format(UTF8_STR("%d天"), st.pending_days));
+                        if (st.pending_days <= 5) urgent_soon++;
+                    }
+                } else {
+                    patent_list->SetItem(idx, 22, "-");
+                    patent_list->SetItem(idx, 23, "-");
+                }
+            } else {
+                patent_list->SetItem(idx, 21, "-");
+                patent_list->SetItem(idx, 22, "-");
+                patent_list->SetItem(idx, 23, "-");
+            }
             patent_list->SetItemData(idx, p.id);
 
             if (p.patent_level == "core" || p.patent_level.find("核心") != std::string::npos) {
@@ -734,7 +778,11 @@ private:
         }
         sort_state[patent_list] = {0, true};
         SortListCtrl(patent_list, 0, true);
-        status_bar->SetStatusText(wxString::Format("Domestic Patents: %d records", row));
+        status_bar->SetStatusText(
+            (urgent_overdue > 0 || urgent_soon > 0)
+                ? wxString::Format("国内申请: %d 条 | OA 逾期 %d 件、5天内到期 %d 件",
+                                   row, urgent_overdue, urgent_soon)
+                : wxString::Format("国内申请: %d 条", row));
     }
 
     static bool PassesColumnFilters(
@@ -1065,7 +1113,7 @@ private:
             }
         }
         switch (tab) {
-            case 0: LoadPatents(); LoadOA(); break;
+            case 0: LoadPatents(); break;
             case 1: LoadPCT(); break;
             case 2: LoadSoftware(); break;
             case 3: LoadIC(); break;
@@ -1075,7 +1123,7 @@ private:
 
     void OnSearchByCurrentTab(wxCommandEvent&) {
         switch (GetCurrentTab()) {
-            case 0: LoadPatents(); LoadOA(); break;
+            case 0: LoadPatents(); break;
             case 1: LoadPCT(); break;
             case 2: LoadSoftware(); break;
             case 3: LoadIC(); break;
@@ -1085,7 +1133,7 @@ private:
 
     void OnFilterByCurrentTab(wxCommandEvent&) {
         switch (GetCurrentTab()) {
-            case 0: LoadPatents(); LoadOA(); break;
+            case 0: LoadPatents(); break;
             case 1: LoadPCT(); break;
             case 2: LoadSoftware(); break;
             case 3: LoadIC(); break;
@@ -1161,248 +1209,205 @@ private:
                                    "此页面暂不支持批量操作"), "Info", wxOK);
     }
 
-    // ============== OA 区块（集成于国内申请页） ==============
-    void BuildOASection(wxPanel* panel, wxBoxSizer* sizer) {
-        wxBoxSizer* tb = new wxBoxSizer(wxHORIZONTAL);
-        tb->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("OA 处理（所选案件的审查记录，未选择时显示全部）:")),
-                0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
-        oa_filter = new wxComboBox(panel, wxID_ANY, UTF8_STR("全部未完成"),
-                                   wxDefaultPosition, wxSize(140, -1));
-        oa_filter->Append(UTF8_STR("全部未完成"));
-        oa_filter->Append(UTF8_STR("5天内到期"));
-        oa_filter->Append(UTF8_STR("30天内到期"));
-        oa_filter->Append(UTF8_STR("全部"));
-        oa_filter->Append(UTF8_STR("已完成"));
-        oa_filter->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent&) { LoadOA(); });
-        tb->Add(oa_filter, 0, wxRIGHT, 15);
-        tb->AddStretchSpacer();
+    // ============== OA 状态列 / OA 管理对话框（集成于国内申请页） ==============
+    // OA 类型缩写：第一次审查意见通知书 -> 一通，驳回决定 -> 驳回 ...
+    static std::string ShortOaTypeCn(const std::string& raw) {
+        std::string t = webdossier::NormalizeOaTypeCn(raw);
+        int ordinal = webdossier::OaTypeOrdinalCn(t);
+        if (webdossier::IsOfficeActionTypeCn(t) && ordinal >= 1) {
+            static const char* zh[] = {"", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"};
+            std::string num = ordinal <= 10 ? zh[ordinal] : std::to_string(ordinal);
+            return num + "通";
+        }
+        if (t.find("驳回") != std::string::npos) return "驳回";
+        if (t.find("授权") != std::string::npos) return "授权";
+        if (t.find("补正") != std::string::npos) return "补正";
+        if (t.size() > 12) return t.substr(0, 12);
+        return t;
+    }
 
-        auto oa_btn = [&](const wxString& label, auto&& fn) {
-            wxButton* btn = new wxButton(panel, wxID_ANY, label);
-            btn->Bind(wxEVT_BUTTON, fn);
-            tb->Add(btn, 0, wxRIGHT, 5);
+    struct PatentOAState {
+        std::string latest_type;     // 最新官方发文（按发文日）
+        std::string latest_date;
+        std::string pending_deadline;// 最早的未完成绝限
+        int pending_days = INT_MAX;  // 距该绝限的天数
+    };
+
+    // 以编号聚合 OA 状态，供国内申请列表的三列使用
+    std::map<std::string, PatentOAState> BuildPatentOAStates() {
+        std::map<std::string, PatentOAState> states;
+        wxDateTime now = wxDateTime::Now();
+        for (const auto& oa : db->GetOARecords()) {
+            PatentOAState& st = states[oa.geke_code];
+            if (!oa.issue_date.empty() &&
+                (st.latest_date.empty() || oa.issue_date > st.latest_date)) {
+                st.latest_date = oa.issue_date;
+                st.latest_type = ShortOaTypeCn(oa.oa_type);
+            }
+            if (!oa.is_completed && !oa.official_deadline.empty()) {
+                wxDateTime dl;
+                if (dl.ParseFormat(oa.official_deadline.c_str(), "%Y-%m-%d") && dl.IsValid()) {
+                    int days = (dl - now).GetDays();
+                    if (days < st.pending_days) {
+                        st.pending_days = days;
+                        st.pending_deadline = oa.official_deadline;
+                    }
+                }
+            }
+        }
+        return states;
+    }
+
+    // OA 流程入口：对国内申请列表选中（或全部）的案件查询官方最新发文
+    void CheckLatestOAForSelection() {
+        std::vector<Patent> targets;
+        std::vector<std::string> no_number;
+        auto selected = SelectedRows(patent_list);
+        std::vector<Patent> pool;
+        if (selected.empty()) {
+            wxMessageBox(UTF8_STR("请先在列表中选择要查询的案件（可多选）"),
+                         UTF8_STR("查询最新审查意见"), wxOK | wxICON_INFORMATION);
+            return;
+        }
+        for (long i : selected) {
+            Patent p = db->GetPatentById(static_cast<int>(patent_list->GetItemData(i)));
+            if (p.id == 0) continue;
+            if (p.application_number.empty() && p.publication_number.empty()) {
+                no_number.push_back(p.geke_code);
+                continue;
+            }
+            targets.push_back(p);
+        }
+        if (!targets.empty()) {
+            dossier_controller->SyncPatents(targets);   // 完成后回调刷新本列表
+        } else {
+            wxString msg = UTF8_STR("所选案件均缺少申请号和公开号，无法查询。");
+            if (!no_number.empty()) {
+                msg += UTF8_STR("\n缺少号码：");
+                for (const auto& c : no_number) msg += wxString::FromUTF8(c.c_str()) + " ";
+            }
+            wxMessageBox(msg, UTF8_STR("查询最新审查意见"), wxOK | wxICON_INFORMATION);
+        }
+    }
+
+    // 单案件的 OA 记录管理对话框（增删改/标记完成/查询最新）
+    void ShowOAManagement(const Patent& p) {
+        wxDialog dlg(this, wxID_ANY,
+                     wxString::Format(UTF8_STR("OA记录 - %s（%s）"),
+                                      wxString::FromUTF8(p.geke_code.c_str()),
+                                      wxString::FromUTF8(p.title.c_str())),
+                     wxDefaultPosition, wxSize(880, 420),
+                     wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+        auto* sizer = new wxBoxSizer(wxVERTICAL);
+        auto* list = new wxListCtrl(&dlg, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                    wxLC_REPORT | wxBORDER_SUNKEN);
+        list->AppendColumn(UTF8_STR("OA类型"), wxLIST_FORMAT_LEFT, 150);
+        list->AppendColumn(UTF8_STR("发文日"), wxLIST_FORMAT_LEFT, 95);
+        list->AppendColumn(UTF8_STR("截止日"), wxLIST_FORMAT_LEFT, 95);
+        list->AppendColumn(UTF8_STR("剩余天数"), wxLIST_FORMAT_LEFT, 95);
+        list->AppendColumn(UTF8_STR("处理人"), wxLIST_FORMAT_LEFT, 85);
+        list->AppendColumn(UTF8_STR("撰写人"), wxLIST_FORMAT_LEFT, 85);
+        list->AppendColumn(UTF8_STR("进度"), wxLIST_FORMAT_LEFT, 100);
+        list->AppendColumn(UTF8_STR("来源"), wxLIST_FORMAT_LEFT, 110);
+        list->AppendColumn(UTF8_STR("备注"), wxLIST_FORMAT_LEFT, 140);
+
+        auto refill = [&]() {
+            list->DeleteAllItems();
+            wxDateTime now = wxDateTime::Now();
+            int row = 0;
+            for (const auto& oa : db->GetOAByPatent(p.geke_code)) {
+                long idx = list->InsertItem(row, DB_STR(oa.oa_type));
+                list->SetItem(idx, 1, DB_STR(oa.issue_date));
+                list->SetItem(idx, 2, DB_STR(oa.official_deadline));
+                wxString days_str = "-";
+                if (oa.is_completed) {
+                    days_str = UTF8_STR("已完成");
+                    list->SetItemBackgroundColour(idx, wxColour(200, 255, 200));
+                } else if (!oa.official_deadline.empty()) {
+                    wxDateTime dl;
+                    if (dl.ParseFormat(oa.official_deadline.c_str(), "%Y-%m-%d") && dl.IsValid()) {
+                        int days = (dl - now).GetDays();
+                        if (days < 0) {
+                            days_str = wxString::Format(UTF8_STR("逾期%d天"), -days);
+                            list->SetItemBackgroundColour(idx, wxColour(255, 200, 200));
+                        } else if (days <= 5) {
+                            days_str = wxString::Format(UTF8_STR("%d天"), days);
+                            list->SetItemBackgroundColour(idx, wxColour(255, 255, 150));
+                        } else {
+                            days_str = wxString::Format(UTF8_STR("%d天"), days);
+                        }
+                    }
+                }
+                list->SetItem(idx, 3, days_str);
+                list->SetItem(idx, 4, DB_STR(oa.handler));
+                list->SetItem(idx, 5, DB_STR(oa.writer));
+                list->SetItem(idx, 6, DB_STR(oa.progress));
+                list->SetItem(idx, 7, oa.source.empty() ? "-" : DB_STR(oa.source));
+                list->SetItem(idx, 8, DB_STR(oa.notes));
+                list->SetItemData(idx, oa.id);
+                row++;
+            }
         };
-        oa_btn(LANG_STR("New OA", "新增OA"), [this](wxCommandEvent&) {
-            // 预填当前唯一选中的案件编号，省一次手填
-            std::string prefill;
-            auto rows = SelectedRows(patent_list);
-            if (rows.size() == 1) {
-                Patent p = db->GetPatentById(
-                    static_cast<int>(patent_list->GetItemData(rows[0])));
-                if (p.id > 0) prefill = p.geke_code;
+        refill();
+
+        auto selected_oa_id = [&]() -> int {
+            long idx = list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+            return idx >= 0 ? static_cast<int>(list->GetItemData(idx)) : 0;
+        };
+
+        auto* tb = new wxBoxSizer(wxHORIZONTAL);
+        auto btn = [&](const wxString& label, auto&& fn) {
+            auto* b = new wxButton(&dlg, wxID_ANY, label);
+            b->Bind(wxEVT_BUTTON, fn);
+            tb->Add(b, 0, wxRIGHT, 5);
+        };
+        btn(LANG_STR("New OA", "新增OA"), [&](wxCommandEvent&) {
+            OAEditDialog d(this, db.get(), 0, p.geke_code);
+            if (d.ShowModal() == wxID_OK) refill();
+        });
+        btn(LANG_STR("Edit", "编辑"), [&](wxCommandEvent&) {
+            int id = selected_oa_id();
+            if (!id) { wxMessageBox(UTF8_STR("请先选择一条记录"), "Info", wxOK); return; }
+            OAEditDialog d(this, db.get(), id);
+            if (d.ShowModal() == wxID_OK) refill();
+        });
+        btn(LANG_STR("Delete", "删除"), [&](wxCommandEvent&) {
+            int id = selected_oa_id();
+            if (!id) { wxMessageBox(UTF8_STR("请先选择一条记录"), "Info", wxOK); return; }
+            if (wxMessageBox(UTF8_STR("删除这条 OA 记录？"), LANG_STR("Confirm", "确认"),
+                             wxYES_NO) == wxYES) {
+                db->DeleteOA(id);
+                refill();
             }
-            OAEditDialog dlg(this, db.get(), 0, prefill);
-            if (dlg.ShowModal() == wxID_OK) LoadOA();
         });
-        oa_btn("Mark Complete", [this](wxCommandEvent&) {
-            long idx = oa_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-            if (idx >= 0) {
-                db->MarkOACompleted(static_cast<int>(oa_list->GetItemData(idx)));
-                LoadOA();
-            }
+        btn(LANG_STR("Mark Complete", "标记完成"), [&](wxCommandEvent&) {
+            int id = selected_oa_id();
+            if (id) { db->MarkOACompleted(id); refill(); }
         });
-        oa_btn(LANG_STR("Delete OA", "删除OA"), [this](wxCommandEvent&) {
-            std::vector<long> selected = SelectedRows(oa_list);
-            if (selected.empty()) {
-                wxMessageBox(UTF8_STR("请先在 OA 列表中选择要删除的记录"), "Info", wxOK);
-                return;
-            }
-            if (wxMessageBox(wxString::Format(UTF8_STR("删除 %d 条 OA 记录？"),
-                                              (int)selected.size()),
-                             LANG_STR("Confirm", "确认"), wxYES_NO) != wxYES)
-                return;
-            db->BeginBatch();
-            for (long i : selected) db->DeleteOA(static_cast<int>(oa_list->GetItemData(i)));
-            LoadOA();
-        });
-        oa_btn("Show Urgent", [this](wxCommandEvent&) {
-            oa_filter->SetValue(UTF8_STR("5天内到期"));
-            LoadOA();
-                        QueryFilter urgent_filter;
-            urgent_filter.deadline_state = "due5";
-            auto records = db->GetOARecords(urgent_filter);
-            int urgent = 0;
-            for (const auto& oa : records) if (!oa.is_completed) urgent++;
-            wxMessageBox(urgent > 0
-                ? wxString::Format("WARNING: %d OA records need urgent attention!", urgent)
-                : wxString("No urgent OA records. Good job!"),
-                "Status", wxOK | (urgent ? wxICON_WARNING : wxICON_INFORMATION));
-        });
-        // 查询选中案件的最新审查意见：CN 案走 CNIPA 网页同步，结果按保护
-        // 规则写入 OA 列表（新 OA 新增、空日期补入、日期冲突只标记）。
-        oa_btn(LANG_STR("Check Latest OA", "查询最新审查意见"), [this](wxCommandEvent&) {
-            std::vector<int> oa_ids;
-            long idx = -1;
-            while ((idx = oa_list->GetNextItem(idx, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED)) >= 0)
-                oa_ids.push_back(static_cast<int>(oa_list->GetItemData(idx)));
-            if (oa_ids.empty()) {
-                wxMessageBox(UTF8_STR("请先在列表中选择要查询的 OA 记录（可多选）"),
+        btn(LANG_STR("Check Latest OA", "查询最新审查意见"), [&](wxCommandEvent&) {
+            if (p.application_number.empty() && p.publication_number.empty()) {
+                wxMessageBox(UTF8_STR("该案件缺少申请号和公开号，无法查询"),
                              UTF8_STR("查询最新审查意见"), wxOK | wxICON_INFORMATION);
                 return;
             }
-            auto join = [](const std::vector<std::string>& v) {
-                wxString out;
-                for (const auto& s : v) {
-                    if (!out.empty()) out += ", ";
-                    out += wxString::FromUTF8(s.c_str());
-                }
-                return out;
-            };
-            std::vector<Patent> targets;
-            std::vector<std::string> us_linked, no_number;
-            std::set<std::string> seen;
-            for (int id : oa_ids) {
-                OARecord oa = db->GetOAById(id);
-                if (oa.id == 0) continue;
-                if (oa.jurisdiction == "US" || oa.source == "USPTO") {
-                    us_linked.push_back(oa.geke_code);
-                    continue;
-                }
-                if (!seen.insert(oa.geke_code).second) continue;
-                Patent p = db->GetPatentByCode(oa.geke_code);
-                if (p.id == 0) continue;
-                if (p.application_number.empty() && p.publication_number.empty()) {
-                    no_number.push_back(oa.geke_code);
-                    continue;
-                }
-                targets.push_back(p);
-            }
-            if (!targets.empty()) {
-                dossier_controller->SyncPatents(targets);
-            } else {
-                wxString msg = UTF8_STR("所选记录没有可自动查询的 CN 案件。");
-                if (!us_linked.empty())
-                    msg += UTF8_STR("\nUS 来源记录（USPTO 同步已停用）跳过：") + join(us_linked);
-                if (!no_number.empty())
-                    msg += UTF8_STR("\n缺少申请号和公开号，无法查询：") + join(no_number);
-                wxMessageBox(msg, UTF8_STR("查询最新审查意见"), wxOK | wxICON_INFORMATION);
+            dossier_controller->SyncPatents({p});   // 完成后主列表刷新
+        });
+        tb->AddStretchSpacer();
+        btn(LANG_STR("Close", "关闭"), [&](wxCommandEvent&) { dlg.EndModal(wxID_OK); });
+
+        list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [&](wxListEvent&) {
+            int id = selected_oa_id();
+            if (id) {
+                OAEditDialog d(this, db.get(), id);
+                if (d.ShowModal() == wxID_OK) refill();
             }
         });
-        sizer->Add(tb, 0, wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 5);
 
-        oa_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
-        oa_list->AppendColumn(UTF8_STR("编号"), wxLIST_FORMAT_LEFT, 90);
-        oa_list->AppendColumn(UTF8_STR("申请号"), wxLIST_FORMAT_LEFT, 130);
-        oa_list->AppendColumn(UTF8_STR("发明名称"), wxLIST_FORMAT_LEFT, 200);
-        oa_list->AppendColumn(UTF8_STR("OA类型"), wxLIST_FORMAT_LEFT, 110);
-        oa_list->AppendColumn(UTF8_STR("发文日"), wxLIST_FORMAT_LEFT, 90);
-        oa_list->AppendColumn(UTF8_STR("截止日"), wxLIST_FORMAT_LEFT, 100);
-        oa_list->AppendColumn(UTF8_STR("剩余天数"), wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn(UTF8_STR("处理人"), wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn(UTF8_STR("撰写人"), wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn(UTF8_STR("进度"), wxLIST_FORMAT_LEFT, 100);
-        oa_list->AppendColumn(UTF8_STR("等级"), wxLIST_FORMAT_LEFT, 80);
-        oa_list->AppendColumn(UTF8_STR("来源"), wxLIST_FORMAT_LEFT, 70);
-
-        oa_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
-            long idx = oa_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
-            if (idx >= 0) {
-                OAEditDialog dlg(this, db.get(), static_cast<int>(oa_list->GetItemData(idx)));
-                if (dlg.ShowModal() == wxID_OK) LoadOA();
-            }
-        });
-        oa_list->Bind(wxEVT_LIST_COL_CLICK, [this](wxListEvent& e) {
-            int col = e.GetColumn();
-            auto& state = sort_state[oa_list];
-            if (state.first == col) state.second = !state.second;
-            else { state.first = col; state.second = true; }
-            SortListCtrl(oa_list, col, state.second);
-        });
-
-        sizer->Add(oa_list, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
-    }
-
-    // OA 区块作用域：上方专利列表选中了哪些案件，下方就列哪些案件的 OA
-    void UpdateOAScope() {
-        oa_scope_.clear();
-        long idx = -1;
-        while ((idx = patent_list->GetNextItem(idx, wxLIST_NEXT_ALL,
-                                               wxLIST_STATE_SELECTED)) >= 0) {
-            oa_scope_.insert(static_cast<int>(patent_list->GetItemData(idx)));
-        }
-        LoadOA();
-    }
-
-    void LoadOA() {
-        if (!db || !db->IsOpen()) return;
-        oa_list->DeleteAllItems();
-
-        QueryFilter f;
-        f.keyword = ToStd(common_search->GetValue());   // 共享搜索框：按编号/名称检索
-        std::string selected = ToStd(oa_filter->GetValue());
-        if (selected == ToStd(UTF8_STR("全部未完成"))) f.deadline_state = "incomplete";
-        else if (selected == ToStd(UTF8_STR("5天内到期"))) f.deadline_state = "due5";
-        else if (selected == ToStd(UTF8_STR("30天内到期"))) f.deadline_state = "due30";
-        else if (selected == ToStd(UTF8_STR("已完成"))) f.deadline_state = "completed";
-
-        auto records = db->GetOARecords(f);
-
-        // 申请号/等级通过编号关联国内申请表
-        std::map<std::string, std::string> level_map, appno_map;
-        for (const auto& p : db->GetPatents()) {
-            level_map[p.geke_code] = p.patent_level;
-            appno_map[p.geke_code] = p.application_number;
-        }
-
-        wxDateTime now = wxDateTime::Now();
-        int urgent_count = 0, row = 0;
-        for (const auto& oa : records) {
-            // 作用域：上方专利列表有选中时只列所选案件的记录
-            if (!oa_scope_.empty() && !oa_scope_.count(oa.patent_id)) continue;
-
-            long idx = oa_list->InsertItem(row, DB_STR(oa.geke_code));
-            oa_list->SetItem(idx, 1, appno_map.count(oa.geke_code)
-                                      ? DB_STR(appno_map[oa.geke_code]) : "-");
-            oa_list->SetItem(idx, 2, DB_STR(oa.patent_title));
-            oa_list->SetItem(idx, 3, DB_STR(oa.oa_type));
-            oa_list->SetItem(idx, 4, DB_STR(oa.issue_date));
-            oa_list->SetItem(idx, 5, DB_STR(oa.official_deadline));
-
-            wxString days_str = "-";
-            wxColour bg_color;
-            if (oa.is_completed) {
-                days_str = "Completed";
-                bg_color = wxColour(200, 255, 200);
-            } else if (!oa.official_deadline.empty()) {
-                wxDateTime deadline;
-                deadline.ParseFormat(oa.official_deadline.c_str(), "%Y-%m-%d");
-                if (deadline.IsValid()) {
-                    int days = (deadline - now).GetDays();
-                    if (days < 0) { days_str = wxString::Format("Overdue %d days", -days); bg_color = wxColour(255, 200, 200); urgent_count++; }
-                    else if (days <= 5) { days_str = wxString::Format("%d days", days); bg_color = wxColour(255, 255, 150); urgent_count++; }
-                    else if (days <= 10) { days_str = wxString::Format("%d days", days); bg_color = wxColour(255, 230, 200); }
-                    else if (days <= 30) { days_str = wxString::Format("%d days", days); bg_color = wxColour(255, 250, 220); }
-                    else days_str = wxString::Format("%d days", days);
-                }
-            }
-            oa_list->SetItem(idx, 6, days_str);
-            oa_list->SetItem(idx, 7, DB_STR(oa.handler));
-            oa_list->SetItem(idx, 8, DB_STR(oa.writer));
-            oa_list->SetItem(idx, 9, DB_STR(oa.progress));
-
-            std::string level = level_map.count(oa.geke_code) ? level_map[oa.geke_code] : "";
-            oa_list->SetItem(idx, 10, DB_STR(level));
-            oa_list->SetItem(idx, 11, oa.source.empty() ? "-" : DB_STR(oa.source));
-
-            if (level == "core" || level.find("核心") != std::string::npos) {
-                oa_list->SetItemBackgroundColour(idx, wxColour(255, 100, 100));
-            } else if (level == "important" || level.find("重要") != std::string::npos) {
-                oa_list->SetItemBackgroundColour(idx, wxColour(255, 230, 100));
-            } else if (bg_color.IsOk()) {
-                oa_list->SetItemBackgroundColour(idx, bg_color);
-            }
-            oa_list->SetItemData(idx, oa.id);
-            row++;
-        }
-
-        wxString scope_note = oa_scope_.empty()
-                                  ? UTF8_STR("全部案件")
-                                  : wxString::Format(UTF8_STR("所选 %d 件案件"),
-                                                     (int)oa_scope_.size());
-        status_bar->SetStatusText(urgent_count > 0
-            ? wxString::Format("OA（%s）: %d 条 | 临期/逾期 %d 条需关注",
-                               scope_note, row, urgent_count)
-            : wxString::Format("OA（%s）: %d 条", scope_note, row));
+        sizer->Add(list, 1, wxALL | wxEXPAND, 8);
+        sizer->Add(tb, 0, wxALL & ~wxTOP, 8);
+        dlg.SetSizer(sizer);
+        dlg.ShowModal();
+        LoadPatents();   // OA 变化后刷新主列表的最新审查意见/绝限列
     }
 
     // ============== PCT Tab ==============
@@ -1848,7 +1853,7 @@ private:
         }
         SetBackgroundColour(bg);
         SetForegroundColour(fg);
-        for (auto* list : {patent_list, oa_list, pct_list, sw_list, ic_list,
+        for (auto* list : {patent_list, pct_list, sw_list, ic_list,
                            foreign_list, fee_list, rule_list}) {
             if (list) {
                 list->SetBackgroundColour(bg);
@@ -2031,8 +2036,8 @@ private:
             LANG_STR("Import PDF", "导入PDF"), wxYES_NO | wxICON_QUESTION);
         if (answer == wxYES) {
             db->InsertOA(oa);
-            LoadOA();
-            notebook->SetSelection(1);
+            LoadPatents();
+            notebook->SetSelection(0);
         }
     }
 
@@ -2091,37 +2096,24 @@ private:
                 break;
             }
             case 1: {
-                std::vector<int> ids;
-                for (long idx : SelectedRows(oa_list)) ids.push_back(static_cast<int>(oa_list->GetItemData(idx)));
-                std::vector<OARecord> rows;
-                for (const auto& oa : db->GetOARecords(QueryFilter())) {
-                    if (ids.empty() || std::find(ids.begin(), ids.end(), oa.id) != ids.end()) {
-                        rows.push_back(oa);
-                    }
-                }
-                selected_count = static_cast<int>(rows.size());
-                table = ExcelIO::BuildOAExport(rows);
-                break;
-            }
-            case 2: {
                 std::vector<PCTPatent> rows = db->GetPCTPatents(CurrentQueryFilter());
                 selected_count = static_cast<int>(rows.size());
                 table = ExcelIO::BuildPCTExport(rows);
                 break;
             }
-            case 3: {
+            case 2: {
                 std::vector<SoftwareCopyright> rows = db->GetSoftwareCopyrights(CurrentQueryFilter());
                 selected_count = static_cast<int>(rows.size());
                 table = ExcelIO::BuildSoftwareExport(rows);
                 break;
             }
-            case 4: {
+            case 3: {
                 std::vector<ICLayout> rows = db->GetICLayouts(CurrentQueryFilter());
                 selected_count = static_cast<int>(rows.size());
                 table = ExcelIO::BuildICExport(rows);
                 break;
             }
-            case 5: {
+            case 4: {
                 std::vector<ForeignPatent> rows = db->GetForeignPatents(CurrentQueryFilter());
                 selected_count = static_cast<int>(rows.size());
                 table = ExcelIO::BuildForeignExport(rows);
@@ -2317,7 +2309,7 @@ private:
                 db = std::make_unique<Database>(new_path);
                 dossier_controller = std::make_unique<WebDossierController>(
                     this, *db, [this](const std::string& code) { ShowPatentByCode(code); });
-                dossier_controller->set_on_finished([this]() { LoadOA(); });
+                dossier_controller->set_on_finished([this]() { LoadPatents(); });
                 LoadAllData();
                 status_bar->SetStatusText(wxString("patX v") + PATX_VERSION + " | Database: " +
                                           wxFileName(dlg.GetPath()).GetFullName());
@@ -2339,7 +2331,7 @@ private:
                 db = std::make_unique<Database>("patents.db");
                 dossier_controller = std::make_unique<WebDossierController>(
                     this, *db, [this](const std::string& code) { ShowPatentByCode(code); });
-                dossier_controller->set_on_finished([this]() { LoadOA(); });
+                dossier_controller->set_on_finished([this]() { LoadPatents(); });
                 LoadAllData();
             }
         }
@@ -2431,7 +2423,6 @@ private:
     void LoadAllData() {
         RefreshCommonFiltersForTab(GetCurrentTab(), true);
         LoadPatents();
-        LoadOA();
         LoadPCT();
         LoadSoftware();
         LoadIC();
