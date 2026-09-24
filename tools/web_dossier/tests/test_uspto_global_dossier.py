@@ -1,4 +1,5 @@
 import threading
+import re
 from pathlib import Path
 
 import pytest
@@ -29,8 +30,7 @@ def _document_page(
     <html><head><title>Global Dossier</title></head>
     <body data-page="global-dossier-document-list">
       <h1>Global Dossier</h1>
-      <main data-application-number="{application_number}"
-            data-publication-number="{publication_number}">
+      <main>
         <p class="case-number">Application {application_number}</p>
         <p class="publication-number">Publication {publication_number}</p>
         <table aria-label="Document list">
@@ -56,8 +56,7 @@ def _row(date: str, title: str, code: str = "210401-CN",
 
 def _case_section(application_number: str, rows: str, css_class: str = "") -> str:
     return f"""
-    <section class="case-dossier {css_class}"
-             data-application-number="{application_number}">
+    <section class="case-dossier {css_class}">
       <p class="case-number">Application {application_number}</p>
       <table aria-label="Document list">
         <thead><tr>
@@ -77,8 +76,11 @@ def _multi_case_page(body: str, heading_number: str = "") -> str:
 
 
 def test_parse_uspto_original_official_events_only():
+    fixture_html = FIXTURE.read_text(encoding="utf-8")
+    assert "data-application-number" not in fixture_html
+    assert "data-publication-number" not in fixture_html
     outcome = parse_uspto_document_list(
-        FIXTURE.read_text(encoding="utf-8"), "CN202510469601.5", "CN120134203A"
+        fixture_html, "CN202510469601.5", "CN120134203A"
     )
     assert outcome.code == ResultCode.OK
     assert [(d.document_type, d.official_date) for d in outcome.documents] == [
@@ -184,25 +186,48 @@ def test_parser_rejects_document_list_for_a_different_case():
     assert outcome.documents == []
 
 
-def test_target_heading_with_previous_case_table_is_not_ready():
+def test_visible_target_and_semantic_table_is_ready_without_data_attributes():
     from web_dossier.providers.uspto_global_dossier import (
         inspect_uspto_document_state,
     )
 
-    case_a_table = _case_section(
-        "CN202510469601.5",
+    document_table = _case_section(
+        "",
         _row(
             "2026-05-23",
             "First notice of examination opinions (ORIGINAL)",
-            remote_id="case-a-document",
+            remote_id="legacy-shape-document",
         ),
     )
-    html = _multi_case_page(case_a_table, heading_number="CN202510469602.3")
+    html = _multi_case_page(document_table, heading_number="CN202510469602.3")
 
-    assert inspect_uspto_document_state(html, "CN202510469602.3") == "PENDING"
+    assert inspect_uspto_document_state(html, "CN202510469602.3") == "READY"
     outcome = parse_uspto_document_list(html, "CN202510469602.3", "")
-    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
-    assert outcome.documents == []
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "legacy-shape-document"
+    ]
+
+
+def test_parser_accepts_8f4d6bf_saved_html_shape_without_case_number():
+    legacy_html = _document_page(
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="8f4d6bf-document",
+        ),
+        application_number="",
+        publication_number="",
+    )
+
+    outcome = parse_uspto_document_list(
+        legacy_html, "CN202510469601.5", "CN120134203A"
+    )
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "8f4d6bf-document"
+    ]
 
 
 def test_hidden_previous_table_before_visible_target_table_selects_target_only():
@@ -327,18 +352,14 @@ class _FakePage:
         self,
         html: str,
         *,
-        ready_html: str = "",
         wait_error=None,
-        evaluate_results=None,
+        snapshots=None,
         on_poll=None,
-        legacy_wait_updates: bool = True,
     ):
         self._html = html
-        self._ready_html = ready_html
         self._wait_error = wait_error
-        self._evaluate_results = list(evaluate_results or [True])
+        self._snapshots = list(snapshots or [])
         self._on_poll = on_poll
-        self._legacy_wait_updates = legacy_wait_updates
         self.waited_for = None
         self.waited_for_function = None
         self.evaluated = []
@@ -352,24 +373,30 @@ class _FakePage:
         self.waited_for_function = (expression, timeout)
         if self._wait_error is not None:
             raise self._wait_error
-        if self._ready_html and self._legacy_wait_updates:
-            self._html = self._ready_html
 
     def evaluate(self, expression, argument):
         self.evaluated.append((expression, argument))
         if self._wait_error is not None:
             raise self._wait_error
-        if len(self._evaluate_results) > 1:
-            return self._evaluate_results.pop(0)
-        return self._evaluate_results[0]
+        if self._snapshots:
+            if len(self._snapshots) > 1:
+                return self._snapshots.pop(0)
+            return self._snapshots[0]
+        table = re.search(r"<table\b.*?</table>", self._html, re.I | re.S)
+        target = re.sub(r"[^A-Z0-9]", "", argument.upper())
+        visible = re.sub(r"[^A-Z0-9]", "", self._html.upper())
+        return {
+            "state": "READY" if table and target in visible else "PENDING",
+            "targetMatched": target in visible,
+            "tableHtml": table.group(0) if table else "",
+            "visibleText": re.sub(r"<[^>]+>", " ", self._html),
+            "emptyText": "",
+        }
 
     def wait_for_timeout(self, milliseconds):
         self.poll_waits.append(milliseconds)
         if self._on_poll is not None:
             self._on_poll()
-        if self._ready_html:
-            self._html = self._ready_html
-            self._ready_html = ""
 
     def content(self):
         self.content_calls += 1
@@ -377,14 +404,13 @@ class _FakePage:
 
 
 class _FakeBrowserManager:
-    def __init__(self, html: str, *, status=None, ready_html: str = "",
-                 wait_error=None, evaluate_results=None, on_poll=None,
+    def __init__(self, html: str, *, status=None,
+                 wait_error=None, snapshots=None, on_poll=None,
                  spa_statuses=None, responses=None):
         self.page = _FakePage(
             html,
-            ready_html=ready_html,
             wait_error=wait_error,
-            evaluate_results=evaluate_results,
+            snapshots=snapshots,
             on_poll=on_poll,
         )
         self.urls = []
@@ -411,15 +437,37 @@ def test_provider_prefers_normalized_application_url():
     assert outcome.code == ResultCode.OK
     assert manager.urls == [APP_URL.format(application="202510469601.5")]
     assert manager.page.waited_for is None
-    assert manager.page.content_calls == 1
+    assert manager.page.content_calls == 0
+    expression, argument = manager.page.evaluated[0]
+    assert "getComputedStyle" in expression
+    assert "outerHTML" in expression
+    assert argument == "CN2025104696015"
 
 
 def test_provider_waits_for_spa_document_state_before_reading_html():
     shell = "<html><body><h1>Global Dossier</h1><div id='app'></div></body></html>"
+    fixture_html = FIXTURE.read_text(encoding="utf-8")
+    table_html = re.search(
+        r"<table\b.*?</table>", fixture_html, re.I | re.S
+    ).group(0)
     manager = _FakeBrowserManager(
         shell,
-        ready_html=FIXTURE.read_text(encoding="utf-8"),
-        evaluate_results=[False, True],
+        snapshots=[
+            {
+                "state": "PENDING",
+                "targetMatched": True,
+                "tableHtml": "",
+                "visibleText": "Global Dossier CN202510469601.5",
+                "emptyText": "",
+            },
+            {
+                "state": "READY",
+                "targetMatched": True,
+                "tableHtml": table_html,
+                "visibleText": "Global Dossier CN202510469601.5",
+                "emptyText": "",
+            },
+        ],
     )
     provider = UsptoGlobalDossierProvider(browser_manager=manager)
 
@@ -427,8 +475,97 @@ def test_provider_waits_for_spa_document_state_before_reading_html():
 
     assert outcome.code == ResultCode.OK
     assert len(outcome.documents) == 1
-    assert manager.page.content_calls == 2
+    assert manager.page.content_calls == 0
+    assert len(manager.page.evaluated) == 2
     assert manager.page.poll_waits
+
+
+def test_provider_uses_computed_visibility_snapshot_for_hidden_captcha():
+    rows = _row(
+        "2026-05-23",
+        "First notice of examination opinions (ORIGINAL)",
+        remote_id="visible-document",
+    )
+    visible_page = _document_page(rows)
+    table_html = re.search(
+        r"<table\b.*?</table>", visible_page, re.I | re.S
+    ).group(0)
+    raw_page = visible_page.replace(
+        "</head>", "<style>.is-hidden { display: none }</style></head>"
+    ).replace(
+        "</body>", '<div class="is-hidden">captcha</div></body>'
+    )
+    manager = _FakeBrowserManager(
+        raw_page,
+        snapshots=[{
+            "state": "READY",
+            "targetMatched": True,
+            "tableHtml": table_html,
+            "visibleText": "Global Dossier CN202510469601.5",
+            "emptyText": "",
+        }],
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "visible-document"
+    ]
+    assert manager.page.content_calls == 0
+    assert "getComputedStyle" in manager.page.evaluated[0][0]
+
+
+def test_provider_snapshot_selects_visible_target_table_not_css_hidden_old_table():
+    old_table = _document_page(
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="old-case-document",
+        ),
+        application_number="CN202510469601.5",
+    )
+    target_page = _document_page(
+        _row(
+            "2026-05-24",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="target-case-document",
+        ),
+        application_number="CN202510469602.3",
+    )
+    old_table_html = re.search(
+        r"<table\b.*?</table>", old_table, re.I | re.S
+    ).group(0)
+    target_table_html = re.search(
+        r"<table\b.*?</table>", target_page, re.I | re.S
+    ).group(0)
+    raw_page = f"""
+      <html><head><style>.old-case {{ display: none }}</style></head><body>
+        <h1>Global Dossier CN202510469602.3</h1>
+        <section class="old-case">{old_table_html}</section>
+        <section>{target_table_html}</section>
+      </body></html>
+    """
+    manager = _FakeBrowserManager(
+        raw_page,
+        snapshots=[{
+            "state": "READY",
+            "targetMatched": True,
+            "tableHtml": target_table_html,
+            "visibleText": "Global Dossier CN202510469602.3",
+            "emptyText": "",
+        }],
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469602.3", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "target-case-document"
+    ]
+    assert manager.page.content_calls == 0
 
 
 def test_provider_spa_wait_timeout_is_structure_changed(monkeypatch):
@@ -444,7 +581,7 @@ def test_provider_spa_wait_timeout_is_structure_changed(monkeypatch):
     outcome = provider.list_documents("CN202510469601.5", "", None)
 
     assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
-    assert manager.page.content_calls == 1
+    assert manager.page.content_calls == 0
 
 
 def test_consecutive_cases_do_not_reuse_the_previous_case_table():
@@ -476,9 +613,25 @@ def test_consecutive_cases_do_not_reuse_the_previous_case_table():
             self.calls += 1
             if self.calls == 2:
                 self.page._html = case_a_html
-                self.page._ready_html = case_b_html
-                self.page._evaluate_results = [False, True]
-                self.page._legacy_wait_updates = False
+                table_html = re.search(
+                    r"<table\b.*?</table>", case_b_html, re.I | re.S
+                ).group(0)
+                self.page._snapshots = [
+                    {
+                        "state": "PENDING",
+                        "targetMatched": True,
+                        "tableHtml": "",
+                        "visibleText": "Global Dossier CN202510469602.3",
+                        "emptyText": "",
+                    },
+                    {
+                        "state": "READY",
+                        "targetMatched": True,
+                        "tableHtml": table_html,
+                        "visibleText": "Global Dossier CN202510469602.3",
+                        "emptyText": "",
+                    },
+                ]
             return self.page
 
     manager = StaleThenFreshManager()
@@ -502,7 +655,13 @@ def test_cancel_during_spa_wait_returns_temporary_error():
     cancel = threading.Event()
     manager = _FakeBrowserManager(
         "<html><body><h1>Global Dossier</h1><div id='app'></div></body></html>",
-        evaluate_results=[False, False],
+        snapshots=[{
+            "state": "PENDING",
+            "targetMatched": True,
+            "tableHtml": "",
+            "visibleText": "Global Dossier CN202510469601.5",
+            "emptyText": "",
+        }],
         on_poll=cancel.set,
     )
     provider = UsptoGlobalDossierProvider(browser_manager=manager)
