@@ -59,10 +59,15 @@ else()
     set(PATX_JSON_TARGET nlohmann_json_header)
 endif()
 
-# openxlsx 的导出目标引用 pugixml::static；vcpkg 的 pugixml 端口在
-# find_package 时会定义它——先确保 pugixml 已被找到（仅 Windows/vcpkg）
-if(WIN32 AND NOT TARGET pugixml::static)
-    find_package(pugixml CONFIG QUIET)
+# openxlsx 的导出目标引用 pugixml::static / miniz::miniz 等内部接口名；
+# vcpkg 对应端口在 find_package 时会定义它们——先预加载（仅 Windows/vcpkg）
+if(WIN32)
+    if(NOT TARGET pugixml::static)
+        find_package(pugixml CONFIG QUIET)
+    endif()
+    if(NOT TARGET miniz::miniz)
+        find_package(miniz CONFIG QUIET)
+    endif()
 endif()
 
 # OpenXLSX: vcpkg package first, else FetchContent from upstream
