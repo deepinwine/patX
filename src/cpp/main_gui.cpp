@@ -547,8 +547,9 @@ private:
         patent_list->AppendColumn(UTF8_STR("到期日"), wxLIST_FORMAT_LEFT, 90);
         patent_list->AppendColumn(UTF8_STR("事务所"), wxLIST_FORMAT_LEFT, 80);
         patent_list->AppendColumn(UTF8_STR("备注"), wxLIST_FORMAT_LEFT, 150);
-        // OA 状态列：最新官方发文 + 待办绝限（数据来自 oa_records 聚合）
-        patent_list->AppendColumn(UTF8_STR("最新审查意见"), wxLIST_FORMAT_LEFT, 150);
+        // OA 状态列：最新官方发文（状态+时间两栏）+ 待办绝限
+        patent_list->AppendColumn(UTF8_STR("最新审查意见"), wxLIST_FORMAT_LEFT, 110);
+        patent_list->AppendColumn(UTF8_STR("最新发文日"), wxLIST_FORMAT_LEFT, 95);
         patent_list->AppendColumn(UTF8_STR("绝限日"), wxLIST_FORMAT_LEFT, 95);
         patent_list->AppendColumn(UTF8_STR("剩余天数"), wxLIST_FORMAT_LEFT, 85);
 
@@ -737,35 +738,34 @@ private:
             patent_list->SetItem(idx, 19, DB_STR(p.agency_firm));
             patent_list->SetItem(idx, 20, DB_STR(p.notes));
 
-            // OA 状态列：最新官方发文 + 待办绝限 + 剩余天数
+            // OA 状态列：最新官方发文（状态+时间）+ 待办绝限 + 剩余天数
             auto it = oa_states.find(p.geke_code);
             if (it != oa_states.end()) {
                 const PatentOAState& st = it->second;
-                if (!st.latest_date.empty()) {
-                    patent_list->SetItem(idx, 21,
-                        DB_STR(st.latest_type + " " + st.latest_date));
-                } else {
-                    patent_list->SetItem(idx, 21, "-");
-                }
+                patent_list->SetItem(idx, 21,
+                    st.latest_type.empty() ? "-" : DB_STR(st.latest_type));
+                patent_list->SetItem(idx, 22,
+                    st.latest_date.empty() ? "-" : DB_STR(st.latest_date));
                 if (!st.pending_deadline.empty()) {
-                    patent_list->SetItem(idx, 22, DB_STR(st.pending_deadline));
+                    patent_list->SetItem(idx, 23, DB_STR(st.pending_deadline));
                     if (st.pending_days < 0) {
-                        patent_list->SetItem(idx, 23,
+                        patent_list->SetItem(idx, 24,
                             wxString::Format(UTF8_STR("逾期%d天"), -st.pending_days));
                         urgent_overdue++;
                     } else {
-                        patent_list->SetItem(idx, 23,
+                        patent_list->SetItem(idx, 24,
                             wxString::Format(UTF8_STR("%d天"), st.pending_days));
                         if (st.pending_days <= 5) urgent_soon++;
                     }
                 } else {
-                    patent_list->SetItem(idx, 22, "-");
                     patent_list->SetItem(idx, 23, "-");
+                    patent_list->SetItem(idx, 24, "-");
                 }
             } else {
                 patent_list->SetItem(idx, 21, "-");
                 patent_list->SetItem(idx, 22, "-");
                 patent_list->SetItem(idx, 23, "-");
+                patent_list->SetItem(idx, 24, "-");
             }
             patent_list->SetItemData(idx, p.id);
 
