@@ -61,8 +61,13 @@ TEST(excel_export_csv_quoting) {
         table.rows.push_back({"with\"quote", "multi\nline"});
         CHECK(io.ExportCsv(table, path));
     }
-    std::ifstream f(path);
-    std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    // Windows 下不能删除被打开句柄占用的文件：读完先关闭再 remove
+    std::string content;
+    {
+        std::ifstream f(path);
+        content.assign((std::istreambuf_iterator<char>(f)),
+                       std::istreambuf_iterator<char>());
+    }
     CHECK(content.find("\"with,comma\"") != std::string::npos);
     CHECK(content.find("\"with\"\"quote\"") != std::string::npos);
     CHECK(content.size() > 3);   // BOM + content
