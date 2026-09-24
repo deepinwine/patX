@@ -44,3 +44,4 @@ __pycache__/
 build-*/
 .worktrees/
 patents.db*
+tools/debug/
