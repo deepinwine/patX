@@ -7,10 +7,14 @@ patX 免安装版（Windows）
 目录结构
 --------
   patx.exe                     主程序（静态链接，无 DLL 依赖）
-  tools/web_dossier/           巡检侧车（Python 源码）
-  python/                      便携 Python 运行时（embeddable，免安装）
+  tools/web_dossier/           侧车脚本（CNIPA/EPO 降级时才需要 Python）
   data/deadline_rules/         中国专利期限规则集（62 条）
   patents.db                   首次运行时在本目录创建/使用
+
+主包为纯 C++/Rust：USPTO 巡检（日常主路径）内置于 patx.exe，
+零 Python、零捆绑浏览器。可选附加包 patX-cnipa-addon-python.zip
+内含便携 Python：需要 CNIPA 登录接管或 EPO 查询时，把 zip 里的
+python/ 文件夹解压到本目录即可启用。
 
 使用方法
 --------
@@ -25,7 +29,7 @@ patX 免安装版（Windows）
 - USPTO Global Dossier 公开 JSON API：无需账号，自动使用
 - EPO Patent Register：公共页面（站点有人机验证时自动降级）
 - CNIPA：需要登录时才提示，复用系统已安装的 Edge/Chrome
-  （接管模式，不安装捆绑浏览器、不读取密码）
+  （接管模式，不安装捆绑浏览器、不读取密码；需先装可选 Python 附加包）
 
 注意事项
 --------

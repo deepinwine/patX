@@ -1,5 +1,6 @@
 // 审查意见网页自动同步 - C++ core implementation. See web_dossier.hpp.
 #include "web_dossier.hpp"
+#include "web_datasource.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -11,6 +12,8 @@
 
 #include <chrono>
 #include <cstdio>
+#include <set>
+#include <tuple>
 
 using nlohmann::json;
 
@@ -113,6 +116,29 @@ bool Manager::sidecar_running() const { return sidecar_ != nullptr; }
 int Manager::check_interval_days() const { return check_interval_days_; }
 void Manager::set_check_interval_days(int days) {
     if (days == 1 || days == 3 || days == 7) check_interval_days_ = days;
+}
+
+void Manager::PickLatestOfficialEvent(RemoteCaseResult& remote) {
+    // 与 Python pick_latest_official_event 对齐：可提醒 ORIGINAL 官方事件中
+    // 按（官文日, 次数, 远端ID）取最新。
+    static const std::set<std::string> remindable = {
+        "OFFICE_ACTION_FIRST", "OFFICE_ACTION_SECOND", "OFFICE_ACTION_NTH",
+        "REJECTION_DECISION", "GRANT_NOTICE", "CORRECTION_NOTICE", "OTHER_OFFICIAL"};
+    const RemoteDocument* best = nullptr;
+    for (const auto& d : remote.documents) {
+        if (d.direction != "official" || d.official_date.empty()) continue;
+        if (d.document_version != "ORIGINAL" && !d.document_version.empty()) continue;
+        if (!remindable.count(d.document_type)) continue;
+        if (!best ||
+            std::tie(d.official_date, d.oa_ordinal, d.remote_document_id) >
+            std::tie(best->official_date, best->oa_ordinal, best->remote_document_id)) {
+            best = &d;
+        }
+    }
+    if (best) {
+        remote.has_latest_event = true;
+        remote.latest_event = *best;
+    }
 }
 
 bool Manager::EnsureRunning(std::string& error) {
@@ -412,6 +438,45 @@ CaseSyncReport Manager::SyncCase(const Patent& patent, std::atomic<bool>& cancel
     if (cancel.load()) {
         report.code = ResultCode::Cancelled;
         return report;
+    }
+
+    // 第一层：原生 C++ USPTO Global Dossier（纯 HTTP+JSON，免 Python/免浏览器）。
+    // 日常巡检在这一层完成后即返回；只有网络/限流/未收录才走 sidecar 链
+    //（EPO/CNIPA，需要便携 Python 时由附加包提供）。
+    {
+        std::string digits;
+        for (char c : patent.application_number) {
+            if (c == '.') break;
+            if (c >= '0' && c <= '9') digits += c;
+        }
+        if (digits.size() == 13) digits = digits.substr(0, 12);
+        if (digits.size() == 12) {
+            uspto::NativeUsptoClient client;
+            auto parsed = client.FetchDocuments(digits, patent.application_number,
+                                                patent.publication_number);
+            if (parsed.code == "OK") {
+                RemoteCaseResult remote;
+                remote.ok = true;
+                remote.code = "OK";
+                remote.provider_used = "uspto_global_dossier";
+                remote.attempts.emplace_back("uspto_global_dossier", "OK");
+                remote.resolved_application_number = patent.application_number;
+                remote.documents = std::move(parsed.documents);
+                PickLatestOfficialEvent(remote);
+                return ApplyRemoteResult(patent, remote);
+            }
+            // 原生层失败：sidecar 可用则降级，否则如实上报原生结果
+            std::string err;
+            if (!sidecar_ && !EnsureRunning(err)) {
+                RemoteCaseResult remote;
+                remote.ok = false;
+                remote.code = parsed.code.empty() ? "NETWORK_ERROR" : parsed.code;
+                remote.provider_used = "uspto_global_dossier";
+                remote.attempts.emplace_back("uspto_global_dossier", remote.code);
+                remote.resolved_application_number = patent.application_number;
+                return ApplyRemoteResult(patent, remote);
+            }
+        }
     }
 
     json args;

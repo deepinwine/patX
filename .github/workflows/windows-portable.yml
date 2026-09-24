@@ -35,46 +35,49 @@ jobs:
       - name: 运行离线测试
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: 下载便携 Python（embeddable，免安装）
-        shell: pwsh
-        run: |
-          $py = "3.11.9"
-          Invoke-WebRequest `
-            "https://www.python.org/ftp/python/$py/python-$py-embed-amd64.zip" `
-            -OutFile python-embed.zip
-          Expand-Archive python-embed.zip -DestinationPath package/python
-
-      - name: 向便携 Python 安装侧车依赖
-        shell: pwsh
-        run: |
-          # embeddable Python 无 pip：用完整 Python 把依赖安装到目标目录
-          python -m pip install --target package/python/Lib/site-packages playwright
-          # 打开 site 支持（修改 ._pth）
-          $pth = Get-ChildItem package/python -Filter "python*._pth" | Select-Object -First 1
-          (Get-Content $pth.FullName) -replace "^#import site$", "import site" |
-            Set-Content $pth.FullName
-
-      - name: 组装便携目录
+      # 主包：纯 C++/Rust，零 Python、零浏览器 —— 日常巡检（USPTO 层）开箱即用
+      - name: 组装主包（无 Python）
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force package/tools | Out-Null
           Copy-Item build/Release/patx.exe package/
           Copy-Item tools/web_dossier package/tools/web_dossier -Recurse
           Copy-Item data/deadline_rules package/data/deadline_rules -Recurse
-          # playwright 包内 driver 不使用（USPTO/EPO 纯 HTTP；CNIPA 走系统浏览器）
-          if (Test-Path package/python/Lib/site-packages/playwright/driver) {
-            Remove-Item package/python/Lib/site-packages/playwright/driver -Recurse -Force
-          }
           Copy-Item scripts/README-portable.txt package/README.txt
 
-      - name: 打 zip 工件
+      - name: 打主包 zip
         shell: pwsh
         run: |
           Compress-Archive -Path package/* -DestinationPath patX-portable-windows.zip
-          "zip 大小：$((Get-Item patX-portable-windows.zip).Length / 1MB) MB"
+          "主包大小：$([math]::Round((Get-Item patX-portable-windows.zip).Length / 1MB, 1)) MB"
 
       - uses: actions/upload-artifact@v4
         with:
           name: patX-portable-windows
           path: patX-portable-windows.zip
+          retention-days: 30
+
+      # 可选附加包：便携 Python（启用 CNIPA 浏览器接管 / EPO 时解压到主包目录）
+      - name: 组装 CNIPA 附加包（便携 Python）
+        shell: pwsh
+        run: |
+          $py = "3.11.9"
+          Invoke-WebRequest `
+            "https://www.python.org/ftp/python/$py/python-$py-embed-amd64.zip" `
+            -OutFile python-embed.zip
+          Expand-Archive python-embed.zip -DestinationPath addon/python
+          python -m pip install --target addon/python/Lib/site-packages playwright
+          $pth = Get-ChildItem addon/python -Filter "python*._pth" | Select-Object -First 1
+          (Get-Content $pth.FullName) -replace "^#import site$", "import site" |
+            Set-Content $pth.FullName
+          if (Test-Path addon/python/Lib/site-packages/playwright/driver) {
+            Remove-Item addon/python/Lib/site-packages/playwright/driver -Recurse -Force
+          }
+          Compress-Archive -Path addon/* -DestinationPath patX-cnipa-addon-python.zip
+          "附加包大小：$([math]::Round((Get-Item patX-cnipa-addon-python.zip).Length / 1MB, 1)) MB"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patX-cnipa-addon-python
+          path: patX-cnipa-addon-python.zip
           retention-days: 30

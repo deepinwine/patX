@@ -3,6 +3,7 @@
 #pragma once
 
 #include <exception>
+#include <stdexcept>
 #include <functional>
 #include <string>
 #include <vector>

@@ -348,7 +348,13 @@ WebDossierController::~WebDossierController() {
 
 bool WebDossierController::EnsureManager(std::string& error) {
     if (!manager_) manager_ = std::make_unique<webdossier::Manager>(db_, ResolveScriptDir());
-    return manager_->EnsureRunning(error);
+    // Python 侧车缺失不再阻断：原生 C++ USPTO 层照常工作；
+    // 只有需要 CNIPA/EPO 降级时该错误才会在单件结果里体现。
+    if (!manager_->EnsureRunning(error)) {
+        wxLogWarning("dossier sidecar unavailable (native USPTO only): %s",
+                     error.c_str());
+    }
+    return true;
 }
 
 void WebDossierController::SyncPatents(const std::vector<Patent>& patents) {

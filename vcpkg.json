@@ -5,6 +5,8 @@
     "wxwidgets",
     "openxlsx",
     "sqlite3",
-    "nlohmann-json"
+    "nlohmann-json",
+    "curl",
+    "pugixml"
   ]
 }

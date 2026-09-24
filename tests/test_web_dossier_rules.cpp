@@ -4,6 +4,7 @@
 #include "web_dossier.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -462,8 +463,81 @@ static void TestMergeOfficialEvent() {
     std::filesystem::remove(path);
 }
 
+
+// ---------------------------------------------------------------------------
+// 原生 C++ USPTO 层：解析、分类与 event_key 与 Python 对拍
+// ---------------------------------------------------------------------------
+#include "web_datasource.hpp"
+
+#include <fstream>
+#include <sstream>
+
+static void TestNativeUspto() {
+    namespace fs = std::filesystem;
+    std::ifstream in((fs::path(TOOLS_FIXTURE_DIR) /
+                      "uspto_global_dossier/cn2025469601_payload.json").string());
+    CHECK(bool(in.is_open()));
+    std::stringstream ss;
+    ss << in.rdbuf();
+    std::string body = ss.str();
+
+    auto parsed = webdossier::uspto::ParseFamilyJson(body, "CN202510469601.5",
+                                                     "CN120134203A");
+    CHECK_STR_EQ(parsed.code, "OK");
+    CHECK(parsed.documents.size() == 1);   // TRANSLATED/申请人文件/检索报告被丢弃
+    const auto& d = parsed.documents[0];
+    CHECK_STR_EQ(d.document_type, "OFFICE_ACTION_FIRST");
+    CHECK(d.oa_ordinal == 1);
+    CHECK_STR_EQ(d.official_date, "2026-05-23");
+    CHECK_STR_EQ(d.document_title, "第一次审查意见通知书");
+    CHECK_STR_EQ(d.document_code, "210401-CN");
+    CHECK_STR_EQ(d.remote_document_id,
+                 "20251046960152104012026052310110680664683123_CN");
+    // 与 Python 侧 event_key 完全一致（跨来源去重的根基）
+    CHECK_STR_EQ(d.event_key,
+                 "88d196900d299d74540dfe3d73efe840f3c29c40bd522feec925fbb67c8ec7b8");
+
+    // 英文分类边界
+    CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
+              "Second notice of examination opinions", "").document_type ==
+          "OFFICE_ACTION_SECOND");
+    CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
+              "Final rejection decision", "").document_type == "REJECTION_DECISION");
+    CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
+              "Response to first office action", "").is_official == false);
+    CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
+              "First search", "").is_remindable == false);
+    CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
+              "Notification to grant patent right", "").document_type == "GRANT_NOTICE");
+
+    // 限流与结构错误
+    CHECK_STR_EQ(webdossier::uspto::ParseFamilyJson(
+        "{\"ERROR\" : \"429 - CLOUDFRONT RATE LIMITED\"}", "CN1", "").code,
+        "RATE_LIMITED");
+    CHECK_STR_EQ(webdossier::uspto::ParseFamilyJson("<html>", "CN1", "").code,
+        "PAGE_STRUCTURE_CHANGED");
+    CHECK_STR_EQ(webdossier::uspto::ParseFamilyJson(
+        "{\"list\":[{\"countryCode\":\"US\"}]}", "CN1", "").code, "CASE_NOT_FOUND");
+}
+
+// 真实联网自检：PATX_LIVE_USPTO=1 时执行（CI/离线默认跳过）
+static void TestLiveNativeFetch() {
+    if (getenv("PATX_LIVE_USPTO") == nullptr) return;
+    webdossier::uspto::NativeUsptoClient client;
+    auto parsed = client.FetchDocuments("202510469601", "CN202510469601.5", "");
+    std::cout << "[live] code=" << parsed.code << " docs=" << parsed.documents.size();
+    if (!parsed.documents.empty())
+        std::cout << " first=" << parsed.documents[0].document_title << " @ "
+                  << parsed.documents[0].official_date;
+    std::cout << std::endl;
+    CHECK(parsed.code == "OK");
+    CHECK(!parsed.documents.empty());
+}
+
 int main() {
     TestNormalizeOaType();
+    TestNativeUspto();
+    TestLiveNativeFetch();
     TestQueueFilter();
     TestFingerprintDedup();
     TestOaMergeRules();

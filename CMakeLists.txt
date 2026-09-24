@@ -81,6 +81,7 @@ add_library(patx_core STATIC
     src/cpp/core/log.cpp
     src/cpp/database/schema_migrations.cpp
     src/cpp/deadline_engine.cpp
+    src/cpp/web_datasource.cpp
     src/cpp/io/excel_io.cpp
     src/cpp/web_dossier_rules.cpp
 )
@@ -95,6 +96,17 @@ target_link_libraries(patx_core PUBLIC
     ${PATX_JSON_TARGET}
     OpenXLSX::OpenXLSX
 )
+
+# USPTO 原生数据源（libcurl）：vcpkg 由清单提供，其他平台找系统 CURL
+find_package(CURL QUIET)
+if(CURL_FOUND)
+    target_link_libraries(patx_core PUBLIC ${CURL_LIBRARIES})
+    target_include_directories(patx_core PUBLIC ${CURL_INCLUDE_DIRS})
+    target_compile_definitions(patx_core PUBLIC PATX_HAS_LIBCURL=1)
+    message(STATUS "patX native USPTO datasource: libcurl enabled")
+else()
+    message(STATUS "libcurl not found - native USPTO datasource disabled (sidecar only)")
+endif()
 
 if(MSVC)
     target_compile_options(patx_core PRIVATE /utf-8 /W4)
@@ -165,6 +177,8 @@ if(PATX_BUILD_TESTS)
     # Web dossier OA merge rules (standalone main; links the core rules unit)
     add_executable(patx_web_dossier_tests tests/test_web_dossier_rules.cpp)
     target_link_libraries(patx_web_dossier_tests PRIVATE patx_core)
+    target_compile_definitions(patx_web_dossier_tests PRIVATE
+        TOOLS_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tools/web_dossier/fixtures")
     target_include_directories(patx_web_dossier_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp

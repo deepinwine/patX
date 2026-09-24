@@ -173,9 +173,6 @@ public:
     bool sidecar_running() const;
 
 private:
-    // Performs one JSON-RPC round trip. Returns false on transport trouble.
-    bool Rpc(const std::string& op, const std::string& json_payload, std::string& response);
-
     struct RemoteCaseResult {
         bool ok = false;
         std::string code;                    // result-code name from sidecar
@@ -190,6 +187,14 @@ private:
         bool has_latest_event = false;
         RemoteDocument latest_event;
     };
+
+    // Performs one JSON-RPC round trip. Returns false on transport trouble.
+    bool Rpc(const std::string& op, const std::string& json_payload, std::string& response);
+    // 从 documents 里挑最新可提醒官方事件填入 latest_event（与 Python
+    // pick_latest_official_event 对齐）。
+    static void PickLatestOfficialEvent(RemoteCaseResult& remote);
+
+
 
     CaseSyncReport ApplyRemoteResult(const Patent& patent, const RemoteCaseResult& remote);
     bool ParseCaseResult(const std::string& json_body, RemoteCaseResult& out);
