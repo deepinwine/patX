@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,18 @@ FIXTURE = (
 )
 
 
-def _document_page(rows: str = "", empty_state: str = "") -> str:
+def _document_page(
+    rows: str = "",
+    empty_state: str = "",
+    application_number: str = "CN202510469601.5",
+    publication_number: str = "CN120134203A",
+) -> str:
     return f"""
     <html><head><title>Global Dossier</title></head>
     <body data-page="global-dossier-document-list">
       <h1>Global Dossier</h1>
+      <p class="case-number">Application {application_number}</p>
+      <p class="publication-number">Publication {publication_number}</p>
       <table aria-label="Document list">
         <thead><tr>
           <th>Date</th><th>Document Description</th><th>Document Code</th>
@@ -104,6 +112,68 @@ def test_explicit_empty_state_with_verified_headers_is_ok():
     assert outcome.documents == []
 
 
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        '<section hidden>{}</section>',
+        '<section aria-hidden="true">{}</section>',
+        '<section style="display: none">{}</section>',
+        '<section style="visibility:hidden">{}</section>',
+        '<template>{}</template>',
+    ],
+)
+def test_hidden_ancestor_empty_state_is_not_an_explicit_empty_result(wrapper):
+    hidden_empty = wrapper.format(
+        '<div class="empty-state">No documents found</div>'
+    )
+    outcome = parse_uspto_document_list(
+        _document_page(empty_state=hidden_empty), "CN202510469601.5", ""
+    )
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+
+
+@pytest.mark.parametrize("tag", ["script", "style", "template"])
+def test_non_rendered_captcha_text_does_not_trigger_access_denied(tag):
+    html = _document_page(
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+        )
+    ).replace("</body>", f"<{tag}>captcha</{tag}></body>")
+    outcome = parse_uspto_document_list(html, "CN202510469601.5", "")
+    assert outcome.code == ResultCode.OK
+    assert len(outcome.documents) == 1
+
+
+def test_parser_rejects_document_list_for_a_different_case():
+    html = _document_page(
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="case-a-document",
+        ),
+        application_number="CN202510469601.5",
+    )
+    outcome = parse_uspto_document_list(html, "CN202510469602.3", "")
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
+
+
+def test_hidden_void_element_does_not_hide_following_document_table():
+    html = _document_page(
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+        )
+    ).replace('<table aria-label="Document list">', (
+        '<input type="hidden" hidden value="state">'
+        '<table aria-label="Document list">'
+    ))
+    outcome = parse_uspto_document_list(html, "CN202510469601.5", "")
+    assert outcome.code == ResultCode.OK
+    assert len(outcome.documents) == 1
+
+
 def test_unparseable_date_does_not_create_document():
     rows = _row(
         "not-a-date",
@@ -179,12 +249,26 @@ def test_applicant_to_office_direction_is_not_official():
 
 
 class _FakePage:
-    def __init__(self, html: str, *, ready_html: str = "", wait_error=None):
+    def __init__(
+        self,
+        html: str,
+        *,
+        ready_html: str = "",
+        wait_error=None,
+        evaluate_results=None,
+        on_poll=None,
+        legacy_wait_updates: bool = True,
+    ):
         self._html = html
         self._ready_html = ready_html
         self._wait_error = wait_error
+        self._evaluate_results = list(evaluate_results or [True])
+        self._on_poll = on_poll
+        self._legacy_wait_updates = legacy_wait_updates
         self.waited_for = None
         self.waited_for_function = None
+        self.evaluated = []
+        self.poll_waits = []
 
     def wait_for_load_state(self, state, timeout):
         self.waited_for = (state, timeout)
@@ -193,8 +277,24 @@ class _FakePage:
         self.waited_for_function = (expression, timeout)
         if self._wait_error is not None:
             raise self._wait_error
+        if self._ready_html and self._legacy_wait_updates:
+            self._html = self._ready_html
+
+    def evaluate(self, expression, argument):
+        self.evaluated.append((expression, argument))
+        if self._wait_error is not None:
+            raise self._wait_error
+        if len(self._evaluate_results) > 1:
+            return self._evaluate_results.pop(0)
+        return self._evaluate_results[0]
+
+    def wait_for_timeout(self, milliseconds):
+        self.poll_waits.append(milliseconds)
+        if self._on_poll is not None:
+            self._on_poll()
         if self._ready_html:
             self._html = self._ready_html
+            self._ready_html = ""
 
     def content(self):
         return self._html
@@ -202,12 +302,18 @@ class _FakePage:
 
 class _FakeBrowserManager:
     def __init__(self, html: str, *, status=None, ready_html: str = "",
-                 wait_error=None):
+                 wait_error=None, evaluate_results=None, on_poll=None,
+                 spa_statuses=None):
         self.page = _FakePage(
-            html, ready_html=ready_html, wait_error=wait_error
+            html,
+            ready_html=ready_html,
+            wait_error=wait_error,
+            evaluate_results=evaluate_results,
+            on_poll=on_poll,
         )
         self.urls = []
         self.last_navigation_status = status
+        self.last_spa_statuses = list(spa_statuses or [])
 
     def open_page(self, url, cancel):
         self.urls.append(url)
@@ -222,8 +328,8 @@ def test_provider_prefers_normalized_application_url():
     )
     assert outcome.code == ResultCode.OK
     assert manager.urls == [APP_URL.format(application="202510469601.5")]
-    assert manager.page.waited_for[0] == "domcontentloaded"
-    assert manager.page.waited_for_function is not None
+    assert manager.page.waited_for is None
+    assert manager.page.evaluated
 
 
 def test_provider_waits_for_spa_document_state_before_reading_html():
@@ -231,6 +337,7 @@ def test_provider_waits_for_spa_document_state_before_reading_html():
     manager = _FakeBrowserManager(
         shell,
         ready_html=FIXTURE.read_text(encoding="utf-8"),
+        evaluate_results=[False, True],
     )
     provider = UsptoGlobalDossierProvider(browser_manager=manager)
 
@@ -238,11 +345,13 @@ def test_provider_waits_for_spa_document_state_before_reading_html():
 
     assert outcome.code == ResultCode.OK
     assert len(outcome.documents) == 1
-    expression, timeout = manager.page.waited_for_function
+    expression, target = manager.page.evaluated[0]
     assert "table" in expression
     assert "no documents" in expression.lower()
     assert "sign in to global dossier" in expression.lower()
-    assert timeout > 0
+    assert "getcomputedstyle" in expression.lower()
+    assert "aria-hidden" in expression.lower()
+    assert target == "CN2025104696015"
 
 
 def test_provider_spa_wait_timeout_is_structure_changed():
@@ -255,7 +364,72 @@ def test_provider_spa_wait_timeout_is_structure_changed():
     outcome = provider.list_documents("CN202510469601.5", "", None)
 
     assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
-    assert manager.page.waited_for_function is not None
+    assert manager.page.evaluated
+
+
+def test_consecutive_cases_do_not_reuse_the_previous_case_table():
+    case_a_html = _document_page(
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="case-a-document",
+        ),
+        application_number="CN202510469601.5",
+    )
+    case_b_html = _document_page(
+        _row(
+            "2026-05-24",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="case-b-document",
+        ),
+        application_number="CN202510469602.3",
+    )
+
+    class StaleThenFreshManager(_FakeBrowserManager):
+        def __init__(self):
+            super().__init__(case_a_html)
+            self.calls = 0
+
+        def open_page(self, url, cancel):
+            self.urls.append(url)
+            self.calls += 1
+            if self.calls == 2:
+                self.page._html = case_a_html
+                self.page._ready_html = case_b_html
+                self.page._evaluate_results = [False, True]
+                self.page._legacy_wait_updates = False
+            return self.page
+
+    manager = StaleThenFreshManager()
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    first = provider.list_documents("CN202510469601.5", "", None)
+    second = provider.list_documents("CN202510469602.3", "", None)
+
+    assert [document.remote_document_id for document in first.documents] == [
+        "case-a-document"
+    ]
+    assert second.code == ResultCode.OK
+    assert [document.remote_document_id for document in second.documents] == [
+        "case-b-document"
+    ]
+    assert second.documents[0].application_number == "CN202510469602.3"
+
+
+def test_cancel_during_spa_wait_returns_temporary_error():
+    cancel = threading.Event()
+    manager = _FakeBrowserManager(
+        "<html><body><h1>Global Dossier</h1><div id='app'></div></body></html>",
+        evaluate_results=[False, False],
+        on_poll=cancel.set,
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", cancel)
+
+    assert outcome.code == ResultCode.TEMPORARY_ERROR
+    assert "取消" in outcome.message
+    assert manager.page.poll_waits
 
 
 def test_provider_uses_publication_url_when_application_is_unusable():
@@ -304,6 +478,7 @@ def test_provider_navigation_exception_is_network_error():
         (401, ResultCode.ACCESS_DENIED),
         (403, ResultCode.ACCESS_DENIED),
         (429, ResultCode.RATE_LIMITED),
+        (503, ResultCode.NETWORK_ERROR),
     ],
 )
 def test_provider_maps_navigation_block_status(status, expected):
@@ -316,6 +491,19 @@ def test_provider_maps_navigation_block_status(status, expected):
 
     assert outcome.code == expected
     assert manager.page.waited_for_function is None
+
+
+def test_provider_maps_spa_child_request_rate_limit():
+    manager = _FakeBrowserManager(
+        FIXTURE.read_text(encoding="utf-8"),
+        status=None,
+        spa_statuses=[429],
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.RATE_LIMITED
 
 
 def test_provider_public_page_auth_and_download_contract():
@@ -387,6 +575,9 @@ def test_browser_manager_exposes_navigation_http_status(tmp_path):
         status = 403
 
     class FakePage:
+        def on(self, event, callback):
+            pass
+
         def goto(self, url, *, timeout, wait_until):
             return FakeResponse()
 
@@ -399,3 +590,72 @@ def test_browser_manager_exposes_navigation_http_status(tmp_path):
 
     assert manager.open_page("https://example.invalid", None) is manager._page
     assert manager.last_navigation_status == 403
+
+
+def test_browser_manager_records_spa_status_when_hash_navigation_has_no_response(
+    tmp_path,
+):
+    class FakeRequest:
+        resource_type = "xhr"
+
+    class FakeChildResponse:
+        status = 429
+        url = "https://globaldossier.uspto.gov/api/documents"
+        request = FakeRequest()
+
+    class FakePage:
+        def on(self, event, callback):
+            assert event == "response"
+            self.response_callback = callback
+
+        def goto(self, url, *, timeout, wait_until):
+            self.response_callback(FakeChildResponse())
+            return None
+
+    manager = BrowserManager(
+        "uspto_global_dossier",
+        prefer_system_browser=False,
+        profile_dir=str(tmp_path / "profile"),
+    )
+    manager._page = FakePage()
+
+    assert manager.open_page("https://globaldossier.uspto.gov/#/result", None)
+    assert manager.last_navigation_status is None
+    assert manager.last_spa_statuses == [429]
+
+
+def test_browser_manager_cleans_playwright_when_persistent_launch_fails(
+    monkeypatch, tmp_path
+):
+    stopped = []
+
+    class FakeChromium:
+        def launch_persistent_context(self, profile_dir, *, headless):
+            raise RuntimeError("chromium launch failed")
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+        def stop(self):
+            stopped.append(True)
+
+    fake_playwright = FakePlaywright()
+
+    class FakeStarter:
+        def start(self):
+            return fake_playwright
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: FakeStarter())
+    manager = BrowserManager(
+        "uspto_global_dossier",
+        prefer_system_browser=False,
+        profile_dir=str(tmp_path / "profile"),
+    )
+
+    with pytest.raises(RuntimeError, match="chromium launch failed"):
+        manager.launch()
+
+    assert stopped == [True]
+    assert manager._pw is None
+    assert manager._context is None
+    assert manager._page is None

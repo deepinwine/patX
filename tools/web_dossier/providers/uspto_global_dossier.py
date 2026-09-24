@@ -8,6 +8,7 @@ requested or downloaded.
 from __future__ import annotations
 
 import re
+import time
 import urllib.parse
 from html.parser import HTMLParser
 from typing import Optional
@@ -26,6 +27,8 @@ from .base import DossierProvider, SyncOutcome
 
 APP_URL = "https://globaldossier.uspto.gov/#/result/application/CN/{application}/0"
 PUB_URL = "https://globaldossier.uspto.gov/#/result/publication/CN/{publication}/1"
+SPA_WAIT_TIMEOUT_SECONDS = 30.0
+SPA_POLL_INTERVAL_MS = 250
 
 _BLOCK_MARKERS = (
     "access denied",
@@ -56,10 +59,25 @@ _OFFICIAL_DIRECTIONS = {
 }
 
 _DOCUMENT_STATE_SCRIPT = r"""
-() => {
+(targetToken) => {
+  const isVisible = (element) => {
+    if (!element || element.closest('script,style,template,[hidden],[aria-hidden="true"]')) {
+      return false;
+    }
+    for (let node = element; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') {
+        return false;
+      }
+    }
+    return true;
+  };
   const bodyText = (document.body?.innerText || '').toLowerCase();
+  const normalizedText = bodyText.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const hasTarget = !targetToken || normalizedText.includes(targetToken);
   const hasDocumentTable = Array.from(document.querySelectorAll('table')).some(
     (table) => {
+      if (!isVisible(table)) return false;
       const firstRow = table.querySelector('thead') || table.querySelector('tr');
       const header = (firstRow?.innerText || '').toLowerCase();
       return /\bdate\b/.test(header) &&
@@ -67,15 +85,23 @@ _DOCUMENT_STATE_SCRIPT = r"""
              /(document code|\bcode\b)/.test(header);
     }
   );
-  const hasEmptyState = /\b(?:no documents|no records)\b/.test(bodyText);
+  const hasEmptyState = Array.from(document.querySelectorAll('body *')).some(
+    (element) => isVisible(element) &&
+      /\b(?:no documents|no records)\b/.test((element.innerText || '').toLowerCase())
+  );
   const hasBlockedState = /(access denied|request rejected|forbidden|sign in to global dossier|login required|security verification|verify you are human|captcha)/.test(bodyText);
-  return hasDocumentTable || hasEmptyState || hasBlockedState;
+  return hasBlockedState || (hasTarget && (hasDocumentTable || hasEmptyState));
 }
 """
 
 
 class _DocumentListParser(HTMLParser):
     """Collect semantic tables plus visible empty-state containers."""
+
+    _VOID_TAGS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -85,23 +111,38 @@ class _DocumentListParser(HTMLParser):
         self._table: Optional[dict] = None
         self._row: Optional[list] = None
         self._cell: Optional[dict] = None
-        self._empty_depth = 0
+        self._visibility_stack: list[tuple[str, bool]] = []
+        self._empty_capture: Optional[tuple[int, str]] = None
         self._empty_text: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
-        if self._empty_depth:
-            self._empty_depth += 1
-        else:
-            identity = " ".join(
-                (attributes.get("id", ""), attributes.get("class", ""))
-            ).lower()
-            hidden = "hidden" in attributes or (
-                attributes.get("aria-hidden", "").lower() == "true"
-            )
-            if not hidden and re.search(r"empty|no[-_ ]?(?:documents|records)", identity):
-                self._empty_depth = 1
-                self._empty_text = []
+        parent_visible = (
+            self._visibility_stack[-1][1] if self._visibility_stack else True
+        )
+        style = re.sub(r"\s+", "", attributes.get("style", "").lower())
+        hidden = (
+            tag in ("script", "style", "template")
+            or "hidden" in attributes
+            or attributes.get("aria-hidden", "").strip().lower() == "true"
+            or "display:none" in style
+            or "visibility:hidden" in style
+        )
+        visible = parent_visible and not hidden
+        self._visibility_stack.append((tag, visible))
+        if not visible:
+            if tag in self._VOID_TAGS:
+                self._visibility_stack.pop()
+            return
+
+        identity = " ".join(
+            (attributes.get("id", ""), attributes.get("class", ""))
+        ).lower()
+        if self._empty_capture is None and re.search(
+            r"empty|no[-_ ]?(?:documents|records)", identity
+        ):
+            self._empty_capture = (len(self._visibility_stack), tag)
+            self._empty_text = []
 
         if tag == "table" and self._table is None:
             self._table = {"rows": []}
@@ -115,34 +156,49 @@ class _DocumentListParser(HTMLParser):
             }
         elif tag == "a" and self._cell is not None:
             self._cell["href"] = attributes.get("href", "")
+        if tag in self._VOID_TAGS:
+            self._visibility_stack.pop()
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
 
     def handle_data(self, data):
+        if self._visibility_stack and not self._visibility_stack[-1][1]:
+            return
         self.page_text.append(data)
         if self._cell is not None:
             self._cell["text"] += data
-        if self._empty_depth:
+        if self._empty_capture is not None:
             self._empty_text.append(data)
 
     def handle_endtag(self, tag):
-        if tag in ("th", "td") and self._cell is not None:
+        visible = (
+            self._visibility_stack[-1][1] if self._visibility_stack else True
+        )
+        if visible and tag in ("th", "td") and self._cell is not None:
             self._cell["text"] = re.sub(r"\s+", " ", self._cell["text"]).strip()
             self._row.append(self._cell)
             self._cell = None
-        elif tag == "tr" and self._row is not None:
+        elif visible and tag == "tr" and self._row is not None:
             if self._table is not None and self._row:
                 self._table["rows"].append(self._row)
             self._row = None
-        elif tag == "table" and self._table is not None:
+        elif visible and tag == "table" and self._table is not None:
             self.tables.append(self._table)
             self._table = None
 
-        if self._empty_depth:
-            self._empty_depth -= 1
-            if self._empty_depth == 0:
-                text = re.sub(r"\s+", " ", "".join(self._empty_text)).strip()
-                if text:
-                    self.empty_state_texts.append(text)
-                self._empty_text = []
+        if self._empty_capture == (len(self._visibility_stack), tag):
+            text = re.sub(r"\s+", " ", "".join(self._empty_text)).strip()
+            if text:
+                self.empty_state_texts.append(text)
+            self._empty_capture = None
+            self._empty_text = []
+
+        for index in range(len(self._visibility_stack) - 1, -1, -1):
+            if self._visibility_stack[index][0] == tag:
+                del self._visibility_stack[index:]
+                break
 
 
 def _header_indexes(row: list[dict]) -> Optional[dict[str, int]]:
@@ -177,6 +233,10 @@ def _normal_number(raw: str, number_type: str) -> str:
     return ""
 
 
+def _identifier_token(raw: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", (raw or "").upper())
+
+
 def _is_official_direction(raw: str) -> bool:
     normalized = re.sub(r"[^a-z]+", " ", (raw or "").lower()).strip()
     return normalized in _OFFICIAL_DIRECTIONS
@@ -192,13 +252,6 @@ def parse_uspto_document_list(
             message="USPTO Global Dossier 返回空响应",
         )
 
-    lowered = re.sub(r"\s+", " ", html).lower()
-    if any(marker in lowered for marker in _BLOCK_MARKERS):
-        return SyncOutcome(
-            code=ResultCode.ACCESS_DENIED,
-            message="USPTO Global Dossier 返回拦截或登录页面",
-        )
-
     parser = _DocumentListParser()
     try:
         parser.feed(html)
@@ -210,10 +263,27 @@ def parse_uspto_document_list(
         )
 
     page_text = re.sub(r"\s+", " ", " ".join(parser.page_text)).strip()
+    lowered = page_text.lower()
+    if any(marker in lowered for marker in _BLOCK_MARKERS):
+        return SyncOutcome(
+            code=ResultCode.ACCESS_DENIED,
+            message="USPTO Global Dossier 返回拦截或登录页面",
+        )
     if "global dossier" not in page_text.lower():
         return SyncOutcome(
             code=ResultCode.PAGE_STRUCTURE_CHANGED,
             message="未识别 USPTO Global Dossier 页面标志",
+        )
+
+    normalized_application = _normal_number(application_number, "application")
+    normalized_publication = _normal_number(publication_number, "publication")
+    target_number = normalized_application or normalized_publication
+    if target_number and _identifier_token(target_number) not in _identifier_token(
+        page_text
+    ):
+        return SyncOutcome(
+            code=ResultCode.PAGE_STRUCTURE_CHANGED,
+            message="Global Dossier 页面案件号与查询目标不一致",
         )
 
     target_rows = None
@@ -245,8 +315,6 @@ def parse_uspto_document_list(
             message="文档表格为空且未显示明确的无文档状态",
         )
 
-    normalized_application = _normal_number(application_number, "application")
-    normalized_publication = _normal_number(publication_number, "publication")
     documents: list[ProsecutionDocument] = []
     official_candidates = 0
     date_failures = 0
@@ -365,6 +433,79 @@ class UsptoGlobalDossierProvider(DossierProvider):
             return PUB_URL.format(publication=urllib.parse.quote(route_number, safe=""))
         return ""
 
+    def _target_token(
+        self, application_number: str, publication_number: str
+    ) -> str:
+        normalized_application = _normal_number(application_number, "application")
+        normalized_publication = _normal_number(publication_number, "publication")
+        return _identifier_token(normalized_application or normalized_publication)
+
+    def _http_error_outcome(self) -> Optional[SyncOutcome]:
+        statuses = []
+        navigation_status = getattr(self._manager, "last_navigation_status", None)
+        if isinstance(navigation_status, int):
+            statuses.append(navigation_status)
+        statuses.extend(
+            status
+            for status in getattr(self._manager, "last_spa_statuses", [])
+            if isinstance(status, int)
+        )
+        if any(status in (401, 403) for status in statuses):
+            return SyncOutcome(
+                code=ResultCode.ACCESS_DENIED,
+                message="USPTO Global Dossier 请求被拒绝",
+            )
+        if 429 in statuses:
+            return SyncOutcome(
+                code=ResultCode.RATE_LIMITED,
+                message="USPTO Global Dossier 请求受限（HTTP 429）",
+            )
+        if any(status >= 500 for status in statuses):
+            return SyncOutcome(
+                code=ResultCode.NETWORK_ERROR,
+                message="USPTO Global Dossier 服务暂时不可用",
+            )
+        if 404 in statuses:
+            return SyncOutcome(
+                code=ResultCode.CASE_NOT_FOUND,
+                message="USPTO Global Dossier 未找到案件数据",
+            )
+        return None
+
+    def _wait_for_document_state(
+        self, page, target_token: str, cancel
+    ) -> Optional[SyncOutcome]:
+        deadline = time.monotonic() + SPA_WAIT_TIMEOUT_SECONDS
+        while True:
+            if cancel is not None and cancel.is_set():
+                return SyncOutcome(
+                    code=ResultCode.TEMPORARY_ERROR,
+                    message="USPTO Global Dossier 查询已取消",
+                )
+            status_outcome = self._http_error_outcome()
+            if status_outcome is not None:
+                return status_outcome
+            try:
+                if page.evaluate(_DOCUMENT_STATE_SCRIPT, target_token):
+                    return self._http_error_outcome()
+            except Exception:
+                return SyncOutcome(
+                    code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                    message="检查 Global Dossier 文档状态失败",
+                )
+            if time.monotonic() >= deadline:
+                return SyncOutcome(
+                    code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                    message="等待 Global Dossier 文档状态超时或页面结构已变化",
+                )
+            try:
+                page.wait_for_timeout(SPA_POLL_INTERVAL_MS)
+            except Exception:
+                return SyncOutcome(
+                    code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                    message="等待 Global Dossier 文档状态失败",
+                )
+
     def list_documents(
         self, application_number: str, publication_number: str, cancel
     ) -> SyncOutcome:
@@ -384,26 +525,13 @@ class UsptoGlobalDossierProvider(DossierProvider):
                 message="无法打开 USPTO Global Dossier 页面",
             )
 
-        navigation_status = getattr(self._manager, "last_navigation_status", None)
-        if navigation_status in (401, 403):
-            return SyncOutcome(
-                code=ResultCode.ACCESS_DENIED,
-                message=f"USPTO Global Dossier 导航被拒绝（HTTP {navigation_status}）",
-            )
-        if navigation_status == 429:
-            return SyncOutcome(
-                code=ResultCode.RATE_LIMITED,
-                message="USPTO Global Dossier 请求受限（HTTP 429）",
-            )
-
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=30_000)
-            page.wait_for_function(_DOCUMENT_STATE_SCRIPT, timeout=30_000)
-        except Exception:
-            return SyncOutcome(
-                code=ResultCode.PAGE_STRUCTURE_CHANGED,
-                message="等待 Global Dossier 文档状态超时或页面结构已变化",
-            )
+        wait_outcome = self._wait_for_document_state(
+            page,
+            self._target_token(application_number, publication_number),
+            cancel,
+        )
+        if wait_outcome is not None:
+            return wait_outcome
         try:
             html = page.content()
         except Exception:

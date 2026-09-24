@@ -50,6 +50,8 @@ class BrowserManager:
         self._page = None
         self._spawned = None
         self.last_navigation_status: Optional[int] = None
+        self.last_spa_statuses: list[int] = []
+        self._response_watched_pages: set[int] = set()
 
     # ---- lifecycle -----------------------------------------------------
     def _chrome_candidates(self):
@@ -169,10 +171,20 @@ class BrowserManager:
                 return True
         # 3) Playwright's bundled Chromium (works for friendly public
         #    sites and fixtures; the Ruishu-protected site will refuse it)
-        self._context = self._pw.chromium.launch_persistent_context(
-            str(self.profile_dir),
-            headless=True if not self.prefer_system_browser else self.headless,
-        )
+        try:
+            self._context = self._pw.chromium.launch_persistent_context(
+                str(self.profile_dir),
+                headless=True if not self.prefer_system_browser else self.headless,
+            )
+        except Exception:
+            playwright = self._pw
+            self._context = self._page = self._pw = None
+            try:
+                if playwright is not None:
+                    playwright.stop()
+            except Exception:
+                pass
+            raise
         self._adopt_page()
         return True
 
@@ -192,6 +204,32 @@ class BrowserManager:
                 pass
         self._browser = self._context = self._pw = self._page = None
         self._spawned = None
+        self._response_watched_pages.clear()
+
+    def _watch_page_responses(self, page) -> None:
+        page_id = id(page)
+        if page_id in self._response_watched_pages:
+            return
+
+        def record_response(response):
+            try:
+                request = response.request
+                if request.resource_type not in ("xhr", "fetch"):
+                    return
+                if self.provider == "uspto_global_dossier" and \
+                        "globaldossier.uspto.gov" not in response.url.lower():
+                    return
+                status = response.status
+                if isinstance(status, int) and status >= 400:
+                    self.last_spa_statuses.append(status)
+            except Exception:
+                pass
+
+        try:
+            page.on("response", record_response)
+            self._response_watched_pages.add(page_id)
+        except Exception:
+            pass
 
     # ---- pages ---------------------------------------------------------
     def open_page(self, url: str, cancel) -> Optional[object]:
@@ -201,6 +239,8 @@ class BrowserManager:
             if cancel is not None and cancel.is_set():
                 return None
             self.last_navigation_status = None
+            self.last_spa_statuses = []
+            self._watch_page_responses(self._page)
             response = self._page.goto(
                 url, timeout=STEP_TIMEOUT_MS, wait_until="domcontentloaded"
             )
