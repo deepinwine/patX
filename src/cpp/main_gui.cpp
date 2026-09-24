@@ -738,7 +738,7 @@ private:
             patent_list->SetItem(idx, 19, DB_STR(p.agency_firm));
             patent_list->SetItem(idx, 20, DB_STR(p.notes));
 
-            // OA 状态列：最新官方发文（状态+时间）+ 待办绝限 + 剩余天数
+            // OA 状态列：最新官方发文（状态+时间）+ 其答复绝限 + 剩余天数
             auto it = oa_states.find(p.geke_code);
             if (it != oa_states.end()) {
                 const PatentOAState& st = it->second;
@@ -746,16 +746,27 @@ private:
                     st.latest_type.empty() ? "-" : DB_STR(st.latest_type));
                 patent_list->SetItem(idx, 22,
                     st.latest_date.empty() ? "-" : DB_STR(st.latest_date));
-                if (!st.pending_deadline.empty()) {
-                    patent_list->SetItem(idx, 23, DB_STR(st.pending_deadline));
-                    if (st.pending_days < 0) {
-                        patent_list->SetItem(idx, 24,
-                            wxString::Format(UTF8_STR("逾期%d天"), -st.pending_days));
-                        urgent_overdue++;
+                if (!st.latest_deadline.empty()) {
+                    patent_list->SetItem(idx, 23, DB_STR(st.latest_deadline));
+                    if (st.latest_completed) {
+                        patent_list->SetItem(idx, 24, UTF8_STR("已完成"));
                     } else {
-                        patent_list->SetItem(idx, 24,
-                            wxString::Format(UTF8_STR("%d天"), st.pending_days));
-                        if (st.pending_days <= 5) urgent_soon++;
+                        wxDateTime dl;
+                        if (dl.ParseFormat(st.latest_deadline.c_str(), "%Y-%m-%d") &&
+                            dl.IsValid()) {
+                            int days = (dl - wxDateTime::Now()).GetDays();
+                            if (days < 0) {
+                                patent_list->SetItem(idx, 24,
+                                    wxString::Format(UTF8_STR("逾期%d天"), -days));
+                                urgent_overdue++;
+                            } else {
+                                patent_list->SetItem(idx, 24,
+                                    wxString::Format(UTF8_STR("%d天"), days));
+                                if (days <= 5) urgent_soon++;
+                            }
+                        } else {
+                            patent_list->SetItem(idx, 24, "-");
+                        }
                     }
                 } else {
                     patent_list->SetItem(idx, 23, "-");
@@ -1229,30 +1240,38 @@ private:
     struct PatentOAState {
         std::string latest_type;     // 最新官方发文（按发文日）
         std::string latest_date;
-        std::string pending_deadline;// 最早的未完成绝限
-        int pending_days = INT_MAX;  // 距该绝限的天数
+        bool latest_completed = false;
+        std::string latest_deadline; // 该条发文的答复期限（关联最新发文日）
     };
 
-    // 以编号聚合 OA 状态，供国内申请列表的三列使用
+    // 以编号聚合 OA 状态：绝限日取“最新发文那条 OA”的期限，
+    // 缺期限的按规则引擎补算（仅显示，不写库）
     std::map<std::string, PatentOAState> BuildPatentOAStates() {
         std::map<std::string, PatentOAState> states;
-        wxDateTime now = wxDateTime::Now();
+        std::map<std::string, std::string> patent_type;   // geke -> patent_type
+        for (const auto& p : db->GetPatents()) patent_type[p.geke_code] = p.patent_type;
         for (const auto& oa : db->GetOARecords()) {
+            if (oa.issue_date.empty()) continue;
             PatentOAState& st = states[oa.geke_code];
-            if (!oa.issue_date.empty() &&
-                (st.latest_date.empty() || oa.issue_date > st.latest_date)) {
+            if (st.latest_date.empty() || oa.issue_date > st.latest_date) {
                 st.latest_date = oa.issue_date;
                 st.latest_type = ShortOaTypeCn(oa.oa_type);
+                st.latest_completed = oa.is_completed;
+                st.latest_deadline = oa.official_deadline;
             }
-            if (!oa.is_completed && !oa.official_deadline.empty()) {
-                wxDateTime dl;
-                if (dl.ParseFormat(oa.official_deadline.c_str(), "%Y-%m-%d") && dl.IsValid()) {
-                    int days = (dl - now).GetDays();
-                    if (days < st.pending_days) {
-                        st.pending_days = days;
-                        st.pending_deadline = oa.official_deadline;
-                    }
-                }
+        }
+        for (auto& [code, st] : states) {
+            if (st.latest_date.empty()) continue;
+            std::string event = (patent_type.count(code) &&
+                                 patent_type[code] == "utility")
+                                    ? "oa_response_utility"
+                                    : "oa_response_invention";
+            std::string suggested = db->CalculateDeadline("CN", event, st.latest_date);
+            // 缺期限，或存库期限早于发文日（老数据录入错位）时，
+            // 显示层回退到规则计算值；不改动库里的原始数据
+            if (st.latest_deadline.empty() ||
+                (!suggested.empty() && st.latest_deadline < st.latest_date)) {
+                if (!suggested.empty()) st.latest_deadline = suggested;
             }
         }
         return states;
