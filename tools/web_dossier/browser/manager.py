@@ -51,7 +51,8 @@ class BrowserManager:
         self._spawned = None
         self.last_navigation_status: Optional[int] = None
         self.last_spa_statuses: list[int] = []
-        self._response_watched_pages: set[int] = set()
+        self._query_generation = 0
+        self._owns_context = False
 
     # ---- lifecycle -----------------------------------------------------
     def _chrome_candidates(self):
@@ -76,6 +77,7 @@ class BrowserManager:
         return ["google-chrome", "chromium-browser", "chromium", "microsoft-edge"]
 
     def _attach(self, port, timeout_ms=2000):
+        self._owns_context = False
         self._browser = self._pw.chromium.connect_over_cdp(
             f"http://127.0.0.1:{port}", timeout=timeout_ms)
         self._context = self._browser.contexts[0] if self._browser.contexts else             self._browser.new_context()
@@ -176,6 +178,7 @@ class BrowserManager:
                 str(self.profile_dir),
                 headless=True if not self.prefer_system_browser else self.headless,
             )
+            self._owns_context = True
         except Exception:
             playwright = self._pw
             self._context = self._page = self._pw = None
@@ -189,12 +192,21 @@ class BrowserManager:
         return True
 
     def close(self):
-        # Detach first; then close a browser we spawned ourselves (the login
-        # session lives in the profile dir, so closing keeps it).
-        for closer in (self._browser, self._pw):
+        # Persistent contexts own their browser process and must close before
+        # Playwright stops. CDP-attached contexts are not ours to close.
+        if self._owns_context and self._context is not None:
             try:
-                if closer is not None:
-                    closer.close()
+                self._context.close()
+            except Exception:
+                pass
+        if self._browser is not None:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+        if self._pw is not None:
+            try:
+                self._pw.stop()
             except Exception:
                 pass
         if self._spawned is not None:
@@ -204,20 +216,21 @@ class BrowserManager:
                 pass
         self._browser = self._context = self._pw = self._page = None
         self._spawned = None
-        self._response_watched_pages.clear()
+        self._owns_context = False
 
-    def _watch_page_responses(self, page) -> None:
-        page_id = id(page)
-        if page_id in self._response_watched_pages:
-            return
-
+    def _watch_page_responses(self, page, generation: int,
+                              response_filter=None) -> None:
         def record_response(response):
             try:
+                if generation != self._query_generation:
+                    return
                 request = response.request
                 if request.resource_type not in ("xhr", "fetch"):
                     return
                 if self.provider == "uspto_global_dossier" and \
                         "globaldossier.uspto.gov" not in response.url.lower():
+                    return
+                if response_filter is not None and not response_filter(response):
                     return
                 status = response.status
                 if isinstance(status, int) and status >= 400:
@@ -227,20 +240,33 @@ class BrowserManager:
 
         try:
             page.on("response", record_response)
-            self._response_watched_pages.add(page_id)
         except Exception:
             pass
 
     # ---- pages ---------------------------------------------------------
-    def open_page(self, url: str, cancel) -> Optional[object]:
+    def open_page(self, url: str, cancel, *, fresh: bool = False,
+                  response_filter=None) -> Optional[object]:
         """Navigates the single page; None on network failure or cancel."""
         try:
             self.launch()
             if cancel is not None and cancel.is_set():
                 return None
+            self._query_generation += 1
+            generation = self._query_generation
+            if fresh:
+                previous_page = self._page
+                self._page = self._context.new_page()
+                if previous_page is not None and previous_page is not self._page:
+                    try:
+                        previous_page.close()
+                    except Exception:
+                        pass
             self.last_navigation_status = None
             self.last_spa_statuses = []
-            self._watch_page_responses(self._page)
+            if self.provider == "uspto_global_dossier" or response_filter is not None:
+                self._watch_page_responses(
+                    self._page, generation, response_filter=response_filter
+                )
             response = self._page.goto(
                 url, timeout=STEP_TIMEOUT_MS, wait_until="domcontentloaded"
             )

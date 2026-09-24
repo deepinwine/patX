@@ -29,16 +29,19 @@ def _document_page(
     <html><head><title>Global Dossier</title></head>
     <body data-page="global-dossier-document-list">
       <h1>Global Dossier</h1>
-      <p class="case-number">Application {application_number}</p>
-      <p class="publication-number">Publication {publication_number}</p>
-      <table aria-label="Document list">
-        <thead><tr>
-          <th>Date</th><th>Document Description</th><th>Document Code</th>
-          <th>Document ID</th><th>Direction</th>
-        </tr></thead>
-        <tbody>{rows}</tbody>
-      </table>
-      {empty_state}
+      <main data-application-number="{application_number}"
+            data-publication-number="{publication_number}">
+        <p class="case-number">Application {application_number}</p>
+        <p class="publication-number">Publication {publication_number}</p>
+        <table aria-label="Document list">
+          <thead><tr>
+            <th>Date</th><th>Document Description</th><th>Document Code</th>
+            <th>Document ID</th><th>Direction</th>
+          </tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+        {empty_state}
+      </main>
     </body></html>
     """
 
@@ -48,6 +51,28 @@ def _row(date: str, title: str, code: str = "210401-CN",
     return f"""
     <tr><td>{date}</td><td>{title}</td><td>{code}</td>
     <td>{remote_id}</td><td>{direction}</td></tr>
+    """
+
+
+def _case_section(application_number: str, rows: str, css_class: str = "") -> str:
+    return f"""
+    <section class="case-dossier {css_class}"
+             data-application-number="{application_number}">
+      <p class="case-number">Application {application_number}</p>
+      <table aria-label="Document list">
+        <thead><tr>
+          <th>Date</th><th>Document Description</th><th>Document Code</th>
+          <th>Document ID</th><th>Direction</th>
+        </tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </section>
+    """
+
+
+def _multi_case_page(body: str, heading_number: str = "") -> str:
+    return f"""
+    <html><body><h1>Global Dossier {heading_number}</h1>{body}</body></html>
     """
 
 
@@ -157,6 +182,55 @@ def test_parser_rejects_document_list_for_a_different_case():
     outcome = parse_uspto_document_list(html, "CN202510469602.3", "")
     assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
     assert outcome.documents == []
+
+
+def test_target_heading_with_previous_case_table_is_not_ready():
+    from web_dossier.providers.uspto_global_dossier import (
+        inspect_uspto_document_state,
+    )
+
+    case_a_table = _case_section(
+        "CN202510469601.5",
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="case-a-document",
+        ),
+    )
+    html = _multi_case_page(case_a_table, heading_number="CN202510469602.3")
+
+    assert inspect_uspto_document_state(html, "CN202510469602.3") == "PENDING"
+    outcome = parse_uspto_document_list(html, "CN202510469602.3", "")
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
+
+
+def test_hidden_previous_table_before_visible_target_table_selects_target_only():
+    case_a = _case_section(
+        "CN202510469601.5",
+        _row(
+            "2026-05-23",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="case-a-document",
+        ),
+        css_class="d-none",
+    )
+    case_b = _case_section(
+        "CN202510469602.3",
+        _row(
+            "2026-05-24",
+            "First notice of examination opinions (ORIGINAL)",
+            remote_id="case-b-document",
+        ),
+    )
+    html = _multi_case_page(case_a + case_b)
+
+    outcome = parse_uspto_document_list(html, "CN202510469602.3", "")
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "case-b-document"
+    ]
 
 
 def test_hidden_void_element_does_not_hide_following_document_table():
@@ -269,6 +343,7 @@ class _FakePage:
         self.waited_for_function = None
         self.evaluated = []
         self.poll_waits = []
+        self.content_calls = 0
 
     def wait_for_load_state(self, state, timeout):
         self.waited_for = (state, timeout)
@@ -297,13 +372,14 @@ class _FakePage:
             self._ready_html = ""
 
     def content(self):
+        self.content_calls += 1
         return self._html
 
 
 class _FakeBrowserManager:
     def __init__(self, html: str, *, status=None, ready_html: str = "",
                  wait_error=None, evaluate_results=None, on_poll=None,
-                 spa_statuses=None):
+                 spa_statuses=None, responses=None):
         self.page = _FakePage(
             html,
             ready_html=ready_html,
@@ -312,11 +388,17 @@ class _FakeBrowserManager:
             on_poll=on_poll,
         )
         self.urls = []
+        self.fresh_requests = []
         self.last_navigation_status = status
         self.last_spa_statuses = list(spa_statuses or [])
+        self.responses = list(responses or [])
 
-    def open_page(self, url, cancel):
+    def open_page(self, url, cancel, *, fresh=False, response_filter=None):
         self.urls.append(url)
+        self.fresh_requests.append(fresh)
+        for response in self.responses:
+            if response_filter is None or response_filter(response):
+                self.last_spa_statuses.append(response.status)
         return self.page
 
 
@@ -329,7 +411,7 @@ def test_provider_prefers_normalized_application_url():
     assert outcome.code == ResultCode.OK
     assert manager.urls == [APP_URL.format(application="202510469601.5")]
     assert manager.page.waited_for is None
-    assert manager.page.evaluated
+    assert manager.page.content_calls == 1
 
 
 def test_provider_waits_for_spa_document_state_before_reading_html():
@@ -345,26 +427,24 @@ def test_provider_waits_for_spa_document_state_before_reading_html():
 
     assert outcome.code == ResultCode.OK
     assert len(outcome.documents) == 1
-    expression, target = manager.page.evaluated[0]
-    assert "table" in expression
-    assert "no documents" in expression.lower()
-    assert "sign in to global dossier" in expression.lower()
-    assert "getcomputedstyle" in expression.lower()
-    assert "aria-hidden" in expression.lower()
-    assert target == "CN2025104696015"
+    assert manager.page.content_calls == 2
+    assert manager.page.poll_waits
 
 
-def test_provider_spa_wait_timeout_is_structure_changed():
+def test_provider_spa_wait_timeout_is_structure_changed(monkeypatch):
+    monkeypatch.setattr(
+        "web_dossier.providers.uspto_global_dossier.SPA_WAIT_TIMEOUT_SECONDS",
+        0.0,
+    )
     manager = _FakeBrowserManager(
         "<html><body><h1>Global Dossier</h1><div id='app'></div></body></html>",
-        wait_error=TimeoutError("document state did not appear"),
     )
     provider = UsptoGlobalDossierProvider(browser_manager=manager)
 
     outcome = provider.list_documents("CN202510469601.5", "", None)
 
     assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
-    assert manager.page.evaluated
+    assert manager.page.content_calls == 1
 
 
 def test_consecutive_cases_do_not_reuse_the_previous_case_table():
@@ -390,8 +470,9 @@ def test_consecutive_cases_do_not_reuse_the_previous_case_table():
             super().__init__(case_a_html)
             self.calls = 0
 
-        def open_page(self, url, cancel):
+        def open_page(self, url, cancel, *, fresh=False, response_filter=None):
             self.urls.append(url)
+            self.fresh_requests.append(fresh)
             self.calls += 1
             if self.calls == 2:
                 self.page._html = case_a_html
@@ -414,6 +495,7 @@ def test_consecutive_cases_do_not_reuse_the_previous_case_table():
         "case-b-document"
     ]
     assert second.documents[0].application_number == "CN202510469602.3"
+    assert manager.fresh_requests == [True, True]
 
 
 def test_cancel_during_spa_wait_returns_temporary_error():
@@ -494,16 +576,56 @@ def test_provider_maps_navigation_block_status(status, expected):
 
 
 def test_provider_maps_spa_child_request_rate_limit():
+    class FakeRequest:
+        resource_type = "fetch"
+        post_data = '{"applicationNumber":"CN202510469601.5"}'
+
+    class DossierResponse:
+        status = 429
+        url = "https://globaldossier.uspto.gov/api/documents"
+        request = FakeRequest()
+
     manager = _FakeBrowserManager(
         FIXTURE.read_text(encoding="utf-8"),
         status=None,
-        spa_statuses=[429],
+        responses=[DossierResponse()],
     )
     provider = UsptoGlobalDossierProvider(browser_manager=manager)
 
     outcome = provider.list_documents("CN202510469601.5", "", None)
 
     assert outcome.code == ResultCode.RATE_LIMITED
+
+
+def test_unrelated_same_origin_404_and_500_do_not_fail_valid_dossier():
+    class FakeRequest:
+        resource_type = "xhr"
+        post_data = ""
+
+    class UnrelatedResponse:
+        status = 404
+        url = "https://globaldossier.uspto.gov/api/user-preferences"
+        request = FakeRequest()
+
+    class UnrelatedProfileResponse:
+        status = 500
+        url = "https://globaldossier.uspto.gov/api/profile"
+        request = FakeRequest()
+
+    UnrelatedProfileResponse.request.post_data = (
+        '{"applicationNumber":"CN202510469601.5"}'
+    )
+
+    manager = _FakeBrowserManager(
+        FIXTURE.read_text(encoding="utf-8"),
+        responses=[UnrelatedResponse(), UnrelatedProfileResponse()],
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert len(outcome.documents) == 1
 
 
 def test_provider_public_page_auth_and_download_contract():
@@ -592,6 +714,30 @@ def test_browser_manager_exposes_navigation_http_status(tmp_path):
     assert manager.last_navigation_status == 403
 
 
+def test_browser_manager_cnipa_default_does_not_install_spa_listener(tmp_path):
+    events = []
+
+    class FakeResponse:
+        status = 200
+
+    class FakePage:
+        def on(self, event, callback):
+            events.append(event)
+
+        def goto(self, url, *, timeout, wait_until):
+            return FakeResponse()
+
+    manager = BrowserManager(
+        "cnipa",
+        profile_dir=str(tmp_path / "profile"),
+    )
+    page = FakePage()
+    manager._page = page
+
+    assert manager.open_page("https://cpquery.cponline.cnipa.gov.cn", None) is page
+    assert events == []
+
+
 def test_browser_manager_records_spa_status_when_hash_navigation_has_no_response(
     tmp_path,
 ):
@@ -622,6 +768,78 @@ def test_browser_manager_records_spa_status_when_hash_navigation_has_no_response
     assert manager.open_page("https://globaldossier.uspto.gov/#/result", None)
     assert manager.last_navigation_status is None
     assert manager.last_spa_statuses == [429]
+
+
+def test_browser_manager_fresh_generation_ignores_old_and_unrelated_responses(
+    tmp_path,
+):
+    class FakeRequest:
+        resource_type = "xhr"
+
+        def __init__(self, post_data):
+            self.post_data = post_data
+
+    class FakeResponse:
+        def __init__(self, status, target):
+            self.status = status
+            self.url = "https://globaldossier.uspto.gov/api/documents"
+            self.request = FakeRequest(target)
+
+    class FakePage:
+        def __init__(self):
+            self.closed = False
+
+        def on(self, event, callback):
+            self.response_callback = callback
+
+        def goto(self, url, *, timeout, wait_until):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    initial_page = FakePage()
+    case_a_page = FakePage()
+    case_b_page = FakePage()
+
+    class FakeContext:
+        def __init__(self):
+            self.pages_to_create = [case_a_page, case_b_page]
+
+        def new_page(self):
+            return self.pages_to_create.pop(0)
+
+    manager = BrowserManager(
+        "uspto_global_dossier",
+        prefer_system_browser=False,
+        profile_dir=str(tmp_path / "profile"),
+    )
+    manager._page = initial_page
+    manager._context = FakeContext()
+
+    filter_a = lambda response: "CN2025104696015" in response.request.post_data
+    filter_b = lambda response: "CN2025104696023" in response.request.post_data
+    manager.open_page(
+        "https://globaldossier.uspto.gov/#/A",
+        None,
+        fresh=True,
+        response_filter=filter_a,
+    )
+    manager.open_page(
+        "https://globaldossier.uspto.gov/#/B",
+        None,
+        fresh=True,
+        response_filter=filter_b,
+    )
+
+    case_a_page.response_callback(FakeResponse(429, "CN2025104696015"))
+    case_b_page.response_callback(FakeResponse(404, "unrelated"))
+    assert manager.last_spa_statuses == []
+
+    case_b_page.response_callback(FakeResponse(429, "CN2025104696023"))
+    assert manager.last_spa_statuses == [429]
+    assert initial_page.closed
+    assert case_a_page.closed
 
 
 def test_browser_manager_cleans_playwright_when_persistent_launch_fails(
@@ -659,3 +877,29 @@ def test_browser_manager_cleans_playwright_when_persistent_launch_fails(
     assert manager._pw is None
     assert manager._context is None
     assert manager._page is None
+
+
+def test_browser_manager_close_orders_context_browser_and_playwright():
+    closed = []
+
+    class FakeContext:
+        def close(self):
+            closed.append("context")
+
+    class FakeBrowser:
+        def close(self):
+            closed.append("browser")
+
+    class FakePlaywright:
+        def stop(self):
+            closed.append("playwright")
+
+    manager = BrowserManager("uspto_global_dossier")
+    manager._context = FakeContext()
+    manager._browser = FakeBrowser()
+    manager._pw = FakePlaywright()
+    manager._owns_context = True
+
+    manager.close()
+
+    assert closed == ["context", "browser", "playwright"]
