@@ -16,6 +16,7 @@
 #include <wx/textfile.h>
 #include <wx/file.h>
 #include <climits>
+#include <regex>
 #include <wx/clipbrd.h>
 #include <wx/dataobj.h>
 #include <wx/spinctrl.h>
@@ -1992,19 +1993,24 @@ private:
         wxRemoveFile(temp_txt);
 
         // Shared parsing layer with the USPTO importer: app-no + date + type
+        // （std::regex：不再用 wxRegEx，避免静态 wx 引入 pcre2 链接链）
+        std::string body = ToStd(text);
         std::string app_no;
-        wxRegEx app_re(UTF8_STR("申请号[：:]\\s*(\\d{12,13}[A-Z]?)"));
-        if (app_re.Matches(text)) {
-            app_no = ToStd(app_re.GetMatch(text, 1));
+        {
+            std::regex re("申请号[：:]\\s*(\\d{12,13}[A-Z]?)");
+            std::smatch m;
+            if (std::regex_search(body, m, re)) app_no = m[1].str();
         }
         std::string issue_date;
-        wxRegEx date_re(UTF8_STR("发文日[期]?[：:]\\s*(\\d{4})\\s*年\\s*(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*日"));
-        if (date_re.Matches(text)) {
-            long year, month, day;
-            date_re.GetMatch(text, 1).ToLong(&year);
-            date_re.GetMatch(text, 2).ToLong(&month);
-            date_re.GetMatch(text, 3).ToLong(&day);
-            issue_date = wxString::Format("%04ld-%02ld-%02ld", year, month, day);
+        {
+            std::regex re("发文日[期]?[：:]\\s*(\\d{4})\\s*年\\s*(\\d{1,2})\\s*月\\s*(\\d{1,2})\\s*日");
+            std::smatch m;
+            if (std::regex_search(body, m, re)) {
+                issue_date = m[1].str() + "-" +
+                             (m[2].str().size() == 1 ? "0" + m[2].str() : m[2].str()) +
+                             "-" +
+                             (m[3].str().size() == 1 ? "0" + m[3].str() : m[3].str());
+            }
         }
 
         bool is_oa = text.Find(UTF8_STR("审查意见通知书")) != wxNOT_FOUND;
