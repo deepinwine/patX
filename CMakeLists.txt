@@ -68,6 +68,9 @@ if(WIN32)
     if(NOT TARGET miniz::miniz)
         find_package(miniz CONFIG QUIET)
     endif()
+    if(NOT TARGET Boost::nowide)
+        find_package(Boost CONFIG QUIET COMPONENTS nowide)
+    endif()
 endif()
 
 # OpenXLSX: vcpkg package first, else FetchContent from upstream
