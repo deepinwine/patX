@@ -73,14 +73,6 @@ if(WIN32)
     endif()
 endif()
 
-# 静态 wxWidgets 的 wxRegEx 依赖 PCRE2（UTF-16 变体）；vcpkg 静态
-# wx 导出未自动带上，显式补链，否则最终链接 LNK2019 pcre2_*_16
-if(WIN32)
-    find_package(PCRE2 CONFIG QUIET)
-    if(TARGET pcre2-16::pcre2-16)
-        list(APPEND wxWidgets_LIBRARIES pcre2-16::pcre2-16)
-    endif()
-endif()
 
 # OpenXLSX: vcpkg package first, else FetchContent from upstream
 find_package(OpenXLSX CONFIG QUIET)
@@ -165,6 +157,19 @@ if(PATX_BUILD_GUI)
         target_compile_definitions(patx PRIVATE PATX_GUI=1)
         if(MSVC)
             target_compile_options(patx PRIVATE /utf-8)
+        endif()
+        # 静态 wxWidgets 的 wxRegEx 依赖 PCRE2（UTF-16）；必须在
+        # find_package(wxWidgets) 之后追加，否则被查找结果覆盖
+        if(WIN32)
+            find_package(PCRE2 CONFIG QUIET)
+            if(TARGET pcre2-16::pcre2-16)
+                list(APPEND wxWidgets_LIBRARIES pcre2-16::pcre2-16)
+                message(STATUS "wxRegEx: pcre2-16 target linked")
+            else()
+                find_library(PCRE2_16_LIBRARY NAMES pcre2-16 pcre2-16static REQUIRED)
+                list(APPEND wxWidgets_LIBRARIES ${PCRE2_16_LIBRARY})
+                message(STATUS "wxRegEx: pcre2-16 raw lib linked: ${PCRE2_16_LIBRARY}")
+            endif()
         endif()
         message(STATUS "patX GUI enabled (wxWidgets found)")
     else()
