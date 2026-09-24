@@ -1010,7 +1010,10 @@ class UsptoGlobalDossierProvider(DossierProvider):
                     code=ResultCode.PAGE_STRUCTURE_CHANGED,
                     message="Global Dossier 文档表格混入其他案件记录",
                 ), None
-            if _snapshot_page_marker(snapshot):
+            if (
+                snapshot.get("loading") is False
+                and _snapshot_page_marker(snapshot)
+            ):
                 candidates = _snapshot_candidates(snapshot)
                 if candidates is None:
                     return SyncOutcome(

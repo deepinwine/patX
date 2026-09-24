@@ -646,6 +646,67 @@ def test_provider_waits_for_spa_document_state_before_reading_html():
     assert manager.page.poll_waits
 
 
+def test_provider_waits_for_loading_strong_table_before_parsing_complete_rows():
+    partial = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-first"),
+        loading=True,
+    )
+    complete = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-first"),
+        _document_cells(
+            date="2026-06-30",
+            title="Second notice of examination opinions (ORIGINAL)",
+            code="210402-CN",
+            remote_id="CN-202510469601-second",
+        ),
+        loading=False,
+    )
+    manager = _FakeBrowserManager(
+        "unused raw html",
+        snapshots=[partial, complete],
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "CN-202510469601-first",
+        "CN-202510469601-second",
+    ]
+    assert len(manager.page.evaluated) == 2
+    assert manager.page.poll_waits
+
+
+def test_provider_waits_for_loading_empty_state_before_returning_result():
+    loading_empty = _ready_snapshot(loading=True)
+    header_only_rows = [_header_cells()]
+    loading_empty.update({
+        "state": "EMPTY",
+        "rows": header_only_rows,
+        "emptyText": "No documents found",
+    })
+    loading_empty["candidates"][0]["rows"] = header_only_rows
+    stable = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-after-loading"),
+        loading=False,
+    )
+    manager = _FakeBrowserManager(
+        "unused raw html",
+        snapshots=[loading_empty, stable],
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "CN-202510469601-after-loading",
+    ]
+    assert len(manager.page.evaluated) == 2
+    assert manager.page.poll_waits
+
+
 def test_provider_uses_computed_visibility_snapshot_for_hidden_captcha():
     rows = _row(
         "2026-05-23",
