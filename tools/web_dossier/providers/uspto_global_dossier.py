@@ -72,15 +72,38 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
     }
     return true;
   };
-  const text = (element) => isVisible(element) ? (element.innerText || "").trim() : "";
+  const visibleTextFor = (root) => {
+    if (!root || !isVisible(root)) return "";
+    const parts = [];
+    const walker = document.createTreeWalker(
+      root,
+      NodeFilter.SHOW_TEXT,
+      {
+        acceptNode(node) {
+          const parent = node.parentElement;
+          return parent && isVisible(parent) && node.nodeValue.trim()
+            ? NodeFilter.FILTER_ACCEPT
+            : NodeFilter.FILTER_REJECT;
+        }
+      }
+    );
+    while (walker.nextNode()) parts.push(walker.currentNode.nodeValue);
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  };
+  const text = (element) => visibleTextFor(element);
   const rowsFor = (table) => Array.from(table.querySelectorAll("tr"))
     .filter(isVisible)
     .map((row) => Array.from(row.children)
-      .filter((cell) => ["TH", "TD"].includes(cell.tagName) && isVisible(cell))
-      .map((cell) => {
-        const link = Array.from(cell.querySelectorAll("a[href]")).find(isVisible);
+      .filter((cell) => ["TH", "TD"].includes(cell.tagName))
+      .map((cell, index) => {
+        const visible = isVisible(cell);
+        const link = visible
+          ? Array.from(cell.querySelectorAll("a[href]")).find(isVisible)
+          : undefined;
         return {
-          text: text(cell),
+          index,
+          visible,
+          text: visible ? text(cell) : "",
           href: link ? (link.getAttribute("href") || "") : "",
           header: cell.tagName === "TH"
         };
@@ -96,8 +119,18 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
     }
     return Array.from(tokens);
   };
-  const body = document.body;
-  const visibleText = body ? (body.innerText || "").trim() : "";
+  const displayedCaseAliases = (value) => {
+    const aliases = new Set();
+    const upper = (value || "").toUpperCase();
+    for (const match of upper.matchAll(/CN\s*(\d{9,14})\.\d\b/g)) {
+      aliases.add(`CN${match[1]}`);
+    }
+    for (const match of upper.matchAll(/CN\s*(\d{9,14})[A-Z]\b/g)) {
+      aliases.add(`CN${match[1]}`);
+    }
+    return aliases;
+  };
+  const visibleText = visibleTextFor(document.body);
   const lowered = visibleText.toLowerCase();
   const pageMarker = lowered.includes("global dossier");
   const blocked = [
@@ -107,12 +140,19 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
   ].some((marker) => lowered.includes(marker));
   const targetMatched = Boolean(query.targetToken) &&
     normalize(visibleText).includes(query.targetToken);
+  const caseAliases = new Set([query.targetCore]);
+  if (targetMatched) {
+    for (const alias of displayedCaseAliases(visibleText)) caseAliases.add(alias);
+  }
   const candidates = Array.from(document.querySelectorAll("table"))
     .filter(isVisible)
     .map((table) => ({table, rows: rowsFor(table)}))
     .filter(({rows}) => {
-      const headerRow = rows.find((row) => row.length > 0 && row.every((cell) => cell.header));
-      const headers = (headerRow || []).map((cell) => cell.text.toLowerCase());
+      const headerRow = rows.find((row) =>
+        row.length > 0 && row.every((cell) => cell.header));
+      const headers = (headerRow || [])
+        .filter((cell) => cell.visible)
+        .map((cell) => cell.text.toLowerCase());
       const has = (patterns) => headers.some((header) => patterns.some((pattern) => pattern.test(header)));
       return has([/^(document )?date$/, /publication date/]) &&
         has([/description/, /document title/, /^title$/]) &&
@@ -122,6 +162,7 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
     })
     .map((candidate) => ({
       ...candidate,
+      dataRows: candidate.rows.filter((row) => row.some((cell) => !cell.header)),
       tableCaseTokens: caseTokensFor(candidate.rows)
     }));
   const emptyState = Array.from(document.querySelectorAll(
@@ -135,25 +176,32 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
   const hashMatched = window.location.hash === query.expectedHash;
   const safeFallback = Boolean(query.freshGeneration) && hashMatched &&
     targetMatched && !loading;
-  const matching = candidates.find((candidate) =>
-    candidate.tableCaseTokens.includes(query.targetCore));
-  const identifiedOther = candidates.some((candidate) =>
-    candidate.tableCaseTokens.length > 0 &&
-    !candidate.tableCaseTokens.includes(query.targetCore));
-  const unidentified = candidates.find((candidate) =>
-    candidate.tableCaseTokens.length === 0);
-  const selected = matching ||
-    (!identifiedOther && safeFallback ? unidentified : undefined);
+  const rowTokensFor = (candidate) => candidate.dataRows.map((row) =>
+    caseTokensFor([row]));
+  const mismatch = candidates.some((candidate) =>
+    rowTokensFor(candidate).some((tokens) =>
+      tokens.some((token) => !caseAliases.has(token))));
+  const selected = candidates.find((candidate) => {
+    const rowTokens = rowTokensFor(candidate);
+    return rowTokens.length > 0
+      ? rowTokens.every((tokens) =>
+          tokens.length > 0
+            ? tokens.every((token) => caseAliases.has(token))
+            : safeFallback)
+      : safeFallback;
+  });
   let state = "PENDING";
   if (blocked) state = "BLOCKED";
-  else if (pageMarker && selected) state = "READY";
-  else if (pageMarker && safeFallback && emptyState) state = "EMPTY";
+  else if (mismatch) state = "MISMATCH";
+  else if (pageMarker && selected && selected.dataRows.length > 0) state = "READY";
+  else if (pageMarker && selected && selected.dataRows.length === 0 && emptyState) state = "EMPTY";
   return {
     state,
     targetMatched,
     rows: selected ? selected.rows : [],
     tableCaseTokens: selected ? selected.tableCaseTokens :
       candidates.flatMap((candidate) => candidate.tableCaseTokens),
+    caseAliases: Array.from(caseAliases),
     safeFallback,
     hashMatched,
     loading,
@@ -181,6 +229,7 @@ class _DocumentListParser(HTMLParser):
         self._table: Optional[dict] = None
         self._row: Optional[list] = None
         self._cell: Optional[dict] = None
+        self._row_cell_index = 0
         self._visibility_stack: list[tuple[str, bool]] = []
         self._empty_capture: Optional[tuple[int, str]] = None
         self._empty_text: list[str] = []
@@ -202,6 +251,15 @@ class _DocumentListParser(HTMLParser):
         visible = parent_visible and not hidden
         self._visibility_stack.append((tag, visible))
         if not visible:
+            if tag in ("th", "td") and self._row is not None:
+                self._cell = {
+                    "text": "",
+                    "href": "",
+                    "header": tag == "th",
+                    "index": self._row_cell_index,
+                    "visible": False,
+                }
+                self._row_cell_index += 1
             if tag in self._VOID_TAGS:
                 self._visibility_stack.pop()
             return
@@ -219,12 +277,16 @@ class _DocumentListParser(HTMLParser):
             self._table = {"rows": []}
         elif tag == "tr" and self._table is not None:
             self._row = []
+            self._row_cell_index = 0
         elif tag in ("th", "td") and self._row is not None:
             self._cell = {
                 "text": "",
                 "href": "",
                 "header": tag == "th",
+                "index": self._row_cell_index,
+                "visible": True,
             }
+            self._row_cell_index += 1
         elif tag == "a" and self._cell is not None:
             self._cell["href"] = attributes.get("href", "")
         if tag in self._VOID_TAGS:
@@ -247,7 +309,7 @@ class _DocumentListParser(HTMLParser):
         visible = (
             self._visibility_stack[-1][1] if self._visibility_stack else True
         )
-        if visible and tag in ("th", "td") and self._cell is not None:
+        if tag in ("th", "td") and self._cell is not None:
             self._cell["text"] = re.sub(r"\s+", " ", self._cell["text"]).strip()
             self._row.append(self._cell)
             self._cell = None
@@ -277,12 +339,20 @@ class _DocumentListParser(HTMLParser):
 def _header_indexes(row: list[dict]) -> Optional[dict[str, int]]:
     if not row or not all(cell["header"] for cell in row):
         return None
-    headers = [re.sub(r"\s+", " ", cell["text"]).strip().lower() for cell in row]
+    visible_headers = [
+        (position, cell)
+        for position, cell in enumerate(row)
+        if cell.get("visible", True)
+    ]
+    headers = [
+        re.sub(r"\s+", " ", cell["text"]).strip().lower()
+        for _, cell in visible_headers
+    ]
 
     def find(*patterns: str) -> int:
-        for index, header in enumerate(headers):
+        for (position, cell), header in zip(visible_headers, headers):
             if any(re.search(pattern, header) for pattern in patterns):
-                return index
+                return cell.get("index", position)
         return -1
 
     indexes = {
@@ -296,7 +366,12 @@ def _header_indexes(row: list[dict]) -> Optional[dict[str, int]]:
 
 
 def _cell(row: list[dict], index: int) -> dict:
-    return row[index] if 0 <= index < len(row) else {"text": "", "href": ""}
+    for position, cell in enumerate(row):
+        if cell.get("index", position) == index and cell.get(
+            "visible", True
+        ):
+            return cell
+    return {"text": "", "href": "", "visible": False, "index": index}
 
 
 def _normal_number(raw: str, number_type: str) -> str:
@@ -330,6 +405,22 @@ def _case_tokens_from_text(text: str) -> set[str]:
     return {f"CN{match}" for match in _CASE_CORE_PATTERN.findall(text or "")}
 
 
+def _displayed_case_aliases(text: str) -> set[str]:
+    aliases = {
+        f"CN{digits}"
+        for digits in re.findall(
+            r"\bCN\s*(\d{9,14})\.\d\b", text or "", re.IGNORECASE
+        )
+    }
+    aliases.update(
+        f"CN{digits}"
+        for digits in re.findall(
+            r"\bCN\s*(\d{9,14})[A-Z]\b", text or "", re.IGNORECASE
+        )
+    )
+    return aliases
+
+
 def _table_case_tokens(rows: list[list[dict]]) -> set[str]:
     tokens = set()
     for row in rows:
@@ -360,28 +451,38 @@ def inspect_uspto_document_state(html: str, target_number: str) -> str:
     visible_text = re.sub(r"\s+", " ", " ".join(parser.page_text)).strip()
     if any(marker in visible_text.lower() for marker in _BLOCK_MARKERS):
         return "BLOCKED"
-    target_token = _identifier_token(target_number)
     target_core = _case_core(target_number)
+    page_aliases = _displayed_case_aliases(visible_text)
+    target_matched = (
+        not target_number
+        or _identifier_token(target_number) in _identifier_token(visible_text)
+    )
+    case_aliases = set(page_aliases) if target_matched else set()
+    if target_core:
+        case_aliases.add(target_core)
     semantic_tables = []
     for table in parser.tables:
         if any(_header_indexes(row) is not None for row in table["rows"]):
             semantic_tables.append(table["rows"])
-    if target_core:
-        for rows in semantic_tables:
-            if target_core in _table_case_tokens(rows):
+    for rows in semantic_tables:
+        header_index = next(
+            index
+            for index, row in enumerate(rows)
+            if _header_indexes(row) is not None
+        )
+        data_rows = rows[header_index + 1 :]
+        if data_rows:
+            row_tokens = [_table_case_tokens([row]) for row in data_rows]
+            if any(tokens - case_aliases for tokens in row_tokens):
+                return "PENDING"
+            if all(row_tokens):
                 return "READY"
-        if any(_table_case_tokens(rows) for rows in semantic_tables):
-            return "PENDING"
-    if semantic_tables and (
-        not target_token or target_token in _identifier_token(visible_text)
-    ):
-        return "READY"
     for empty_state in parser.empty_state_texts:
         if re.search(
             r"\bno (?:documents|records)\b",
             empty_state["text"],
             re.IGNORECASE,
-        ) and (not target_token or target_token in _identifier_token(visible_text)):
+        ) and semantic_tables and target_matched:
             return "READY"
     return "PENDING"
 
@@ -392,6 +493,8 @@ def parse_uspto_document_rows(
     publication_number: str = "",
     *,
     explicit_empty: bool = False,
+    case_aliases: Optional[set[str]] = None,
+    binding_verified: bool = False,
 ) -> SyncOutcome:
     """Parse visible structured cells from either HTML or browser snapshots."""
     normalized_application = _normal_number(application_number, "application")
@@ -421,6 +524,33 @@ def parse_uspto_document_rows(
             code=ResultCode.PAGE_STRUCTURE_CHANGED,
             message="文档表格为空且未显示明确的无文档状态",
         )
+
+    target_core = _case_core(normalized_application or normalized_publication)
+    allowed_aliases = {
+        core
+        for raw_alias in (case_aliases or set())
+        if (core := _case_core(raw_alias))
+    }
+    if target_core:
+        allowed_aliases.add(target_core)
+    required_indexes = set(indexes.values())
+    for row in target_rows:
+        if any(not _cell(row, index).get("visible", False) for index in required_indexes):
+            return SyncOutcome(
+                code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                message="Global Dossier 文档行缺少可见必需列",
+            )
+        row_tokens = _table_case_tokens([row])
+        if row_tokens and not row_tokens.issubset(allowed_aliases):
+            return SyncOutcome(
+                code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                message="Global Dossier 文档表格混入其他案件记录",
+            )
+        if not row_tokens and not binding_verified:
+            return SyncOutcome(
+                code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                message="Global Dossier 文档行无法绑定到目标案件",
+            )
 
     documents: list[ProsecutionDocument] = []
     official_candidates = 0
@@ -524,39 +654,30 @@ def parse_uspto_document_list(
         or _normal_number(publication_number, "publication")
     )
     target_core = _case_core(target_number)
+    target_matched = (
+        not target_number
+        or _identifier_token(target_number) in _identifier_token(page_text)
+    )
+    case_aliases = {target_core} if target_core else set()
+    if target_matched:
+        case_aliases.update(_displayed_case_aliases(page_text))
     semantic_tables = [
         table["rows"]
         for table in parser.tables
         if any(_header_indexes(row) is not None for row in table["rows"])
     ]
-    selected_rows = None
-    if target_core:
-        selected_rows = next(
-            (
-                rows
-                for rows in semantic_tables
-                if target_core in _table_case_tokens(rows)
-            ),
-            None,
-        )
-        if selected_rows is None and any(
-            _table_case_tokens(rows) for rows in semantic_tables
-        ):
-            return SyncOutcome(
-                code=ResultCode.PAGE_STRUCTURE_CHANGED,
-                message="Global Dossier 文档表格案件号与查询目标不一致",
-            )
-    if selected_rows is None and semantic_tables:
-        target_token = _identifier_token(target_number)
-        if not target_token or target_token in _identifier_token(page_text):
-            selected_rows = semantic_tables[0]
-        elif not _case_tokens_from_text(page_text):
-            selected_rows = semantic_tables[0]
-    if selected_rows is None:
+    if not semantic_tables:
         return SyncOutcome(
             code=ResultCode.PAGE_STRUCTURE_CHANGED,
             message="未找到与目标案件匹配的 Global Dossier 文档表格",
         )
+    for rows in semantic_tables:
+        if _table_case_tokens(rows) - case_aliases:
+            return SyncOutcome(
+                code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                message="Global Dossier 文档表格案件号与查询目标不一致",
+            )
+    selected_rows = semantic_tables[0]
 
     explicit_empty = any(
         re.search(
@@ -566,11 +687,28 @@ def parse_uspto_document_list(
         )
         for empty_state in parser.empty_state_texts
     )
+    header_index = next(
+        index
+        for index, row in enumerate(selected_rows)
+        if _header_indexes(row) is not None
+    )
+    if (
+        explicit_empty
+        and not selected_rows[header_index + 1 :]
+        and target_number
+        and not target_matched
+    ):
+        return SyncOutcome(
+            code=ResultCode.PAGE_STRUCTURE_CHANGED,
+            message="Global Dossier 无文档状态无法绑定到目标案件",
+        )
     return parse_uspto_document_rows(
         selected_rows,
         application_number,
         publication_number,
         explicit_empty=explicit_empty,
+        case_aliases=case_aliases,
+        binding_verified=False,
     )
 
 
@@ -589,11 +727,21 @@ def _snapshot_rows(snapshot: dict) -> Optional[list[list[dict]]]:
             text = raw_cell.get("text", "")
             href = raw_cell.get("href", "")
             header = raw_cell.get("header")
+            index = raw_cell.get("index")
+            visible = raw_cell.get("visible")
             if not isinstance(text, str) or not isinstance(href, str):
                 return None
-            if not isinstance(header, bool):
+            if not isinstance(header, bool) or not isinstance(visible, bool):
                 return None
-            row.append({"text": text, "href": href, "header": header})
+            if not isinstance(index, int) or index < 0:
+                return None
+            row.append({
+                "text": text,
+                "href": href,
+                "header": header,
+                "index": index,
+                "visible": visible,
+            })
         if row:
             rows.append(row)
     return rows
@@ -602,20 +750,40 @@ def _snapshot_rows(snapshot: dict) -> Optional[list[list[dict]]]:
 def _snapshot_is_bound(
     snapshot: dict, rows: list[list[dict]], target_core: str
 ) -> bool:
-    if snapshot.get("pageMarker") is not True:
+    visible_text = snapshot.get("visibleText", "")
+    if not isinstance(visible_text, str) or "global dossier" not in visible_text.lower():
         return False
-    table_tokens = _table_case_tokens(rows)
-    if target_core and target_core in table_tokens:
-        return True
-    if table_tokens:
-        return False
-    return all((
+    case_aliases = {target_core} if target_core else set()
+    if snapshot.get("targetMatched") is True:
+        case_aliases.update(_displayed_case_aliases(visible_text))
+    safe_fallback = all((
         snapshot.get("freshGeneration") is True,
         snapshot.get("hashMatched") is True,
         snapshot.get("targetMatched") is True,
         snapshot.get("loading") is False,
         snapshot.get("safeFallback") is True,
     ))
+    header_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if _header_indexes(row) is not None
+        ),
+        None,
+    )
+    if header_index is None:
+        return False
+    data_rows = rows[header_index + 1 :]
+    if not data_rows:
+        return safe_fallback
+    for row in data_rows:
+        row_tokens = _table_case_tokens([row])
+        if row_tokens:
+            if not row_tokens.issubset(case_aliases):
+                return False
+        elif not safe_fallback:
+            return False
+    return True
 
 
 class UsptoGlobalDossierProvider(DossierProvider):
@@ -772,12 +940,21 @@ class UsptoGlobalDossierProvider(DossierProvider):
                     code=ResultCode.ACCESS_DENIED,
                     message="USPTO Global Dossier 返回可见拦截或登录页面",
                 ), None
+            if state == "MISMATCH":
+                return SyncOutcome(
+                    code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                    message="Global Dossier 文档表格混入其他案件记录",
+                ), None
             if state in ("READY", "EMPTY"):
                 rows = _snapshot_rows(snapshot)
-                if rows is not None and _snapshot_is_bound(
-                    snapshot, rows, target_core
-                ):
-                    return self._http_error_outcome(), snapshot
+                if rows is not None:
+                    if not any(_header_indexes(row) is not None for row in rows):
+                        return SyncOutcome(
+                            code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                            message="Global Dossier 可见文档表头不完整",
+                        ), None
+                    if _snapshot_is_bound(snapshot, rows, target_core):
+                        return self._http_error_outcome(), snapshot
             if time.monotonic() >= deadline:
                 return SyncOutcome(
                     code=ResultCode.PAGE_STRUCTURE_CHANGED,
@@ -839,20 +1016,44 @@ class UsptoGlobalDossierProvider(DossierProvider):
                 code=ResultCode.PAGE_STRUCTURE_CHANGED,
                 message="Global Dossier 可见文档快照不完整",
             )
-        state = (snapshot or {}).get("state")
-        if state == "EMPTY" and not rows:
-            return SyncOutcome(
-                code=ResultCode.OK,
-                documents=[],
-                resolved_application_number=_normal_number(
-                    application_number, "application"
-                ),
+        snapshot_data = snapshot or {}
+        visible_text = snapshot_data.get("visibleText", "")
+        case_aliases = {target_core} if target_core else set()
+        if snapshot_data.get("targetMatched") is True and isinstance(
+            visible_text, str
+        ):
+            case_aliases.update(_displayed_case_aliases(visible_text))
+        binding_verified = all((
+            snapshot_data.get("freshGeneration") is True,
+            snapshot_data.get("hashMatched") is True,
+            snapshot_data.get("targetMatched") is True,
+            snapshot_data.get("loading") is False,
+            snapshot_data.get("safeFallback") is True,
+        ))
+        header_index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if _header_indexes(row) is not None
+            ),
+            None,
+        )
+        data_rows = rows[header_index + 1 :] if header_index is not None else rows
+        explicit_empty = bool(
+            not data_rows
+            and re.search(
+                r"\bno (?:documents|records)\b",
+                str(snapshot_data.get("emptyText", "")),
+                re.IGNORECASE,
             )
+        )
         return parse_uspto_document_rows(
             rows,
             application_number,
             publication_number,
-            explicit_empty=state == "EMPTY",
+            explicit_empty=explicit_empty,
+            case_aliases=case_aliases,
+            binding_verified=binding_verified,
         )
 
     def download_document(

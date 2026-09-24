@@ -47,10 +47,12 @@ def _document_page(
 
 
 def _row(date: str, title: str, code: str = "210401-CN",
-         remote_id: str = "doc-1", direction: str = "Official") -> str:
+         remote_id: str = "doc-1", direction: str = "Official",
+         case_core: str = "CN-202510469601") -> str:
     return f"""
     <tr><td>{date}</td><td>{title}</td><td>{code}</td>
-    <td>{remote_id}</td><td>{direction}</td></tr>
+    <td><a href="/document/{case_core}-{remote_id}">{remote_id}</a></td>
+    <td>{direction}</td></tr>
     """
 
 
@@ -76,12 +78,16 @@ def _multi_case_page(body: str, heading_number: str = "") -> str:
 
 
 def _header_cells():
-    return [
+    cells = [
         {"text": "Date", "href": "", "header": True},
         {"text": "Document Description", "href": "", "header": True},
         {"text": "Document Code", "href": "", "header": True},
         {"text": "Document ID", "href": "", "header": True},
         {"text": "Direction", "href": "", "header": True},
+    ]
+    return [
+        {**cell, "index": index, "visible": True}
+        for index, cell in enumerate(cells)
     ]
 
 
@@ -93,12 +99,16 @@ def _document_cells(
     remote_id="CN-202510469601-210401-original",
     direction="Official",
 ):
-    return [
+    cells = [
         {"text": date, "href": "", "header": False},
         {"text": title, "href": "", "header": False},
         {"text": code, "href": "", "header": False},
         {"text": remote_id, "href": f"/document/{remote_id}", "header": False},
         {"text": direction, "href": "", "header": False},
+    ]
+    return [
+        {**cell, "index": index, "visible": True}
+        for index, cell in enumerate(cells)
     ]
 
 
@@ -110,6 +120,7 @@ def _ready_snapshot(
     safe_fallback=False,
     hash_matched=True,
     loading=False,
+    case_aliases=None,
 ):
     return {
         "state": "READY",
@@ -118,6 +129,11 @@ def _ready_snapshot(
         "tableCaseTokens": list(
             table_case_tokens
             if table_case_tokens is not None
+            else [target_core]
+        ),
+        "caseAliases": list(
+            case_aliases
+            if case_aliases is not None
             else [target_core]
         ),
         "safeFallback": safe_fallback,
@@ -136,6 +152,7 @@ def _pending_snapshot(target_core="CN202510469601"):
         "targetMatched": True,
         "rows": [],
         "tableCaseTokens": [],
+        "caseAliases": [target_core],
         "safeFallback": False,
         "hashMatched": True,
         "loading": True,
@@ -165,6 +182,18 @@ def test_parse_uspto_original_official_events_only():
     assert doc.direction == "official"
     assert doc.document_title == "第一次审查意见通知书"
     assert doc.source_trace == ["uspto_global_dossier"]
+
+
+def test_parse_fixture_by_publication_accepts_application_core_alias():
+    outcome = parse_uspto_document_list(
+        FIXTURE.read_text(encoding="utf-8"), "", "CN120134203A"
+    )
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "CN-202510469601-210401-original"
+    ]
+    assert outcome.documents[0].publication_number == "CN120134203A"
 
 
 def test_uspto_intercept_is_not_no_change():
@@ -207,6 +236,19 @@ def test_explicit_empty_state_with_verified_headers_is_ok():
     )
     outcome = parse_uspto_document_list(html, "CN202510469601.5", "")
     assert outcome.code == ResultCode.OK
+    assert outcome.documents == []
+
+
+def test_unbound_offline_empty_state_is_structure_changed():
+    html = _document_page(
+        empty_state='<div class="empty-state">No documents found</div>',
+        application_number="",
+        publication_number="",
+    )
+
+    outcome = parse_uspto_document_list(html, "CN202510469601.5", "")
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
     assert outcome.documents == []
 
 
@@ -268,6 +310,7 @@ def test_visible_target_and_semantic_table_is_ready_without_data_attributes():
             "2026-05-23",
             "First notice of examination opinions (ORIGINAL)",
             remote_id="legacy-shape-document",
+            case_core="CN-202510469602",
         ),
     )
     html = _multi_case_page(document_table, heading_number="CN202510469602.3")
@@ -280,25 +323,24 @@ def test_visible_target_and_semantic_table_is_ready_without_data_attributes():
     ]
 
 
-def test_parser_accepts_8f4d6bf_saved_html_shape_without_case_number():
-    legacy_html = _document_page(
+def test_parser_rejects_unbound_saved_html_without_case_number_or_row_core():
+    unbound_html = _document_page(
         _row(
             "2026-05-23",
             "First notice of examination opinions (ORIGINAL)",
             remote_id="8f4d6bf-document",
+            case_core="not-a-case",
         ),
         application_number="",
         publication_number="",
     )
 
     outcome = parse_uspto_document_list(
-        legacy_html, "CN202510469601.5", "CN120134203A"
+        unbound_html, "CN202510469601.5", "CN120134203A"
     )
 
-    assert outcome.code == ResultCode.OK
-    assert [document.remote_document_id for document in outcome.documents] == [
-        "8f4d6bf-document"
-    ]
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
 
 
 def test_exact_8f4d6bf_shape_binds_table_by_document_id_core():
@@ -323,6 +365,31 @@ def test_exact_8f4d6bf_shape_binds_table_by_document_id_core():
     assert len(outcome.documents) == 1
 
 
+def test_parser_rejects_mixed_case_rows_in_one_semantic_table():
+    rows = _row(
+        "2026-05-23",
+        "First notice of examination opinions (ORIGINAL)",
+        remote_id="case-a",
+        case_core="CN-202510469601",
+    ) + _row(
+        "2026-05-24",
+        "Second notice of examination opinions (ORIGINAL)",
+        code="210402-CN",
+        remote_id="case-b",
+        case_core="CN-202510469602",
+    )
+    html = _document_page(
+        rows,
+        application_number="CN202510469602.3",
+        publication_number="",
+    )
+
+    outcome = parse_uspto_document_list(html, "CN202510469602.3", "")
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
+
+
 def test_hidden_previous_table_before_visible_target_table_selects_target_only():
     case_a = _case_section(
         "CN202510469601.5",
@@ -339,6 +406,7 @@ def test_hidden_previous_table_before_visible_target_table_selects_target_only()
             "2026-05-24",
             "First notice of examination opinions (ORIGINAL)",
             remote_id="case-b-document",
+            case_core="CN-202510469602",
         ),
     )
     html = _multi_case_page(case_a + case_b)
@@ -684,7 +752,10 @@ def test_provider_snapshot_rejects_header_with_hidden_required_cell():
         )
     )
     snapshot = _ready_snapshot(_document_cells())
-    snapshot["rows"][0] = snapshot["rows"][0][:-1]
+    snapshot["rows"][0][-1] = {
+        **snapshot["rows"][0][-1],
+        "visible": False,
+    }
     snapshot["tableHtml"] = re.search(
         r"<table\b.*?</table>", raw_page, re.I | re.S
     ).group(0)
@@ -695,6 +766,134 @@ def test_provider_snapshot_rejects_header_with_hidden_required_cell():
 
     assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
     assert outcome.documents == []
+
+
+def test_provider_snapshot_rejects_hidden_required_date_cell_without_shifting():
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-visible")
+    )
+    snapshot["rows"][1][0] = {
+        **snapshot["rows"][1][0],
+        "visible": False,
+    }
+    manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
+
+
+def test_provider_header_only_table_with_visible_empty_state_is_empty():
+    snapshot = _ready_snapshot(safe_fallback=True)
+    snapshot.update({
+        "state": "READY",
+        "rows": [_header_cells()],
+        "emptyText": "No documents found",
+    })
+    manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert outcome.documents == []
+    assert "rowTokens.length > 0" in manager.page.evaluated[0][0]
+
+
+def test_provider_visible_rows_take_priority_over_stale_empty_state():
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-current")
+    )
+    snapshot.update({"state": "EMPTY", "emptyText": "No documents found"})
+    manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "CN-202510469601-current"
+    ]
+
+
+def test_snapshot_script_builds_visible_text_with_tree_walker():
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-current")
+    )
+    manager = _FakeBrowserManager(
+        """
+        <html><body><h1>Global Dossier</h1>
+          <div aria-hidden="true">captcha CN202510469601.5</div>
+        </body></html>
+        """,
+        snapshots=[snapshot],
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    script = manager.page.evaluated[0][0]
+    assert "TreeWalker" in script
+    assert "SHOW_TEXT" in script
+    assert "body.innerText" not in script
+    assert "element.innerText" not in script
+
+
+def test_aria_hidden_target_does_not_enable_unidentified_table_fallback():
+    cancel = threading.Event()
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="generic-document"),
+        table_case_tokens=[],
+        case_aliases=["CN202510469601"],
+        target_matched=False,
+        safe_fallback=False,
+    )
+    manager = _FakeBrowserManager(
+        """
+        <html><body><h1>Global Dossier</h1>
+          <div aria-hidden="true">CN202510469601.5 captcha</div>
+        </body></html>
+        """,
+        snapshots=[snapshot],
+        on_poll=cancel.set,
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", cancel)
+
+    assert outcome.code == ResultCode.TEMPORARY_ERROR
+    assert "取消" in outcome.message
+
+
+def test_publication_query_accepts_application_document_ids_via_page_aliases():
+    cancel = threading.Event()
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-current"),
+        target_core="CN120134203",
+        table_case_tokens=["CN202510469601"],
+        case_aliases=["CN120134203", "CN202510469601"],
+        target_matched=True,
+    )
+    snapshot["visibleText"] = (
+        "Global Dossier Application CN202510469601.5 "
+        "Publication CN120134203A"
+    )
+    manager = _FakeBrowserManager(
+        "unused raw html",
+        snapshots=[snapshot],
+        on_poll=cancel.set,
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("", "CN120134203A", cancel)
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "CN-202510469601-current"
+    ]
 
 
 def test_target_heading_with_other_case_table_never_becomes_ready():
