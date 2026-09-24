@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 import time
 import urllib.parse
-from html import escape
 from html.parser import HTMLParser
 from typing import Optional
 
@@ -60,7 +59,7 @@ _OFFICIAL_DIRECTIONS = {
 }
 
 _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
-(targetToken) => {
+(query) => {
   const normalize = (value) => (value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   const isVisible = (element) => {
     if (!(element instanceof Element)) return false;
@@ -74,39 +73,92 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
     return true;
   };
   const text = (element) => isVisible(element) ? (element.innerText || "").trim() : "";
+  const rowsFor = (table) => Array.from(table.querySelectorAll("tr"))
+    .filter(isVisible)
+    .map((row) => Array.from(row.children)
+      .filter((cell) => ["TH", "TD"].includes(cell.tagName) && isVisible(cell))
+      .map((cell) => {
+        const link = Array.from(cell.querySelectorAll("a[href]")).find(isVisible);
+        return {
+          text: text(cell),
+          href: link ? (link.getAttribute("href") || "") : "",
+          header: cell.tagName === "TH"
+        };
+      }))
+    .filter((row) => row.length > 0);
+  const caseTokensFor = (rows) => {
+    const tokens = new Set();
+    for (const row of rows) for (const cell of row) {
+      const source = `${cell.text || ""} ${cell.href || ""}`.toUpperCase();
+      for (const match of source.matchAll(/CN[-_\s]*(\d{9,14})(?=[.\/_\-\sA-Z]|$)/g)) {
+        tokens.add(`CN${match[1]}`);
+      }
+    }
+    return Array.from(tokens);
+  };
   const body = document.body;
   const visibleText = body ? (body.innerText || "").trim() : "";
   const lowered = visibleText.toLowerCase();
+  const pageMarker = lowered.includes("global dossier");
   const blocked = [
     "access denied", "request rejected", "forbidden",
     "sign in to global dossier", "login required", "security verification",
     "verify you are human", "captcha"
   ].some((marker) => lowered.includes(marker));
-  const targetMatched = Boolean(targetToken) && normalize(visibleText).includes(targetToken);
-  const semanticTable = Array.from(document.querySelectorAll("table"))
+  const targetMatched = Boolean(query.targetToken) &&
+    normalize(visibleText).includes(query.targetToken);
+  const candidates = Array.from(document.querySelectorAll("table"))
     .filter(isVisible)
-    .find((table) => {
-      const headers = Array.from(table.querySelectorAll("th")).map((cell) => text(cell).toLowerCase());
+    .map((table) => ({table, rows: rowsFor(table)}))
+    .filter(({rows}) => {
+      const headerRow = rows.find((row) => row.length > 0 && row.every((cell) => cell.header));
+      const headers = (headerRow || []).map((cell) => cell.text.toLowerCase());
       const has = (patterns) => headers.some((header) => patterns.some((pattern) => pattern.test(header)));
       return has([/^(document )?date$/, /publication date/]) &&
         has([/description/, /document title/, /^title$/]) &&
         has([/document code/, /^code$/]) &&
         has([/document id/, /remote id/, /^id$/]) &&
         has([/direction/, /category/, /party/]);
-    });
+    })
+    .map((candidate) => ({
+      ...candidate,
+      tableCaseTokens: caseTokensFor(candidate.rows)
+    }));
   const emptyState = Array.from(document.querySelectorAll(
     '[role="status"], [role="alert"], [class*="empty" i], [id*="empty" i], ' +
     '[class*="no-document" i], [id*="no-document" i], ' +
     '[class*="no-record" i], [id*="no-record" i]'
   )).filter(isVisible).find((element) => /\bno (documents|records)\b/i.test(text(element)));
+  const loading = Array.from(document.querySelectorAll(
+    '[aria-busy="true"], [role="progressbar"], [class*="loading" i], [class*="spinner" i]'
+  )).some(isVisible);
+  const hashMatched = window.location.hash === query.expectedHash;
+  const safeFallback = Boolean(query.freshGeneration) && hashMatched &&
+    targetMatched && !loading;
+  const matching = candidates.find((candidate) =>
+    candidate.tableCaseTokens.includes(query.targetCore));
+  const identifiedOther = candidates.some((candidate) =>
+    candidate.tableCaseTokens.length > 0 &&
+    !candidate.tableCaseTokens.includes(query.targetCore));
+  const unidentified = candidates.find((candidate) =>
+    candidate.tableCaseTokens.length === 0);
+  const selected = matching ||
+    (!identifiedOther && safeFallback ? unidentified : undefined);
   let state = "PENDING";
   if (blocked) state = "BLOCKED";
-  else if (targetMatched && semanticTable) state = "READY";
-  else if (targetMatched && emptyState) state = "EMPTY";
+  else if (pageMarker && selected) state = "READY";
+  else if (pageMarker && safeFallback && emptyState) state = "EMPTY";
   return {
     state,
     targetMatched,
-    tableHtml: semanticTable ? semanticTable.outerHTML : "",
+    rows: selected ? selected.rows : [],
+    tableCaseTokens: selected ? selected.tableCaseTokens :
+      candidates.flatMap((candidate) => candidate.tableCaseTokens),
+    safeFallback,
+    hashMatched,
+    loading,
+    freshGeneration: Boolean(query.freshGeneration),
+    pageMarker,
     visibleText,
     emptyText: emptyState ? text(emptyState) : ""
   };
@@ -258,16 +310,35 @@ def _identifier_token(raw: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", (raw or "").upper())
 
 
-def _visible_cn_number_tokens(text: str) -> set[str]:
+_CASE_CORE_PATTERN = re.compile(
+    r"CN[-_\s]*(\d{9,14})(?=[./_\-\sA-Z]|$)",
+    re.IGNORECASE,
+)
+
+
+def _case_core(raw: str) -> str:
+    identifier = normalize_cn_identifier(raw)
+    if identifier.number_type == "application":
+        return identifier.normalized_number.split(".", 1)[0]
+    if identifier.number_type == "publication":
+        return re.sub(r"[A-Z]$", "", identifier.normalized_number)
+    match = _CASE_CORE_PATTERN.search(raw or "")
+    return f"CN{match.group(1)}" if match else ""
+
+
+def _case_tokens_from_text(text: str) -> set[str]:
+    return {f"CN{match}" for match in _CASE_CORE_PATTERN.findall(text or "")}
+
+
+def _table_case_tokens(rows: list[list[dict]]) -> set[str]:
     tokens = set()
-    for raw_number in re.findall(
-        r"\bCN\s*\d{8,14}(?:\.\d)?[A-Z]?\b",
-        text or "",
-        re.IGNORECASE,
-    ):
-        identifier = normalize_cn_identifier(raw_number)
-        if identifier.number_type in ("application", "publication"):
-            tokens.add(_identifier_token(identifier.normalized_number))
+    for row in rows:
+        for cell in row:
+            tokens.update(
+                _case_tokens_from_text(
+                    f"{cell.get('text', '')} {cell.get('href', '')}"
+                )
+            )
     return tokens
 
 
@@ -290,75 +361,48 @@ def inspect_uspto_document_state(html: str, target_number: str) -> str:
     if any(marker in visible_text.lower() for marker in _BLOCK_MARKERS):
         return "BLOCKED"
     target_token = _identifier_token(target_number)
-    if target_token and target_token not in _identifier_token(visible_text):
-        return "PENDING"
+    target_core = _case_core(target_number)
+    semantic_tables = []
     for table in parser.tables:
         if any(_header_indexes(row) is not None for row in table["rows"]):
-            return "READY"
+            semantic_tables.append(table["rows"])
+    if target_core:
+        for rows in semantic_tables:
+            if target_core in _table_case_tokens(rows):
+                return "READY"
+        if any(_table_case_tokens(rows) for rows in semantic_tables):
+            return "PENDING"
+    if semantic_tables and (
+        not target_token or target_token in _identifier_token(visible_text)
+    ):
+        return "READY"
     for empty_state in parser.empty_state_texts:
         if re.search(
             r"\bno (?:documents|records)\b",
             empty_state["text"],
             re.IGNORECASE,
-        ):
+        ) and (not target_token or target_token in _identifier_token(visible_text)):
             return "READY"
     return "PENDING"
 
 
-def parse_uspto_document_list(
-    html: str, application_number: str = "", publication_number: str = ""
+def parse_uspto_document_rows(
+    rows: list[list[dict]],
+    application_number: str = "",
+    publication_number: str = "",
+    *,
+    explicit_empty: bool = False,
 ) -> SyncOutcome:
-    """Parse a Global Dossier document list without touching the network."""
-    if not html or not html.strip():
-        return SyncOutcome(
-            code=ResultCode.TEMPORARY_ERROR,
-            message="USPTO Global Dossier 返回空响应",
-        )
-
-    parser = _DocumentListParser()
-    try:
-        parser.feed(html)
-        parser.close()
-    except Exception:
-        return SyncOutcome(
-            code=ResultCode.PAGE_STRUCTURE_CHANGED,
-            message="USPTO Global Dossier 页面解析异常",
-        )
-
-    page_text = re.sub(r"\s+", " ", " ".join(parser.page_text)).strip()
-    lowered = page_text.lower()
-    if any(marker in lowered for marker in _BLOCK_MARKERS):
-        return SyncOutcome(
-            code=ResultCode.ACCESS_DENIED,
-            message="USPTO Global Dossier 返回拦截或登录页面",
-        )
-    if "global dossier" not in page_text.lower():
-        return SyncOutcome(
-            code=ResultCode.PAGE_STRUCTURE_CHANGED,
-            message="未识别 USPTO Global Dossier 页面标志",
-        )
-
+    """Parse visible structured cells from either HTML or browser snapshots."""
     normalized_application = _normal_number(application_number, "application")
     normalized_publication = _normal_number(publication_number, "publication")
-    target_number = normalized_application or normalized_publication
-    target_token = _identifier_token(target_number)
-    visible_case_tokens = _visible_cn_number_tokens(page_text)
-    if target_number and visible_case_tokens and target_token not in visible_case_tokens:
-        return SyncOutcome(
-            code=ResultCode.PAGE_STRUCTURE_CHANGED,
-            message="Global Dossier 页面案件号与查询目标不一致",
-        )
-
-    target_rows = None
     indexes = None
-    for table in parser.tables:
-        for row_index, row in enumerate(table["rows"]):
-            candidate_indexes = _header_indexes(row)
-            if candidate_indexes is not None:
-                target_rows = table["rows"][row_index + 1 :]
-                indexes = candidate_indexes
-                break
-        if indexes is not None:
+    target_rows = None
+    for row_index, row in enumerate(rows):
+        candidate_indexes = _header_indexes(row)
+        if candidate_indexes is not None:
+            indexes = candidate_indexes
+            target_rows = rows[row_index + 1 :]
             break
     if target_rows is None or indexes is None:
         return SyncOutcome(
@@ -366,17 +410,13 @@ def parse_uspto_document_list(
             message="未找到具有语义表头的 Global Dossier 文档表格",
         )
 
-    explicit_empty = any(
-        re.search(
-            r"\bno (?:documents|records)\b",
-            empty_state["text"],
-            re.IGNORECASE,
-        )
-        for empty_state in parser.empty_state_texts
-    )
     if not target_rows:
         if explicit_empty:
-            return SyncOutcome(code=ResultCode.OK, documents=[])
+            return SyncOutcome(
+                code=ResultCode.OK,
+                documents=[],
+                resolved_application_number=normalized_application,
+            )
         return SyncOutcome(
             code=ResultCode.PAGE_STRUCTURE_CHANGED,
             message="文档表格为空且未显示明确的无文档状态",
@@ -446,29 +486,136 @@ def parse_uspto_document_list(
     )
 
 
-def _snapshot_html(snapshot: dict, target_number: str) -> str:
-    """Convert a browser-filtered visible snapshot into parser input."""
-    target = escape(target_number, quote=True)
-    state = snapshot.get("state")
-    if state == "READY":
-        table_html = snapshot.get("tableHtml")
-        if not isinstance(table_html, str) or not table_html.strip():
-            return ""
-        return (
-            "<html><body><h1>Global Dossier</h1>"
-            f"<p class=\"case-number\">{target}</p>{table_html}</body></html>"
+def parse_uspto_document_list(
+    html: str, application_number: str = "", publication_number: str = ""
+) -> SyncOutcome:
+    """Parse a saved Global Dossier document list without network access."""
+    if not html or not html.strip():
+        return SyncOutcome(
+            code=ResultCode.TEMPORARY_ERROR,
+            message="USPTO Global Dossier 返回空响应",
         )
-    if state == "EMPTY":
-        return (
-            "<html><body><h1>Global Dossier</h1>"
-            f"<p class=\"case-number\">{target}</p>"
-            "<table><thead><tr><th>Date</th><th>Document Description</th>"
-            "<th>Document Code</th><th>Document ID</th><th>Direction</th>"
-            "</tr></thead><tbody></tbody></table>"
-            "<div class=\"empty-state\">No documents found</div>"
-            "</body></html>"
+
+    parser = _DocumentListParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        return SyncOutcome(
+            code=ResultCode.PAGE_STRUCTURE_CHANGED,
+            message="USPTO Global Dossier 页面解析异常",
         )
-    return ""
+
+    page_text = re.sub(r"\s+", " ", " ".join(parser.page_text)).strip()
+    lowered = page_text.lower()
+    if any(marker in lowered for marker in _BLOCK_MARKERS):
+        return SyncOutcome(
+            code=ResultCode.ACCESS_DENIED,
+            message="USPTO Global Dossier 返回拦截或登录页面",
+        )
+    if "global dossier" not in lowered:
+        return SyncOutcome(
+            code=ResultCode.PAGE_STRUCTURE_CHANGED,
+            message="未识别 USPTO Global Dossier 页面标志",
+        )
+
+    target_number = (
+        _normal_number(application_number, "application")
+        or _normal_number(publication_number, "publication")
+    )
+    target_core = _case_core(target_number)
+    semantic_tables = [
+        table["rows"]
+        for table in parser.tables
+        if any(_header_indexes(row) is not None for row in table["rows"])
+    ]
+    selected_rows = None
+    if target_core:
+        selected_rows = next(
+            (
+                rows
+                for rows in semantic_tables
+                if target_core in _table_case_tokens(rows)
+            ),
+            None,
+        )
+        if selected_rows is None and any(
+            _table_case_tokens(rows) for rows in semantic_tables
+        ):
+            return SyncOutcome(
+                code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                message="Global Dossier 文档表格案件号与查询目标不一致",
+            )
+    if selected_rows is None and semantic_tables:
+        target_token = _identifier_token(target_number)
+        if not target_token or target_token in _identifier_token(page_text):
+            selected_rows = semantic_tables[0]
+        elif not _case_tokens_from_text(page_text):
+            selected_rows = semantic_tables[0]
+    if selected_rows is None:
+        return SyncOutcome(
+            code=ResultCode.PAGE_STRUCTURE_CHANGED,
+            message="未找到与目标案件匹配的 Global Dossier 文档表格",
+        )
+
+    explicit_empty = any(
+        re.search(
+            r"\bno (?:documents|records)\b",
+            empty_state["text"],
+            re.IGNORECASE,
+        )
+        for empty_state in parser.empty_state_texts
+    )
+    return parse_uspto_document_rows(
+        selected_rows,
+        application_number,
+        publication_number,
+        explicit_empty=explicit_empty,
+    )
+
+
+def _snapshot_rows(snapshot: dict) -> Optional[list[list[dict]]]:
+    raw_rows = snapshot.get("rows")
+    if not isinstance(raw_rows, list):
+        return None
+    rows = []
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, list):
+            return None
+        row = []
+        for raw_cell in raw_row:
+            if not isinstance(raw_cell, dict):
+                return None
+            text = raw_cell.get("text", "")
+            href = raw_cell.get("href", "")
+            header = raw_cell.get("header")
+            if not isinstance(text, str) or not isinstance(href, str):
+                return None
+            if not isinstance(header, bool):
+                return None
+            row.append({"text": text, "href": href, "header": header})
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _snapshot_is_bound(
+    snapshot: dict, rows: list[list[dict]], target_core: str
+) -> bool:
+    if snapshot.get("pageMarker") is not True:
+        return False
+    table_tokens = _table_case_tokens(rows)
+    if target_core and target_core in table_tokens:
+        return True
+    if table_tokens:
+        return False
+    return all((
+        snapshot.get("freshGeneration") is True,
+        snapshot.get("hashMatched") is True,
+        snapshot.get("targetMatched") is True,
+        snapshot.get("loading") is False,
+        snapshot.get("safeFallback") is True,
+    ))
 
 
 class UsptoGlobalDossierProvider(DossierProvider):
@@ -585,7 +732,12 @@ class UsptoGlobalDossierProvider(DossierProvider):
         return None
 
     def _wait_for_document_state(
-        self, page, target_token: str, cancel
+        self,
+        page,
+        target_token: str,
+        target_core: str,
+        expected_hash: str,
+        cancel,
     ) -> tuple[Optional[SyncOutcome], Optional[dict]]:
         deadline = time.monotonic() + SPA_WAIT_TIMEOUT_SECONDS
         while True:
@@ -600,7 +752,12 @@ class UsptoGlobalDossierProvider(DossierProvider):
             try:
                 snapshot = page.evaluate(
                     _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT,
-                    target_token,
+                    {
+                        "targetToken": target_token,
+                        "targetCore": target_core,
+                        "expectedHash": expected_hash,
+                        "freshGeneration": True,
+                    },
                 )
             except Exception:
                 return SyncOutcome(
@@ -615,10 +772,12 @@ class UsptoGlobalDossierProvider(DossierProvider):
                     code=ResultCode.ACCESS_DENIED,
                     message="USPTO Global Dossier 返回可见拦截或登录页面",
                 ), None
-            if state in ("READY", "EMPTY") and snapshot.get(
-                "targetMatched"
-            ) is True:
-                return self._http_error_outcome(), snapshot
+            if state in ("READY", "EMPTY"):
+                rows = _snapshot_rows(snapshot)
+                if rows is not None and _snapshot_is_bound(
+                    snapshot, rows, target_core
+                ):
+                    return self._http_error_outcome(), snapshot
             if time.monotonic() >= deadline:
                 return SyncOutcome(
                     code=ResultCode.PAGE_STRUCTURE_CHANGED,
@@ -642,6 +801,12 @@ class UsptoGlobalDossierProvider(DossierProvider):
                 message="缺少可识别的 CN 申请号或公开号",
             )
         target_token = self._target_token(application_number, publication_number)
+        target_number = (
+            _normal_number(application_number, "application")
+            or _normal_number(publication_number, "publication")
+        )
+        target_core = _case_core(target_number)
+        expected_hash = f"#{urllib.parse.urlparse(url).fragment}"
         try:
             page = self._manager.open_page(
                 url,
@@ -662,20 +827,33 @@ class UsptoGlobalDossierProvider(DossierProvider):
         wait_outcome, snapshot = self._wait_for_document_state(
             page,
             target_token,
+            target_core,
+            expected_hash,
             cancel,
         )
         if wait_outcome is not None:
             return wait_outcome
-        normalized_application = _normal_number(application_number, "application")
-        normalized_publication = _normal_number(publication_number, "publication")
-        target_number = normalized_application or normalized_publication
-        html = _snapshot_html(snapshot or {}, target_number)
-        if not html:
+        rows = _snapshot_rows(snapshot or {})
+        if rows is None:
             return SyncOutcome(
                 code=ResultCode.PAGE_STRUCTURE_CHANGED,
                 message="Global Dossier 可见文档快照不完整",
             )
-        return parse_uspto_document_list(html, application_number, publication_number)
+        state = (snapshot or {}).get("state")
+        if state == "EMPTY" and not rows:
+            return SyncOutcome(
+                code=ResultCode.OK,
+                documents=[],
+                resolved_application_number=_normal_number(
+                    application_number, "application"
+                ),
+            )
+        return parse_uspto_document_rows(
+            rows,
+            application_number,
+            publication_number,
+            explicit_empty=state == "EMPTY",
+        )
 
     def download_document(
         self, document: ProsecutionDocument, dest_path: str, cancel
