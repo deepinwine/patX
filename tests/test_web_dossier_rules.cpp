@@ -338,6 +338,8 @@ static void TestMergeOfficialEvent() {
             CHECK_STR_EQ(oas.back().oa_type, "授权通知");
             CHECK_STR_EQ(oas.back().issue_date, "2026-08-10");
             CHECK_STR_EQ(oas.back().source, "epo_global_dossier");
+            // non-OA events get no suggested deadline
+            CHECK_STR_EQ(oas.back().official_deadline, "");
         }
         Patent stored = db.GetPatentById(p.id);
         CHECK_STR_EQ(stored.application_status, "实质审查中");
@@ -388,7 +390,8 @@ static void TestMergeOfficialEvent() {
             CHECK_STR_EQ(stored_oa.sync_flag, "date_conflict");
         }
 
-        // --- OA record without a date gets it filled automatically
+        // --- OA record without a date gets it filled automatically, plus a
+        // calculated response deadline from the rule engine (invention: 4mo)
         OARecord undated;
         undated.patent_id = p.id;
         undated.oa_type = "第二次审查意见通知书";
@@ -404,6 +407,38 @@ static void TestMergeOfficialEvent() {
         auto stored2 = db.GetOAById(undated_id);
         CHECK_STR_EQ(stored2.issue_date, "2026-07-15");
         CHECK_STR_EQ(stored2.sync_flag, "auto_filled_date");
+        CHECK_STR_EQ(stored2.official_deadline, "2026-11-15");   // +4 months
+        CHECK_STR_EQ(stored2.deadline_source, "calculated");
+
+        // --- a human deadline is never touched by the suggested fill
+        OARecord manual;
+        manual.patent_id = p.id;
+        manual.oa_type = "第一次审查意见通知书";
+        manual.official_deadline = "2030-01-01";
+        manual.deadline_source = "manual";
+        int manual_id = db.InsertOA(manual, false);
+        CHECK(!db.FillOADeadlineIfEmpty(manual_id, "2027-01-01"));
+        auto manual_stored = db.GetOAById(manual_id);
+        CHECK_STR_EQ(manual_stored.official_deadline, "2030-01-01");
+        CHECK_STR_EQ(manual_stored.deadline_source, "manual");
+
+        // --- utility-model patents use the 2-month rule
+        Patent util;
+        util.geke_code = "GC-UTIL";
+        util.patent_type = "utility";
+        util.application_status = "实质审查中";
+        util.id = db.InsertPatent(util, false);
+        RemoteDocument util_oa;
+        util_oa.document_type = "OFFICE_ACTION_FIRST";
+        util_oa.document_title = "第一次审查意见通知书";
+        util_oa.official_date = "2026-09-20";
+        util_oa.event_key = "util-oa-event";
+        util_oa.confidence = "HIGH";
+        auto utilres = MergeOfficialEvent(db, util, util_oa);
+        CHECK(utilres.code == ResultCode::NewOfficialEvent);
+        auto util_stored = db.GetOAById(utilres.oa_created_id);
+        CHECK_STR_EQ(util_stored.official_deadline, "2026-11-20");   // +2 months
+        CHECK_STR_EQ(util_stored.deadline_source, "calculated");
 
         // --- LOW confidence never writes
         RemoteDocument low;

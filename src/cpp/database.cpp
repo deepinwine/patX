@@ -1815,8 +1815,24 @@ std::vector<Patent> Database::GetPatentsDueForDossierCheck(bool include_granted,
     return results;
 }
 
-bool Database::UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at) {
-    return Execute("UPDATE patents SET last_dossier_check_at = " + std::to_string(last_at) +
+bool Database::FillOADeadlineIfEmpty(int oa_id, const std::string& deadline) {
+    if (oa_id <= 0 || deadline.empty()) return false;
+    sqlite3_stmt* stmt;
+    std::string sql =
+        "UPDATE oa_records SET official_deadline = ?, deadline_source = 'calculated' "
+        "WHERE id = ? AND (official_deadline IS NULL OR official_deadline = '') "
+        "AND (deadline_source IS NULL OR deadline_source != 'manual')";
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, deadline.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, oa_id);
+        bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db_) > 0;
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+    return false;
+}
+
+bool Database::UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at) {    return Execute("UPDATE patents SET last_dossier_check_at = " + std::to_string(last_at) +
                    ", next_dossier_check_at = " + std::to_string(next_at) +
                    " WHERE id = " + std::to_string(patent_id));
 }

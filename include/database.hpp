@@ -363,6 +363,10 @@ public:
     // sets sync_flag - never touches handler/writer/deadline/notes fields.
     bool UpdateOASyncFields(int oa_id, const std::string& issue_date_if_empty,
                             const std::string& sync_flag);
+    // Fills official_deadline (deadline_source='calculated') only when the
+    // record has no deadline yet and none was set manually. Returns false
+    // when a deadline already exists or the row is missing.
+    bool FillOADeadlineIfEmpty(int oa_id, const std::string& deadline);
 
     // ---------- Undo ----------
     void BeginBatch();

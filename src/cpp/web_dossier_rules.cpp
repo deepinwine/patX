@@ -188,6 +188,14 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
     }
 
     const bool is_oa_family = document.document_type.rfind("OFFICE_ACTION_", 0) == 0;
+    // Suggested response deadline from the rule engine - OA family only,
+    // same convention as the PDF import (marked calculated, never manual).
+    auto suggest_deadline = [&]() -> std::string {
+        if (!is_oa_family) return "";
+        std::string event = (patent.patent_type == "utility")
+                                ? "oa_response_utility" : "oa_response_invention";
+        return db.CalculateDeadline("CN", event, document.official_date);
+    };
     auto existing = db.GetOAsForPatentId(patent.id);
     const OARecord* same_type = nullptr;
     const OARecord* same_date = nullptr;
@@ -210,7 +218,13 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
     if (same_date) {
         if (same_type && same_type->issue_date.empty()) {
             db.UpdateOASyncFields(same_type->id, document.official_date, "auto_filled_date");
-            result.message = "已补入官文日 " + document.official_date;
+            std::string deadline = suggest_deadline();
+            if (db.FillOADeadlineIfEmpty(same_type->id, deadline)) {
+                result.message = "已补入官文日 " + document.official_date +
+                                 "，建议答复期限 " + deadline;
+            } else {
+                result.message = "已补入官文日 " + document.official_date;
+            }
         } else {
             result.code = ResultCode::NoChange;
         }
@@ -219,8 +233,14 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
     if (same_type) {
         if (same_type->issue_date.empty()) {
             db.UpdateOASyncFields(same_type->id, document.official_date, "auto_filled_date");
+            std::string deadline = suggest_deadline();
+            if (db.FillOADeadlineIfEmpty(same_type->id, deadline)) {
+                result.message = "已补入官文日 " + document.official_date +
+                                 "，建议答复期限 " + deadline;
+            } else {
+                result.message = "已补入官文日 " + document.official_date;
+            }
             result.code = ResultCode::NoChange;
-            result.message = "已补入官文日 " + document.official_date;
         } else {
             // Same event, different local date: never overwrite.
             db.UpdateOASyncFields(same_type->id, "", "date_conflict");
@@ -242,12 +262,20 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
     oa.source = document.source.empty() ? "cnipa" : document.source;
     oa.remote_document_id = document.remote_document_id;
     oa.sync_flag = "web_new";
+    std::string deadline = suggest_deadline();
+    if (!deadline.empty()) {
+        oa.official_deadline = deadline;
+        oa.deadline_source = "calculated";
+    }
     int id = db.InsertOA(oa, /*log_undo=*/true);
     if (id > 0) {
         result.code = ResultCode::NewOfficialEvent;
         result.oa_created_id = id;
         result.message = "发现新的官方发文: " + result.canonical_title + " @ " +
                          document.official_date;
+        if (!deadline.empty()) {
+            result.message += "，建议答复期限 " + deadline;
+        }
     } else {
         result.code = ResultCode::TemporaryError;
         result.message = "官方发文写入失败: " + result.canonical_title;
