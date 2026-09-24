@@ -203,9 +203,10 @@ private:
     wxStaticText* lbl_level;
     wxTextCtrl* patent_detail;
 
-    // OA tab
+    // OA 区块（集成在国内专利页）：列表、筛选与选中案件作用域
     wxListCtrl* oa_list;
     wxComboBox* oa_filter;
+    std::set<int> oa_scope_;
 
     // Other tabs
     wxListCtrl* pct_list;
@@ -456,7 +457,6 @@ private:
         main_sizer->Add(toolbar_panel, 0, wxEXPAND | wxLEFT | wxRIGHT, 5);
 
         SetupPatentTab();
-        SetupOATab();
         SetupPCTTab();
         SetupSoftwareTab();
         SetupICTab();
@@ -543,6 +543,9 @@ private:
         patent_list->AppendColumn(UTF8_STR("备注"), wxLIST_FORMAT_LEFT, 150);
 
         patent_list->Bind(wxEVT_LIST_ITEM_SELECTED, &PatXFrame::OnPatentSelected, this);
+        // OA 区块跟随专利列表的选中状态（未选择时显示全部 OA）
+        patent_list->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { UpdateOAScope(); });
+        patent_list->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { UpdateOAScope(); });
         patent_list->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent&) {
             long idx = patent_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
@@ -617,8 +620,13 @@ private:
         detail_sizer->Add(patent_detail, 1, wxEXPAND);
         detail_panel->SetSizer(detail_sizer);
 
-        splitter->SplitHorizontally(patent_list, detail_panel, 500);
-        sizer->Add(splitter, 1, wxEXPAND | wxALL, 5);
+        splitter->SplitHorizontally(patent_list, detail_panel, 420);
+        sizer->Add(splitter, 2, wxEXPAND | wxALL, 5);
+
+        // OA 处理区块：不再单独成页，直接集成在国内申请页底部，
+        // 内容跟随上方专利列表的选中状态
+        BuildOASection(panel, sizer);
+
         panel->SetSizer(sizer);
         notebook->AddPage(panel, LANG_STR("Domestic Patents", "国内专利"));
     }
@@ -897,7 +905,8 @@ private:
     int GetCurrentTab() const { return notebook->GetSelection(); }
 
     wxListCtrl* GetCurrentList() {
-        std::vector<wxListCtrl*> lists = {patent_list, oa_list, pct_list, sw_list,
+        // OA 区块已并入国内专利页，不再有独立页签
+        std::vector<wxListCtrl*> lists = {patent_list, pct_list, sw_list,
                                           ic_list, foreign_list, nullptr /*US*/,
                                           fee_list, rule_list};
         int tab = GetCurrentTab();
@@ -940,15 +949,13 @@ private:
         switch (tab) {
             case 0: status_table = "patents"; status_col = "application_status";
                     handler_table = "patents"; handler_col = "geke_handler"; break;
-            case 1: status_table = "oa_records"; status_col = "oa_type";
-                    handler_table = "oa_records"; handler_col = "handler"; break;
-            case 2: status_table = "pct_patents"; status_col = "application_status";
+            case 1: status_table = "pct_patents"; status_col = "application_status";
                     handler_table = "pct_patents"; handler_col = "handler"; break;
-            case 3: status_table = "software_copyrights"; status_col = "application_status";
+            case 2: status_table = "software_copyrights"; status_col = "application_status";
                     handler_table = "software_copyrights"; handler_col = "handler"; break;
-            case 4: status_table = "ic_layouts"; status_col = "application_status";
+            case 3: status_table = "ic_layouts"; status_col = "application_status";
                     handler_table = "ic_layouts"; handler_col = "handler"; break;
-            case 5: status_table = "foreign_patents"; status_col = "patent_status";
+            case 4: status_table = "foreign_patents"; status_col = "patent_status";
                     handler_table = "foreign_patents"; handler_col = "handler"; break;
             default:
                 status_table = "patents"; status_col = "application_status";
@@ -958,7 +965,7 @@ private:
 
     void RefreshCommonFiltersForTab(int tab, bool preserve_values) {
         if (!common_status_filter || !common_handler_filter || !common_level_filter) return;
-        if (tab == 6) {   // US Prosecution tab has its own filters
+        if (tab == 5) {   // US Prosecution tab has its own filters
             lbl_level->Show(false);
             common_level_filter->Show(false);
             return;
@@ -1001,11 +1008,10 @@ private:
     void OnNewByCurrentTab(wxCommandEvent&) {
         switch (GetCurrentTab()) {
             case 0: { PatentEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadPatents(); break; }
-            case 1: { OAEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadOA(); break; }
-            case 2: { PCTEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadPCT(); break; }
-            case 3: { SoftwareEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadSoftware(); break; }
-            case 4: { ICEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadIC(); break; }
-            case 5: { ForeignEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadForeign(); break; }
+            case 1: { PCTEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadPCT(); break; }
+            case 2: { SoftwareEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadSoftware(); break; }
+            case 3: { ICEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadIC(); break; }
+            case 4: { ForeignEditDialog dlg(this, db.get()); if (dlg.ShowModal() == wxID_OK) LoadForeign(); break; }
             default: break;
         }
     }
@@ -1014,7 +1020,7 @@ private:
         int tab = GetCurrentTab();
         wxListCtrl* list = GetCurrentList();
         if (!list) {
-            if (tab == 6) return;   // US tab edits inside its own pages
+            if (tab == 5) return;   // US tab edits inside its own pages
             return;
         }
         long idx = list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
@@ -1025,17 +1031,16 @@ private:
         int id = static_cast<int>(list->GetItemData(idx));
         switch (tab) {
             case 0: { PatentEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadPatents(); break; }
-            case 1: { OAEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadOA(); break; }
-            case 2: { PCTEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadPCT(); break; }
-            case 3: { SoftwareEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadSoftware(); break; }
-            case 4: { ICEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadIC(); break; }
-            case 5: { ForeignEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadForeign(); break; }
+            case 1: { PCTEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadPCT(); break; }
+            case 2: { SoftwareEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadSoftware(); break; }
+            case 3: { ICEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadIC(); break; }
+            case 4: { ForeignEditDialog dlg(this, db.get(), id); if (dlg.ShowModal() == wxID_OK) LoadForeign(); break; }
         }
     }
 
     void OnDeleteByCurrentTab(wxCommandEvent&) {
         int tab = GetCurrentTab();
-        if (tab == 6) return;   // US tab deletion via its own controls
+        if (tab == 5) return;   // US tab deletion via its own controls
         wxListCtrl* list = GetCurrentList();
         if (!list) return;
 
@@ -1053,42 +1058,38 @@ private:
             int id = static_cast<int>(list->GetItemData(i));
             switch (tab) {
                 case 0: db->DeletePatent(id); break;
-                case 1: db->DeleteOA(id); break;
-                case 2: db->DeletePCT(id); break;
-                case 3: db->DeleteSoftware(id); break;
-                case 4: db->DeleteIC(id); break;
-                case 5: db->DeleteForeign(id); break;
+                case 1: db->DeletePCT(id); break;
+                case 2: db->DeleteSoftware(id); break;
+                case 3: db->DeleteIC(id); break;
+                case 4: db->DeleteForeign(id); break;
             }
         }
         switch (tab) {
-            case 0: LoadPatents(); break;
-            case 1: LoadOA(); break;
-            case 2: LoadPCT(); break;
-            case 3: LoadSoftware(); break;
-            case 4: LoadIC(); break;
-            case 5: LoadForeign(); break;
+            case 0: LoadPatents(); LoadOA(); break;
+            case 1: LoadPCT(); break;
+            case 2: LoadSoftware(); break;
+            case 3: LoadIC(); break;
+            case 4: LoadForeign(); break;
         }
     }
 
     void OnSearchByCurrentTab(wxCommandEvent&) {
         switch (GetCurrentTab()) {
-            case 0: LoadPatents(); break;
-            case 1: LoadOA(); break;
-            case 2: LoadPCT(); break;
-            case 3: LoadSoftware(); break;
-            case 4: LoadIC(); break;
-            case 5: LoadForeign(); break;
+            case 0: LoadPatents(); LoadOA(); break;
+            case 1: LoadPCT(); break;
+            case 2: LoadSoftware(); break;
+            case 3: LoadIC(); break;
+            case 4: LoadForeign(); break;
         }
     }
 
     void OnFilterByCurrentTab(wxCommandEvent&) {
         switch (GetCurrentTab()) {
-            case 0: LoadPatents(); break;
-            case 1: LoadOA(); break;
-            case 2: LoadPCT(); break;
-            case 3: LoadSoftware(); break;
-            case 4: LoadIC(); break;
-            case 5: LoadForeign(); break;
+            case 0: LoadPatents(); LoadOA(); break;
+            case 1: LoadPCT(); break;
+            case 2: LoadSoftware(); break;
+            case 3: LoadIC(); break;
+            case 4: LoadForeign(); break;
         }
     }
 
@@ -1160,16 +1161,13 @@ private:
                                    "此页面暂不支持批量操作"), "Info", wxOK);
     }
 
-    // ============== OA Tab ==============
-    void SetupOATab() {
-        wxPanel* panel = new wxPanel(notebook);
-        wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-
+    // ============== OA 区块（集成于国内申请页） ==============
+    void BuildOASection(wxPanel* panel, wxBoxSizer* sizer) {
         wxBoxSizer* tb = new wxBoxSizer(wxHORIZONTAL);
-        tb->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("筛选:")),
-                0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
+        tb->Add(new wxStaticText(panel, wxID_ANY, UTF8_STR("OA 处理（所选案件的审查记录，未选择时显示全部）:")),
+                0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
         oa_filter = new wxComboBox(panel, wxID_ANY, UTF8_STR("全部未完成"),
-                                   wxDefaultPosition, wxSize(150, -1));
+                                   wxDefaultPosition, wxSize(140, -1));
         oa_filter->Append(UTF8_STR("全部未完成"));
         oa_filter->Append(UTF8_STR("5天内到期"));
         oa_filter->Append(UTF8_STR("30天内到期"));
@@ -1184,12 +1182,38 @@ private:
             btn->Bind(wxEVT_BUTTON, fn);
             tb->Add(btn, 0, wxRIGHT, 5);
         };
+        oa_btn(LANG_STR("New OA", "新增OA"), [this](wxCommandEvent&) {
+            // 预填当前唯一选中的案件编号，省一次手填
+            std::string prefill;
+            auto rows = SelectedRows(patent_list);
+            if (rows.size() == 1) {
+                Patent p = db->GetPatentById(
+                    static_cast<int>(patent_list->GetItemData(rows[0])));
+                if (p.id > 0) prefill = p.geke_code;
+            }
+            OAEditDialog dlg(this, db.get(), 0, prefill);
+            if (dlg.ShowModal() == wxID_OK) LoadOA();
+        });
         oa_btn("Mark Complete", [this](wxCommandEvent&) {
             long idx = oa_list->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
             if (idx >= 0) {
                 db->MarkOACompleted(static_cast<int>(oa_list->GetItemData(idx)));
                 LoadOA();
             }
+        });
+        oa_btn(LANG_STR("Delete OA", "删除OA"), [this](wxCommandEvent&) {
+            std::vector<long> selected = SelectedRows(oa_list);
+            if (selected.empty()) {
+                wxMessageBox(UTF8_STR("请先在 OA 列表中选择要删除的记录"), "Info", wxOK);
+                return;
+            }
+            if (wxMessageBox(wxString::Format(UTF8_STR("删除 %d 条 OA 记录？"),
+                                              (int)selected.size()),
+                             LANG_STR("Confirm", "确认"), wxYES_NO) != wxYES)
+                return;
+            db->BeginBatch();
+            for (long i : selected) db->DeleteOA(static_cast<int>(oa_list->GetItemData(i)));
+            LoadOA();
         });
         oa_btn("Show Urgent", [this](wxCommandEvent&) {
             oa_filter->SetValue(UTF8_STR("5天内到期"));
@@ -1254,11 +1278,12 @@ private:
                 wxMessageBox(msg, UTF8_STR("查询最新审查意见"), wxOK | wxICON_INFORMATION);
             }
         });
-        sizer->Add(tb, 0, wxALL, 5);
+        sizer->Add(tb, 0, wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, 5);
 
         oa_list = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLC_REPORT);
         oa_list->AppendColumn(UTF8_STR("编号"), wxLIST_FORMAT_LEFT, 90);
-        oa_list->AppendColumn(UTF8_STR("发明名称"), wxLIST_FORMAT_LEFT, 220);
+        oa_list->AppendColumn(UTF8_STR("申请号"), wxLIST_FORMAT_LEFT, 130);
+        oa_list->AppendColumn(UTF8_STR("发明名称"), wxLIST_FORMAT_LEFT, 200);
         oa_list->AppendColumn(UTF8_STR("OA类型"), wxLIST_FORMAT_LEFT, 110);
         oa_list->AppendColumn(UTF8_STR("发文日"), wxLIST_FORMAT_LEFT, 90);
         oa_list->AppendColumn(UTF8_STR("截止日"), wxLIST_FORMAT_LEFT, 100);
@@ -1284,20 +1309,26 @@ private:
             SortListCtrl(oa_list, col, state.second);
         });
 
-        sizer->Add(oa_list, 1, wxEXPAND | wxALL, 5);
-        panel->SetSizer(sizer);
-        notebook->AddPage(panel, LANG_STR("OA Processing", "OA处理"));
+        sizer->Add(oa_list, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 5);
+    }
+
+    // OA 区块作用域：上方专利列表选中了哪些案件，下方就列哪些案件的 OA
+    void UpdateOAScope() {
+        oa_scope_.clear();
+        long idx = -1;
+        while ((idx = patent_list->GetNextItem(idx, wxLIST_NEXT_ALL,
+                                               wxLIST_STATE_SELECTED)) >= 0) {
+            oa_scope_.insert(static_cast<int>(patent_list->GetItemData(idx)));
+        }
+        LoadOA();
     }
 
     void LoadOA() {
         if (!db || !db->IsOpen()) return;
         oa_list->DeleteAllItems();
 
-        QueryFilter f = CurrentQueryFilter();
-        // OA-type filter doubles as the status filter column on this tab
-        if (!f.status.empty()) f.oa_type = f.status;
-        f.status.clear();
-
+        QueryFilter f;
+        f.keyword = ToStd(common_search->GetValue());   // 共享搜索框：按编号/名称检索
         std::string selected = ToStd(oa_filter->GetValue());
         if (selected == ToStd(UTF8_STR("全部未完成"))) f.deadline_state = "incomplete";
         else if (selected == ToStd(UTF8_STR("5天内到期"))) f.deadline_state = "due5";
@@ -1306,17 +1337,26 @@ private:
 
         auto records = db->GetOARecords(f);
 
-        std::map<std::string, std::string> level_map;
-        for (const auto& p : db->GetPatents()) level_map[p.geke_code] = p.patent_level;
+        // 申请号/等级通过编号关联国内申请表
+        std::map<std::string, std::string> level_map, appno_map;
+        for (const auto& p : db->GetPatents()) {
+            level_map[p.geke_code] = p.patent_level;
+            appno_map[p.geke_code] = p.application_number;
+        }
 
         wxDateTime now = wxDateTime::Now();
         int urgent_count = 0, row = 0;
         for (const auto& oa : records) {
+            // 作用域：上方专利列表有选中时只列所选案件的记录
+            if (!oa_scope_.empty() && !oa_scope_.count(oa.patent_id)) continue;
+
             long idx = oa_list->InsertItem(row, DB_STR(oa.geke_code));
-            oa_list->SetItem(idx, 1, DB_STR(oa.patent_title));
-            oa_list->SetItem(idx, 2, DB_STR(oa.oa_type));
-            oa_list->SetItem(idx, 3, DB_STR(oa.issue_date));
-            oa_list->SetItem(idx, 4, DB_STR(oa.official_deadline));
+            oa_list->SetItem(idx, 1, appno_map.count(oa.geke_code)
+                                      ? DB_STR(appno_map[oa.geke_code]) : "-");
+            oa_list->SetItem(idx, 2, DB_STR(oa.patent_title));
+            oa_list->SetItem(idx, 3, DB_STR(oa.oa_type));
+            oa_list->SetItem(idx, 4, DB_STR(oa.issue_date));
+            oa_list->SetItem(idx, 5, DB_STR(oa.official_deadline));
 
             wxString days_str = "-";
             wxColour bg_color;
@@ -1335,14 +1375,14 @@ private:
                     else days_str = wxString::Format("%d days", days);
                 }
             }
-            oa_list->SetItem(idx, 5, days_str);
-            oa_list->SetItem(idx, 6, DB_STR(oa.handler));
-            oa_list->SetItem(idx, 7, DB_STR(oa.writer));
-            oa_list->SetItem(idx, 8, DB_STR(oa.progress));
+            oa_list->SetItem(idx, 6, days_str);
+            oa_list->SetItem(idx, 7, DB_STR(oa.handler));
+            oa_list->SetItem(idx, 8, DB_STR(oa.writer));
+            oa_list->SetItem(idx, 9, DB_STR(oa.progress));
 
             std::string level = level_map.count(oa.geke_code) ? level_map[oa.geke_code] : "";
-            oa_list->SetItem(idx, 9, DB_STR(level));
-            oa_list->SetItem(idx, 10, oa.source.empty() ? "-" : DB_STR(oa.source));
+            oa_list->SetItem(idx, 10, DB_STR(level));
+            oa_list->SetItem(idx, 11, oa.source.empty() ? "-" : DB_STR(oa.source));
 
             if (level == "core" || level.find("核心") != std::string::npos) {
                 oa_list->SetItemBackgroundColour(idx, wxColour(255, 100, 100));
@@ -1355,9 +1395,14 @@ private:
             row++;
         }
 
+        wxString scope_note = oa_scope_.empty()
+                                  ? UTF8_STR("全部案件")
+                                  : wxString::Format(UTF8_STR("所选 %d 件案件"),
+                                                     (int)oa_scope_.size());
         status_bar->SetStatusText(urgent_count > 0
-            ? wxString::Format("OA Records: %d | URGENT: %d need attention!", row, urgent_count)
-            : wxString::Format("OA Records: %d", row));
+            ? wxString::Format("OA（%s）: %d 条 | 临期/逾期 %d 条需关注",
+                               scope_note, row, urgent_count)
+            : wxString::Format("OA（%s）: %d 条", scope_note, row));
     }
 
     // ============== PCT Tab ==============

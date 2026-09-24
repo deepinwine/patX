@@ -33,7 +33,9 @@ private:
 
 class OAEditDialog : public wxDialog {
 public:
-    OAEditDialog(wxWindow* parent, Database* db, int oa_id = 0);
+    // prefill_geke: 编号预填值（新建时从当前选中的案件带入）
+    OAEditDialog(wxWindow* parent, Database* db, int oa_id = 0,
+                 const std::string& prefill_geke = "");
 private:
     Database* db_;
     int oa_id_;

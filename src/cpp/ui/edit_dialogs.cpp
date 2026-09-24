@@ -245,12 +245,14 @@ void PatentEditDialog::OnSave(wxCommandEvent&) {
 // OA record
 // ===========================================================================
 
-OAEditDialog::OAEditDialog(wxWindow* parent, Database* db, int oa_id)
+OAEditDialog::OAEditDialog(wxWindow* parent, Database* db, int oa_id,
+                           const std::string& prefill_geke)
     : wxDialog(parent, wxID_ANY, oa_id ? "Edit OA Record" : "New OA Record",
                wxDefaultPosition, wxSize(560, 560)),
       db_(db), oa_id_(oa_id) {
     SetupUI();
     if (oa_id) LoadData();
+    else if (!prefill_geke.empty()) geke_code_field_->ChangeValue(prefill_geke);
 }
 
 void OAEditDialog::SetupUI() {
