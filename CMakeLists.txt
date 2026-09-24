@@ -73,6 +73,15 @@ if(WIN32)
     endif()
 endif()
 
+# 静态 wxWidgets 的 wxRegEx 依赖 PCRE2（UTF-16 变体）；vcpkg 静态
+# wx 导出未自动带上，显式补链，否则最终链接 LNK2019 pcre2_*_16
+if(WIN32)
+    find_package(PCRE2 CONFIG QUIET)
+    if(TARGET pcre2-16::pcre2-16)
+        list(APPEND wxWidgets_LIBRARIES pcre2-16::pcre2-16)
+    endif()
+endif()
+
 # OpenXLSX: vcpkg package first, else FetchContent from upstream
 find_package(OpenXLSX CONFIG QUIET)
 if(NOT OpenXLSX_FOUND)
