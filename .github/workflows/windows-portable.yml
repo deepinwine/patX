@@ -19,12 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 vcpkg 并集成
+      - name: 安装 vcpkg（依赖由 vcpkg.json 清单在配置时自动安装）
         run: |
           git clone https://github.com/microsoft/vcpkg.git ${{ github.workspace }}\vcpkg
           & ${{ github.workspace }}\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-          & ${{ github.workspace }}\vcpkg\vcpkg.exe install `
-            wxwidgets sqlite3 openxlsx nlohmann-json
 
       - name: 配置并构建 patx（静态链接）
         run: |
