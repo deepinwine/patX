@@ -1242,6 +1242,7 @@ private:
         std::string latest_date;
         bool latest_completed = false;
         std::string latest_deadline; // 该条发文的答复期限（关联最新发文日）
+        bool latest_is_first = true; // 一通（4个月）还是后续OA（2个月）
     };
 
     // 以编号聚合 OA 状态：绝限日取“最新发文那条 OA”的期限，
@@ -1258,14 +1259,17 @@ private:
                 st.latest_type = ShortOaTypeCn(oa.oa_type);
                 st.latest_completed = oa.is_completed;
                 st.latest_deadline = oa.official_deadline;
+                st.latest_is_first =
+                    webdossier::OaTypeOrdinalCn(oa.oa_type) <= 1;
             }
         }
         for (auto& [code, st] : states) {
             if (st.latest_date.empty()) continue;
-            std::string event = (patent_type.count(code) &&
-                                 patent_type[code] == "utility")
-                                    ? "oa_response_utility"
-                                    : "oa_response_invention";
+            bool utility = patent_type.count(code) &&
+                           patent_type[code] == "utility";
+            std::string event = utility ? "oa_response_utility"
+                                : (st.latest_is_first ? "oa_response_invention"
+                                                      : "oa_response_invention_further");
             std::string suggested = db->CalculateDeadline("CN", event, st.latest_date);
             // 缺期限，或存库期限早于发文日（老数据录入错位）时，
             // 显示层回退到规则计算值；不改动库里的原始数据

@@ -80,6 +80,7 @@ add_library(patx_core STATIC
     src/cpp/core/migration.cpp
     src/cpp/core/log.cpp
     src/cpp/database/schema_migrations.cpp
+    src/cpp/deadline_engine.cpp
     src/cpp/io/excel_io.cpp
     src/cpp/web_dossier_rules.cpp
 )
@@ -152,6 +153,14 @@ if(PATX_BUILD_TESTS)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     add_test(NAME patx_tests COMMAND patx_tests)
+
+    # Deadline calculation base (calendar arithmetic + CN rules JSON)
+    add_executable(patx_deadline_tests tests/test_deadline_engine.cpp)
+    target_link_libraries(patx_deadline_tests PRIVATE patx_core)
+    target_include_directories(patx_deadline_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    add_test(NAME patx_deadline_tests COMMAND patx_deadline_tests)
 
     # Web dossier OA merge rules (standalone main; links the core rules unit)
     add_executable(patx_web_dossier_tests tests/test_web_dossier_rules.cpp)

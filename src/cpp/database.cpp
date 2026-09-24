@@ -6,6 +6,7 @@
 #include "database.hpp"
 #include "undo_manager.hpp"
 #include "patx/schema_migrations.hpp"
+#include "patx/deadline_engine.hpp"
 #include "patx/log.hpp"
 
 #include <sstream>
@@ -51,6 +52,9 @@ Database::Database(const std::string& db_path) : db_path_(db_path) {
     } else if (migration.to_version > migration.from_version) {
         PATX_LOG_INFO("Database schema is now v" + std::to_string(migration.to_version));
     }
+
+    // 期限规则种子补齐：老库只缺行时插入（不覆盖用户改过的现有规则）
+    patx::EnsureDeadlineRulesSeeded(db_);
 }
 
 Database::~Database() {
@@ -1358,19 +1362,28 @@ std::string Database::CalculateDeadline(const std::string& jurisdiction,
     if (base_date.empty()) return "";
     sqlite3_stmt* stmt;
     std::string sql =
-        "SELECT date(?, '+' || base_months || ' months', '+' || base_days || ' days') "
-        "FROM deadline_rules WHERE jurisdiction = ? AND event_type = ? AND enabled = 1 "
+        "SELECT base_months, base_days FROM deadline_rules "
+        "WHERE jurisdiction = ? AND event_type = ? AND enabled = 1 "
         "ORDER BY id LIMIT 1";
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, base_date.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, jurisdiction.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, event_type.c_str(), -1, SQLITE_TRANSIENT);
-        std::string result;
+        sqlite3_bind_text(stmt, 1, jurisdiction.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, event_type.c_str(), -1, SQLITE_TRANSIENT);
+        int months = 0, days = 0;
+        bool found = false;
         if (sqlite3_step(stmt) == SQLITE_ROW) {
-            result = Col(stmt, 0);
+            months = sqlite3_column_int(stmt, 0);
+            days = sqlite3_column_int(stmt, 1);
+            found = true;
         }
         sqlite3_finalize(stmt);
-        return result;
+        if (!found) return "";
+        // 期限计算底座（细则4、5条）：对应日+月末收敛，硬期限节假日顺延。
+        // 替代原先 SQLite date('+N months')——它会把 1-31 + 1月 算成 3-03。
+        std::string result = base_date;
+        if (months > 0) result = patx::DeadlineEngine::AddMonths(result, months);
+        if (days > 0) result = patx::DeadlineEngine::AddDays(result, days);
+        if (result.empty()) return "";
+        return patx::DeadlineEngine::AdjustForHolidays(result);
     }
     return "";
 }

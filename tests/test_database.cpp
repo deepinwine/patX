@@ -509,7 +509,7 @@ TEST(database_deadline_rules) {
 
         // CN invention OA: 4 months from issue date
         std::string d1 = db.CalculateDeadline("CN", "oa_response_invention", "2025-01-31");
-        CHECK_STR_EQ(d1, "2025-05-31");
+        CHECK_STR_EQ(d1, "2025-06-02");   // 5-31 为周六，法定顺延到周一
 
         // US OA: 3 months
         std::string d2 = db.CalculateDeadline("US", "oa_response", "2025-03-10");

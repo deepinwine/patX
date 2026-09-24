@@ -190,11 +190,18 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
     const bool is_oa_family = document.document_type.rfind("OFFICE_ACTION_", 0) == 0;
     // Suggested response deadline from the rule engine - OA family only,
     // same convention as the PDF import (marked calculated, never manual).
+    // 发明分档：一通4个月，后续OA 2个月；实用新型2个月。
     auto suggest_deadline = [&]() -> std::string {
         if (!is_oa_family) return "";
-        std::string event = (patent.patent_type == "utility")
-                                ? "oa_response_utility" : "oa_response_invention";
-        return db.CalculateDeadline("CN", event, document.official_date);
+        if (patent.patent_type == "utility") {
+            return db.CalculateDeadline("CN", "oa_response_utility",
+                                        document.official_date);
+        }
+        bool first = document.document_type == "OFFICE_ACTION_FIRST" ||
+                     document.oa_ordinal == 1;
+        return db.CalculateDeadline(
+            "CN", first ? "oa_response_invention" : "oa_response_invention_further",
+            document.official_date);
     };
     auto existing = db.GetOAsForPatentId(patent.id);
     const OARecord* same_type = nullptr;

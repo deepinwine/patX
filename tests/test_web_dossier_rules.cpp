@@ -407,7 +407,7 @@ static void TestMergeOfficialEvent() {
         auto stored2 = db.GetOAById(undated_id);
         CHECK_STR_EQ(stored2.issue_date, "2026-07-15");
         CHECK_STR_EQ(stored2.sync_flag, "auto_filled_date");
-        CHECK_STR_EQ(stored2.official_deadline, "2026-11-15");   // +4 months
+        CHECK_STR_EQ(stored2.official_deadline, "2026-09-15");   // 二通按后续OA规则2个月
         CHECK_STR_EQ(stored2.deadline_source, "calculated");
 
         // --- a human deadline is never touched by the suggested fill

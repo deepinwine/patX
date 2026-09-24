@@ -294,33 +294,63 @@ void SeedDeadlineRulesIfEmpty(sqlite3* db) {
     }
     sqlite3_finalize(stmt);
     if (!empty) return;
+    EnsureDeadlineRulesSeeded(db);
+}
 
-    struct SeedRule {
-        const char* jurisdiction;
-        const char* event_type;
-        const char* description;
-        int months;
-        int days;
-        bool extendable;
-        int max_ext;
-        const char* notes;
-    };
-    // Suggested deadlines only - the UI marks calculated dates as
-    // "Needs confirmation" and users can override them (deadline_source=manual).
-    const SeedRule seeds[] = {
-        {"CN", "oa_response_invention", "发明OA答复期限（发文日起）", 4, 0, true, 1,
-         "专利法实施细则：发文日起4个月，可请求延长1个月"},
-        {"CN", "oa_response_utility", "实用新型/外观OA答复期限（发文日起）", 2, 0, true, 1,
-         "专利法实施细则：发文日起2个月，可请求延长1个月"},
-        {"PCT", "national_phase_entry", "PCT进入国家阶段期限（优先权日起）", 30, 0, false, 0,
-         "PCT细则：自优先权日起30个月"},
-        {"US", "oa_response", "US OA response statutory period (from mail date)", 3, 0, true, 3,
-         "37 CFR 1.136: 3-month statutory period, extensions of time available (fees apply)"},
-        {"US", "notice_of_allowance_issue_fee", "US Issue Fee due (from NOA mail date)", 3, 0, true, 3,
-         "37 CFR 1.136; extensions available"},
-    };
+namespace {
 
-    for (const auto& r : seeds) {
+struct SeedRuleRow {
+    const char* jurisdiction;
+    const char* event_type;
+    const char* description;
+    int months;
+    int days;
+    bool extendable;
+    int max_ext;
+    const char* notes;
+};
+
+// 计算用种子规则（计算相关字段：管辖地/事件/月/日/可延期）。
+// 完整规则元数据见 data/deadline_rules/CN_deadline_rules.json。
+// Suggested deadlines only - the UI marks calculated dates as
+// "Needs confirmation" and users can override them (deadline_source=manual).
+const SeedRuleRow kDeadlineSeeds[] = {
+    {"CN", "oa_response_invention", "发明第一次审查意见答复期限（发文日起4个月）", 4, 0, true, 2,
+     "审查指南：一通4个月；节假日顺延。可请求延期最长2个月"},
+    {"CN", "oa_response_invention_further", "发明后续审查意见答复期限（发文日起2个月）", 2, 0, true, 2,
+     "审查指南：后续OA通常2个月，以通知书指定期限为准"},
+    {"CN", "oa_response_utility", "实用新型/外观OA答复期限（发文日起）", 2, 0, true, 2,
+     "审查指南：2个月；节假日顺延"},
+    {"CN", "reexamination_request", "复审请求期限（驳回决定送达日起3个月）", 3, 0, false, 0,
+     "专利法41条；错过后2个月内可恢复"},
+    {"CN", "grant_registration", "办理登记手续期限（授权通知日起2个月）", 2, 0, false, 0,
+     "细则：同时缴纳当年年费，逾期视为放弃"},
+    {"PCT", "national_phase_entry", "PCT进入国家阶段期限（优先权日起）", 30, 0, false, 0,
+     "PCT细则：自优先权日起30个月；32个月为绝对迟延界限"},
+    {"US", "oa_response", "US OA response statutory period (from mail date)", 3, 0, true, 3,
+     "37 CFR 1.136: 3-month statutory period, extensions of time available (fees apply)"},
+    {"US", "notice_of_allowance_issue_fee", "US Issue Fee due (from NOA mail date)", 3, 0, true, 3,
+     "37 CFR 1.136; extensions available"},
+};
+
+} // namespace
+
+// 插入缺失的种子行（按 jurisdiction+event_type 判重），不覆盖用户改过的现有规则。
+void EnsureDeadlineRulesSeeded(sqlite3* db) {
+    if (!db) return;
+    for (const auto& r : kDeadlineSeeds) {
+        sqlite3_stmt* stmt = nullptr;
+        std::string exists = std::string(
+            "SELECT COUNT(*) FROM deadline_rules WHERE jurisdiction = '") +
+            r.jurisdiction + "' AND event_type = '" + r.event_type + "'";
+        bool present = false;
+        if (sqlite3_prepare_v2(db, exists.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) > 0) {
+                present = true;
+            }
+            sqlite3_finalize(stmt);
+        }
+        if (present) continue;
         std::string sql = std::string(
             "INSERT INTO deadline_rules (jurisdiction, event_type, rule_description, "
             "base_months, base_days, extendable, max_extension_months, enabled, notes) VALUES ('") +
@@ -329,7 +359,6 @@ void SeedDeadlineRulesIfEmpty(sqlite3* db) {
             (r.extendable ? "1" : "0") + "," + std::to_string(r.max_ext) + ",1,'" + r.notes + "');";
         Exec(db, sql);
     }
-    PATX_LOG_INFO("Seeded deadline rules with default CN/PCT/US entries");
 }
 
 int MigrateNotesPrefixesToColumns(sqlite3* db) {

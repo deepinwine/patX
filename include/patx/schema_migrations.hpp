@@ -41,6 +41,11 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
 // fresh databases and as part of v1->v2.
 void SeedDeadlineRulesIfEmpty(sqlite3* db);
 
+// Inserts any seed deadline rule rows that are missing (keyed by
+// jurisdiction+event_type). Never overwrites rows the user already has, so it
+// is safe to call on every startup as rules evolve.
+void EnsureDeadlineRulesSeeded(sqlite3* db);
+
 // Moves "prefix: value" segments previously concatenated into patents.notes
 // into the structured columns added by v2. Values are only moved when the
 // target column is empty; anything ambiguous stays in notes.
