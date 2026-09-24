@@ -1,0 +1,82 @@
+name: Windows 便携包
+
+# 每次推送到该分支或手动触发时，在 Windows 上构建静态链接的 patx.exe，
+# 组装免安装目录（含便携 Python 侧车与规则集）并产出 zip 工件。
+# 目标设备是"白名单以外不能安装软件"的 Windows：整个包解压即用，
+# 不写注册表、不需要管理员权限；CNIPA 层复用系统自带 Edge/Chrome。
+on:
+  push:
+    branches: [main, glm/cn-prosecution-reminders]
+  workflow_dispatch:
+
+jobs:
+  portable:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 vcpkg 并集成
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git ${{ github.workspace }}\vcpkg
+          & ${{ github.workspace }}\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          & ${{ github.workspace }}\vcpkg\vcpkg.exe install `
+            wxwidgets sqlite3 openxlsx nlohmann-json
+
+      - name: 配置并构建 patx（静态链接）
+        run: |
+          cmake -B build -S . `
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}\vcpkg\scripts\buildsystems\vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static `
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel
+
+      - name: 运行离线测试
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: 下载便携 Python（embeddable，免安装）
+        shell: pwsh
+        run: |
+          $py = "3.11.9"
+          Invoke-WebRequest `
+            "https://www.python.org/ftp/python/$py/python-$py-embed-amd64.zip" `
+            -OutFile python-embed.zip
+          Expand-Archive python-embed.zip -DestinationPath package/python
+
+      - name: 向便携 Python 安装侧车依赖
+        shell: pwsh
+        run: |
+          # embeddable Python 无 pip：用完整 Python 把依赖安装到目标目录
+          python -m pip install --target package/python/Lib/site-packages playwright
+          # 打开 site 支持（修改 ._pth）
+          $pth = Get-ChildItem package/python -Filter "python*._pth" | Select-Object -First 1
+          (Get-Content $pth.FullName) -replace "^#import site$", "import site" |
+            Set-Content $pth.FullName
+
+      - name: 组装便携目录
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package/tools | Out-Null
+          Copy-Item build/Release/patx.exe package/
+          Copy-Item tools/web_dossier package/tools/web_dossier -Recurse
+          Copy-Item data/deadline_rules package/data/deadline_rules -Recurse
+          # playwright 包内 driver 不使用（USPTO/EPO 纯 HTTP；CNIPA 走系统浏览器）
+          if (Test-Path package/python/Lib/site-packages/playwright/driver) {
+            Remove-Item package/python/Lib/site-packages/playwright/driver -Recurse -Force
+          }
+          Copy-Item scripts/README-portable.txt package/README.txt
+
+      - name: 打 zip 工件
+        shell: pwsh
+        run: |
+          Compress-Archive -Path package/* -DestinationPath patX-portable-windows.zip
+          "zip 大小：$((Get-Item patX-portable-windows.zip).Length / 1MB) MB"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: patX-portable-windows
+          path: patX-portable-windows.zip
+          retention-days: 30

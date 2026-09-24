@@ -6,6 +6,7 @@
 #include <wx/process.h>
 #include <wx/utils.h>
 #include <wx/filename.h>
+#include <wx/stdpaths.h>
 #include <wx/log.h>
 
 #include <chrono>
@@ -117,6 +118,26 @@ void Manager::set_check_interval_days(int days) {
 bool Manager::EnsureRunning(std::string& error) {
     if (!sidecar_) sidecar_ = new SidecarProcess();
     std::string python = db_.GetConfig("web_dossier_python");
+    if (python.empty()) {
+        // 便携版布局：<exe 目录>/python/python(.exe) 随包携带、免安装
+        wxString exe = wxStandardPaths::Get().GetExecutablePath();
+        wxFileName fn(exe);
+        std::string dir = fn.GetPath().ToStdString();
+        const char* candidates[] = {
+#ifdef _WIN32
+            "python/python.exe", "python/pythonw.exe",
+#else
+            "python/bin/python3", "python/bin/python", "python/python3",
+#endif
+        };
+        for (const char* c : candidates) {
+            wxFileName full(wxString(dir) + "/" + c);
+            if (wxFileExists(full.GetFullPath())) {
+                python = full.GetFullPath().ToStdString();
+                break;
+            }
+        }
+    }
     if (python.empty()) python = "python3";
     // script_dir_ is the absolute path of tools/web_dossier (resolved by the
     // GUI next to the executable, falling back to the working directory).
