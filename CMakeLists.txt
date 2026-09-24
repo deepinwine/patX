@@ -59,6 +59,17 @@ else()
     set(PATX_JSON_TARGET nlohmann_json_header)
 endif()
 
+# vcpkg 的 openxlsx 静态端口导出 "pugixml::static" 接口名，但其 pugixml
+# 端口定义的目标名是 pugixml::pugixml —— 先桥接，否则链接期 LNK1104
+if(WIN32 AND NOT TARGET pugixml::static)
+    find_package(pugixml CONFIG QUIET)
+    if(TARGET pugixml::pugixml)
+        add_library(pugixml::static INTERFACE IMPORTED)
+        set_target_properties(pugixml::static PROPERTIES
+            INTERFACE_LINK_LIBRARIES pugixml::pugixml)
+    endif()
+endif()
+
 # OpenXLSX: vcpkg package first, else FetchContent from upstream
 find_package(OpenXLSX CONFIG QUIET)
 if(NOT OpenXLSX_FOUND)
