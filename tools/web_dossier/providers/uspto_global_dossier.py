@@ -119,16 +119,20 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
     }
     return Array.from(tokens);
   };
-  const displayedCaseAliases = (value) => {
-    const aliases = new Set();
+  const displayedIdentifiers = (value) => {
+    const applications = new Set();
+    const publications = new Set();
     const upper = (value || "").toUpperCase();
     for (const match of upper.matchAll(/CN\s*(\d{9,14})\.\d\b/g)) {
-      aliases.add(`CN${match[1]}`);
+      applications.add(`CN${match[1]}`);
     }
     for (const match of upper.matchAll(/CN\s*(\d{9,14})[A-Z]\b/g)) {
-      aliases.add(`CN${match[1]}`);
+      publications.add(`CN${match[1]}`);
     }
-    return aliases;
+    return {
+      applications: Array.from(applications),
+      publications: Array.from(publications)
+    };
   };
   const visibleText = visibleTextFor(document.body);
   const lowered = visibleText.toLowerCase();
@@ -140,10 +144,7 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
   ].some((marker) => lowered.includes(marker));
   const targetMatched = Boolean(query.targetToken) &&
     normalize(visibleText).includes(query.targetToken);
-  const caseAliases = new Set([query.targetCore]);
-  if (targetMatched) {
-    for (const alias of displayedCaseAliases(visibleText)) caseAliases.add(alias);
-  }
+  const visibleIdentifiers = displayedIdentifiers(visibleText);
   const candidates = Array.from(document.querySelectorAll("table"))
     .filter(isVisible)
     .map((table) => ({table, rows: rowsFor(table)}))
@@ -176,32 +177,16 @@ _VISIBLE_DOCUMENT_SNAPSHOT_SCRIPT = r"""
   const hashMatched = window.location.hash === query.expectedHash;
   const safeFallback = Boolean(query.freshGeneration) && hashMatched &&
     targetMatched && !loading;
-  const rowTokensFor = (candidate) => candidate.dataRows.map((row) =>
-    caseTokensFor([row]));
-  const mismatch = candidates.some((candidate) =>
-    rowTokensFor(candidate).some((tokens) =>
-      tokens.some((token) => !caseAliases.has(token))));
-  const selected = candidates.find((candidate) => {
-    const rowTokens = rowTokensFor(candidate);
-    return rowTokens.length > 0
-      ? rowTokens.every((tokens) =>
-          tokens.length > 0
-            ? tokens.every((token) => caseAliases.has(token))
-            : safeFallback)
-      : safeFallback;
-  });
-  let state = "PENDING";
-  if (blocked) state = "BLOCKED";
-  else if (mismatch) state = "MISMATCH";
-  else if (pageMarker && selected && selected.dataRows.length > 0) state = "READY";
-  else if (pageMarker && selected && selected.dataRows.length === 0 && emptyState) state = "EMPTY";
+  const state = blocked ? "BLOCKED" : (pageMarker ? "SNAPSHOT" : "PENDING");
   return {
     state,
     targetMatched,
-    rows: selected ? selected.rows : [],
-    tableCaseTokens: selected ? selected.tableCaseTokens :
-      candidates.flatMap((candidate) => candidate.tableCaseTokens),
-    caseAliases: Array.from(caseAliases),
+    candidates: candidates.map((candidate) => ({
+      rows: candidate.rows,
+      tableCaseTokens: candidate.tableCaseTokens
+    })),
+    visibleApplications: visibleIdentifiers.applications,
+    visiblePublications: visibleIdentifiers.publications,
     safeFallback,
     hashMatched,
     loading,
@@ -405,20 +390,66 @@ def _case_tokens_from_text(text: str) -> set[str]:
     return {f"CN{match}" for match in _CASE_CORE_PATTERN.findall(text or "")}
 
 
-def _displayed_case_aliases(text: str) -> set[str]:
-    aliases = {
+def _displayed_identifiers(text: str) -> tuple[set[str], set[str]]:
+    applications = {
         f"CN{digits}"
         for digits in re.findall(
             r"\bCN\s*(\d{9,14})\.\d\b", text or "", re.IGNORECASE
         )
     }
-    aliases.update(
+    publications = {
         f"CN{digits}"
         for digits in re.findall(
             r"\bCN\s*(\d{9,14})[A-Z]\b", text or "", re.IGNORECASE
         )
-    )
-    return aliases
+    }
+    return applications, publications
+
+
+def _normalize_identifier_cores(values) -> Optional[set[str]]:
+    if not isinstance(values, (list, tuple, set)):
+        return None
+    cores = set()
+    for value in values:
+        if not isinstance(value, str):
+            return None
+        core = _case_core(value)
+        if not core:
+            return None
+        cores.add(core)
+    return cores
+
+
+def _validated_case_aliases(
+    target_number: str,
+    visible_applications,
+    visible_publications,
+) -> Optional[set[str]]:
+    identifier = normalize_cn_identifier(target_number)
+    target_core = _case_core(target_number)
+    applications = _normalize_identifier_cores(visible_applications)
+    publications = _normalize_identifier_cores(visible_publications)
+    if applications is None or publications is None:
+        return None
+    if len(applications) > 1 or len(publications) > 1:
+        return None
+    if not target_core:
+        aliases = applications | publications
+        return aliases or None
+
+    aliases = {target_core}
+    if identifier.number_type == "application":
+        if applications and applications != {target_core}:
+            return None
+        if applications == {target_core}:
+            aliases.update(publications)
+        return aliases
+    if identifier.number_type == "publication":
+        if publications != {target_core}:
+            return None
+        aliases.update(applications)
+        return aliases
+    return None
 
 
 def _table_case_tokens(rows: list[list[dict]]) -> set[str]:
@@ -431,6 +462,50 @@ def _table_case_tokens(rows: list[list[dict]]) -> set[str]:
                 )
             )
     return tokens
+
+
+def _rank_candidate_rows(
+    candidates: list[list[list[dict]]],
+    case_aliases: set[str],
+    *,
+    fallback_verified: bool,
+    empty_verified: bool,
+) -> tuple[Optional[list[list[dict]]], Optional[str]]:
+    strong_candidates = []
+    unidentified_candidates = []
+    for rows in candidates:
+        header_index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if _header_indexes(row) is not None
+            ),
+            None,
+        )
+        if header_index is None:
+            return None, "Global Dossier 可见文档表头不完整"
+        data_rows = rows[header_index + 1 :]
+        row_tokens = [_table_case_tokens([row]) for row in data_rows]
+        if any(tokens - case_aliases for tokens in row_tokens):
+            return None, "Global Dossier 文档表格混入其他案件记录"
+        if any(row_tokens):
+            if any(not tokens for tokens in row_tokens) and not fallback_verified:
+                return None, "Global Dossier 文档行无法绑定到目标案件"
+            strong_candidates.append(rows)
+        else:
+            unidentified_candidates.append((rows, bool(data_rows)))
+
+    if len(strong_candidates) > 1:
+        return None, "Global Dossier 存在多个强绑定文档表格"
+    if strong_candidates:
+        return strong_candidates[0], None
+    if len(unidentified_candidates) > 1:
+        return None, "Global Dossier 存在多个无标识文档表格"
+    if unidentified_candidates:
+        rows, has_data = unidentified_candidates[0]
+        if (has_data and fallback_verified) or (not has_data and empty_verified):
+            return rows, None
+    return None, None
 
 
 def _is_official_direction(raw: str) -> bool:
@@ -451,39 +526,42 @@ def inspect_uspto_document_state(html: str, target_number: str) -> str:
     visible_text = re.sub(r"\s+", " ", " ".join(parser.page_text)).strip()
     if any(marker in visible_text.lower() for marker in _BLOCK_MARKERS):
         return "BLOCKED"
-    target_core = _case_core(target_number)
-    page_aliases = _displayed_case_aliases(visible_text)
     target_matched = (
         not target_number
         or _identifier_token(target_number) in _identifier_token(visible_text)
     )
-    case_aliases = set(page_aliases) if target_matched else set()
-    if target_core:
-        case_aliases.add(target_core)
+    visible_applications, visible_publications = _displayed_identifiers(
+        visible_text
+    )
+    case_aliases = _validated_case_aliases(
+        target_number,
+        visible_applications if target_matched else [],
+        visible_publications if target_matched else [],
+    )
+    if case_aliases is None:
+        return "PENDING"
     semantic_tables = []
     for table in parser.tables:
         if any(_header_indexes(row) is not None for row in table["rows"]):
             semantic_tables.append(table["rows"])
-    for rows in semantic_tables:
-        header_index = next(
-            index
-            for index, row in enumerate(rows)
-            if _header_indexes(row) is not None
-        )
-        data_rows = rows[header_index + 1 :]
-        if data_rows:
-            row_tokens = [_table_case_tokens([row]) for row in data_rows]
-            if any(tokens - case_aliases for tokens in row_tokens):
-                return "PENDING"
-            if all(row_tokens):
-                return "READY"
-    for empty_state in parser.empty_state_texts:
-        if re.search(
+    explicit_empty = any(
+        re.search(
             r"\bno (?:documents|records)\b",
             empty_state["text"],
             re.IGNORECASE,
-        ) and semantic_tables and target_matched:
-            return "READY"
+        )
+        for empty_state in parser.empty_state_texts
+    )
+    selected_rows, error = _rank_candidate_rows(
+        semantic_tables,
+        case_aliases,
+        fallback_verified=False,
+        empty_verified=target_matched and explicit_empty,
+    )
+    if error is not None:
+        return "PENDING"
+    if selected_rows is not None:
+        return "READY"
     return "PENDING"
 
 
@@ -653,14 +731,21 @@ def parse_uspto_document_list(
         _normal_number(application_number, "application")
         or _normal_number(publication_number, "publication")
     )
-    target_core = _case_core(target_number)
     target_matched = (
         not target_number
         or _identifier_token(target_number) in _identifier_token(page_text)
     )
-    case_aliases = {target_core} if target_core else set()
-    if target_matched:
-        case_aliases.update(_displayed_case_aliases(page_text))
+    visible_applications, visible_publications = _displayed_identifiers(page_text)
+    case_aliases = _validated_case_aliases(
+        target_number,
+        visible_applications if target_matched else [],
+        visible_publications if target_matched else [],
+    )
+    if case_aliases is None:
+        return SyncOutcome(
+            code=ResultCode.PAGE_STRUCTURE_CHANGED,
+            message="Global Dossier 页面案件标识与查询路由不一致",
+        )
     semantic_tables = [
         table["rows"]
         for table in parser.tables
@@ -671,14 +756,6 @@ def parse_uspto_document_list(
             code=ResultCode.PAGE_STRUCTURE_CHANGED,
             message="未找到与目标案件匹配的 Global Dossier 文档表格",
         )
-    for rows in semantic_tables:
-        if _table_case_tokens(rows) - case_aliases:
-            return SyncOutcome(
-                code=ResultCode.PAGE_STRUCTURE_CHANGED,
-                message="Global Dossier 文档表格案件号与查询目标不一致",
-            )
-    selected_rows = semantic_tables[0]
-
     explicit_empty = any(
         re.search(
             r"\bno (?:documents|records)\b",
@@ -687,20 +764,16 @@ def parse_uspto_document_list(
         )
         for empty_state in parser.empty_state_texts
     )
-    header_index = next(
-        index
-        for index, row in enumerate(selected_rows)
-        if _header_indexes(row) is not None
+    selected_rows, rank_error = _rank_candidate_rows(
+        semantic_tables,
+        case_aliases,
+        fallback_verified=False,
+        empty_verified=target_matched and explicit_empty,
     )
-    if (
-        explicit_empty
-        and not selected_rows[header_index + 1 :]
-        and target_number
-        and not target_matched
-    ):
+    if rank_error is not None or selected_rows is None:
         return SyncOutcome(
             code=ResultCode.PAGE_STRUCTURE_CHANGED,
-            message="Global Dossier 无文档状态无法绑定到目标案件",
+            message=rank_error or "未找到与目标案件匹配的文档表格",
         )
     return parse_uspto_document_rows(
         selected_rows,
@@ -747,43 +820,34 @@ def _snapshot_rows(snapshot: dict) -> Optional[list[list[dict]]]:
     return rows
 
 
-def _snapshot_is_bound(
-    snapshot: dict, rows: list[list[dict]], target_core: str
-) -> bool:
-    visible_text = snapshot.get("visibleText", "")
-    if not isinstance(visible_text, str) or "global dossier" not in visible_text.lower():
-        return False
-    case_aliases = {target_core} if target_core else set()
-    if snapshot.get("targetMatched") is True:
-        case_aliases.update(_displayed_case_aliases(visible_text))
-    safe_fallback = all((
+def _snapshot_candidates(snapshot: dict) -> Optional[list[list[list[dict]]]]:
+    raw_candidates = snapshot.get("candidates")
+    if not isinstance(raw_candidates, list):
+        return None
+    candidates = []
+    for candidate in raw_candidates:
+        if not isinstance(candidate, dict):
+            return None
+        rows = _snapshot_rows(candidate)
+        if rows is None:
+            return None
+        candidates.append(rows)
+    return candidates
+
+
+def _snapshot_fallback_verified(snapshot: dict) -> bool:
+    return all((
         snapshot.get("freshGeneration") is True,
         snapshot.get("hashMatched") is True,
         snapshot.get("targetMatched") is True,
         snapshot.get("loading") is False,
         snapshot.get("safeFallback") is True,
     ))
-    header_index = next(
-        (
-            index
-            for index, row in enumerate(rows)
-            if _header_indexes(row) is not None
-        ),
-        None,
-    )
-    if header_index is None:
-        return False
-    data_rows = rows[header_index + 1 :]
-    if not data_rows:
-        return safe_fallback
-    for row in data_rows:
-        row_tokens = _table_case_tokens([row])
-        if row_tokens:
-            if not row_tokens.issubset(case_aliases):
-                return False
-        elif not safe_fallback:
-            return False
-    return True
+
+
+def _snapshot_page_marker(snapshot: dict) -> bool:
+    visible_text = snapshot.get("visibleText", "")
+    return isinstance(visible_text, str) and "global dossier" in visible_text.lower()
 
 
 class UsptoGlobalDossierProvider(DossierProvider):
@@ -902,6 +966,7 @@ class UsptoGlobalDossierProvider(DossierProvider):
     def _wait_for_document_state(
         self,
         page,
+        target_number: str,
         target_token: str,
         target_core: str,
         expected_hash: str,
@@ -945,16 +1010,52 @@ class UsptoGlobalDossierProvider(DossierProvider):
                     code=ResultCode.PAGE_STRUCTURE_CHANGED,
                     message="Global Dossier 文档表格混入其他案件记录",
                 ), None
-            if state in ("READY", "EMPTY"):
-                rows = _snapshot_rows(snapshot)
-                if rows is not None:
-                    if not any(_header_indexes(row) is not None for row in rows):
+            if _snapshot_page_marker(snapshot):
+                candidates = _snapshot_candidates(snapshot)
+                if candidates is None:
+                    return SyncOutcome(
+                        code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                        message="Global Dossier 候选表快照协议异常",
+                    ), None
+                explicit_empty = bool(re.search(
+                    r"\bno (?:documents|records)\b",
+                    str(snapshot.get("emptyText", "")),
+                    re.IGNORECASE,
+                ))
+                if candidates == [] and not explicit_empty:
+                    candidates = None
+                    case_aliases = set()
+                else:
+                    case_aliases = _validated_case_aliases(
+                        target_number,
+                        snapshot.get("visibleApplications"),
+                        snapshot.get("visiblePublications"),
+                    )
+                if candidates is not None and case_aliases is None:
+                    return SyncOutcome(
+                        code=ResultCode.PAGE_STRUCTURE_CHANGED,
+                        message="Global Dossier 页面案件标识或候选表协议异常",
+                    ), None
+                if candidates is not None:
+                    fallback_verified = _snapshot_fallback_verified(snapshot)
+                    selected_rows, rank_error = _rank_candidate_rows(
+                        candidates,
+                        case_aliases,
+                        fallback_verified=fallback_verified,
+                        empty_verified=fallback_verified and explicit_empty,
+                    )
+                    if rank_error is not None:
                         return SyncOutcome(
                             code=ResultCode.PAGE_STRUCTURE_CHANGED,
-                            message="Global Dossier 可见文档表头不完整",
+                            message=rank_error,
                         ), None
-                    if _snapshot_is_bound(snapshot, rows, target_core):
-                        return self._http_error_outcome(), snapshot
+                    if selected_rows is not None:
+                        selected_snapshot = dict(snapshot)
+                        selected_snapshot["selectedRows"] = selected_rows
+                        selected_snapshot["caseAliases"] = sorted(case_aliases)
+                        selected_snapshot["bindingVerified"] = fallback_verified
+                        selected_snapshot["explicitEmpty"] = explicit_empty
+                        return self._http_error_outcome(), selected_snapshot
             if time.monotonic() >= deadline:
                 return SyncOutcome(
                     code=ResultCode.PAGE_STRUCTURE_CHANGED,
@@ -1003,6 +1104,7 @@ class UsptoGlobalDossierProvider(DossierProvider):
 
         wait_outcome, snapshot = self._wait_for_document_state(
             page,
+            target_number,
             target_token,
             target_core,
             expected_hash,
@@ -1010,26 +1112,15 @@ class UsptoGlobalDossierProvider(DossierProvider):
         )
         if wait_outcome is not None:
             return wait_outcome
-        rows = _snapshot_rows(snapshot or {})
+        rows = _snapshot_rows({"rows": (snapshot or {}).get("selectedRows")})
         if rows is None:
             return SyncOutcome(
                 code=ResultCode.PAGE_STRUCTURE_CHANGED,
                 message="Global Dossier 可见文档快照不完整",
             )
         snapshot_data = snapshot or {}
-        visible_text = snapshot_data.get("visibleText", "")
-        case_aliases = {target_core} if target_core else set()
-        if snapshot_data.get("targetMatched") is True and isinstance(
-            visible_text, str
-        ):
-            case_aliases.update(_displayed_case_aliases(visible_text))
-        binding_verified = all((
-            snapshot_data.get("freshGeneration") is True,
-            snapshot_data.get("hashMatched") is True,
-            snapshot_data.get("targetMatched") is True,
-            snapshot_data.get("loading") is False,
-            snapshot_data.get("safeFallback") is True,
-        ))
+        case_aliases = set(snapshot_data.get("caseAliases", []))
+        binding_verified = snapshot_data.get("bindingVerified") is True
         header_index = next(
             (
                 index
@@ -1040,12 +1131,7 @@ class UsptoGlobalDossierProvider(DossierProvider):
         )
         data_rows = rows[header_index + 1 :] if header_index is not None else rows
         explicit_empty = bool(
-            not data_rows
-            and re.search(
-                r"\bno (?:documents|records)\b",
-                str(snapshot_data.get("emptyText", "")),
-                re.IGNORECASE,
-            )
+            not data_rows and snapshot_data.get("explicitEmpty") is True
         )
         return parse_uspto_document_rows(
             rows,

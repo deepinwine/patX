@@ -121,11 +121,17 @@ def _ready_snapshot(
     hash_matched=True,
     loading=False,
     case_aliases=None,
+    visible_applications=None,
+    visible_publications=None,
+    candidates=None,
 ):
+    rows = [_header_cells(), *document_rows]
+    snapshot_candidates = candidates or [{"rows": rows}]
     return {
         "state": "READY",
         "targetMatched": target_matched,
-        "rows": [_header_cells(), *document_rows],
+        "rows": rows,
+        "candidates": snapshot_candidates,
         "tableCaseTokens": list(
             table_case_tokens
             if table_case_tokens is not None
@@ -136,6 +142,12 @@ def _ready_snapshot(
             if case_aliases is not None
             else [target_core]
         ),
+        "visibleApplications": list(
+            visible_applications
+            if visible_applications is not None
+            else [target_core]
+        ),
+        "visiblePublications": list(visible_publications or []),
         "safeFallback": safe_fallback,
         "hashMatched": hash_matched,
         "loading": loading,
@@ -151,8 +163,11 @@ def _pending_snapshot(target_core="CN202510469601"):
         "state": "PENDING",
         "targetMatched": True,
         "rows": [],
+        "candidates": [],
         "tableCaseTokens": [],
         "caseAliases": [target_core],
+        "visibleApplications": [target_core],
+        "visiblePublications": [],
         "safeFallback": False,
         "hashMatched": True,
         "loading": True,
@@ -544,11 +559,14 @@ class _FakePage:
                 return self._snapshots.pop(0)
             return self._snapshots[0]
         target_core = argument["targetCore"]
+        publication_route = "/publication/" in argument["expectedHash"]
         return _ready_snapshot(
             _document_cells(
                 remote_id=f"{target_core}-210401-original"
             ),
             target_core=target_core,
+            visible_applications=[] if publication_route else [target_core],
+            visible_publications=[target_core] if publication_route else [],
         )
 
     def wait_for_timeout(self, milliseconds):
@@ -599,6 +617,9 @@ def test_provider_prefers_normalized_application_url():
     expression, argument = manager.page.evaluated[0]
     assert "getComputedStyle" in expression
     assert "outerHTML" not in expression
+    assert "visibleApplications" in expression
+    assert "visiblePublications" in expression
+    assert "candidates" in expression
     assert argument["targetToken"] == "CN2025104696015"
     assert argument["targetCore"] == "CN202510469601"
     assert argument["expectedHash"] == "#/result/application/CN/202510469601.5/0"
@@ -787,11 +808,13 @@ def test_provider_snapshot_rejects_hidden_required_date_cell_without_shifting():
 
 def test_provider_header_only_table_with_visible_empty_state_is_empty():
     snapshot = _ready_snapshot(safe_fallback=True)
+    header_only_rows = [_header_cells()]
     snapshot.update({
         "state": "READY",
-        "rows": [_header_cells()],
+        "rows": header_only_rows,
         "emptyText": "No documents found",
     })
+    snapshot["candidates"][0]["rows"] = header_only_rows
     manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
     provider = UsptoGlobalDossierProvider(browser_manager=manager)
 
@@ -799,7 +822,6 @@ def test_provider_header_only_table_with_visible_empty_state_is_empty():
 
     assert outcome.code == ResultCode.OK
     assert outcome.documents == []
-    assert "rowTokens.length > 0" in manager.page.evaluated[0][0]
 
 
 def test_provider_visible_rows_take_priority_over_stale_empty_state():
@@ -876,6 +898,8 @@ def test_publication_query_accepts_application_document_ids_via_page_aliases():
         table_case_tokens=["CN202510469601"],
         case_aliases=["CN120134203", "CN202510469601"],
         target_matched=True,
+        visible_applications=["CN202510469601"],
+        visible_publications=["CN120134203"],
     )
     snapshot["visibleText"] = (
         "Global Dossier Application CN202510469601.5 "
@@ -894,6 +918,120 @@ def test_publication_query_accepts_application_document_ids_via_page_aliases():
     assert [document.remote_document_id for document in outcome.documents] == [
         "CN-202510469601-current"
     ]
+
+
+def test_application_route_rejects_visible_other_application_and_table():
+    cancel = threading.Event()
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-old"),
+        target_core="CN202510469602",
+        table_case_tokens=["CN202510469601"],
+        target_matched=False,
+        visible_applications=["CN202510469601"],
+        visible_publications=[],
+    )
+    snapshot["visibleText"] = "Global Dossier Application CN202510469601.5"
+    manager = _FakeBrowserManager(
+        "unused raw html",
+        snapshots=[snapshot],
+        on_poll=cancel.set,
+    )
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469602.3", "", cancel)
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
+
+
+def test_provider_prefers_strong_bound_candidate_after_unidentified_table():
+    generic_rows = [
+        _header_cells(),
+        _document_cells(remote_id="generic-document"),
+    ]
+    strong_rows = [
+        _header_cells(),
+        _document_cells(remote_id="CN-202510469601-strong"),
+    ]
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="generic-document"),
+        safe_fallback=True,
+        candidates=[{"rows": generic_rows}, {"rows": strong_rows}],
+    )
+    manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.OK
+    assert [document.remote_document_id for document in outcome.documents] == [
+        "CN-202510469601-strong"
+    ]
+
+
+def test_provider_rejects_multiple_unidentified_semantic_candidates():
+    first_rows = [_header_cells(), _document_cells(remote_id="generic-one")]
+    second_rows = [_header_cells(), _document_cells(remote_id="generic-two")]
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="generic-one"),
+        safe_fallback=True,
+        candidates=[{"rows": first_rows}, {"rows": second_rows}],
+    )
+    manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
+
+
+def test_application_route_rejects_multiple_visible_publication_cores():
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="CN-202510469601-current"),
+        visible_applications=["CN202510469601"],
+        visible_publications=["CN120134203", "CN120999999"],
+    )
+    manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("CN202510469601.5", "", None)
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+
+
+def test_publication_route_rejects_multiple_visible_application_cores():
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="CN-120134203-current"),
+        target_core="CN120134203",
+        target_matched=True,
+        visible_applications=["CN202510469601", "CN202510469602"],
+        visible_publications=["CN120134203"],
+    )
+    snapshot["visibleText"] = "Global Dossier Publication CN120134203A"
+    manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("", "CN120134203A", None)
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+
+
+def test_publication_route_requires_visible_matching_publication_identifier():
+    snapshot = _ready_snapshot(
+        _document_cells(remote_id="CN-120134203-current"),
+        target_core="CN120134203",
+        target_matched=False,
+        visible_applications=[],
+        visible_publications=[],
+    )
+    snapshot["visibleText"] = "Global Dossier"
+    manager = _FakeBrowserManager("unused raw html", snapshots=[snapshot])
+    provider = UsptoGlobalDossierProvider(browser_manager=manager)
+
+    outcome = provider.list_documents("", "CN120134203A", None)
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
 
 
 def test_target_heading_with_other_case_table_never_becomes_ready():
@@ -923,9 +1061,8 @@ def test_target_heading_with_other_case_table_never_becomes_ready():
 
     outcome = provider.list_documents("CN202510469602.3", "", cancel)
 
-    assert outcome.code == ResultCode.TEMPORARY_ERROR
-    assert "取消" in outcome.message
-    assert manager.page.poll_waits
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
 
 
 def test_unidentified_table_requires_explicit_safe_fallback_conditions():
