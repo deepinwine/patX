@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import base64
+import math
 import threading
 import time
 
@@ -12,6 +13,7 @@ from web_dossier import models, service
 from web_dossier.models import DocumentType, ProsecutionDocument, ResultCode
 from web_dossier.providers.base import ProtocolSerializationError, SyncOutcome
 from web_dossier.providers.chain import ProviderAttempt
+from web_dossier.providers import cnipa as cnipa_module
 
 
 APPLICATION_NUMBER = "CN202510469601.5"
@@ -337,7 +339,8 @@ def test_real_chain_gates_cnipa_without_opening_browser_until_explicit_login(mon
             self.state_checks = 0
             managers[provider] = self
 
-        def cpquery_session_state(self):
+        def cpquery_session_state(self, expected_origin, **_kwargs):
+            assert expected_origin == cnipa_module.BASE_URL
             self.state_checks += 1
             return "NOT_INITIALIZED"
 
@@ -801,13 +804,16 @@ def _jwt(exp=None):
 
 
 class _TokenPage:
-    def __init__(self, token, url="https://cpquery.cnipa.gov.cn/"):
+    def __init__(self, token, url="https://cpquery.cponline.cnipa.gov.cn/"):
         self.url = url
         self._token = token
 
     def evaluate(self, expression):
         assert expression == "localStorage.getItem('ACCESS_TOKEN')"
         return self._token
+
+    def content(self):
+        return ""
 
 
 @pytest.mark.parametrize(
@@ -819,6 +825,9 @@ class _TokenPage:
         (_jwt(), "SESSION_EXPIRED"),
         ("not-a-jwt", "SESSION_EXPIRED"),
         ("eyJhbGciOiJub25lIn0.W10.signature", "SESSION_EXPIRED"),
+        (_jwt(exp=math.nan), "SESSION_EXPIRED"),
+        (_jwt(exp=math.inf), "SESSION_EXPIRED"),
+        (_jwt(exp="10000"), "SESSION_EXPIRED"),
     ],
 )
 def test_cpquery_session_state_validates_token_without_launch(token, expected):
@@ -829,19 +838,114 @@ def test_cpquery_session_state_validates_token_without_launch(token, expected):
     manager._page = _TokenPage(token)
     manager.launch = lambda: pytest.fail("session state must not launch")
 
-    assert manager.cpquery_session_state(now=2_000, min_ttl_seconds=60) == expected
+    assert manager.cpquery_session_state(
+        cnipa_module.BASE_URL,
+        now=2_000,
+        min_ttl_seconds=60,
+    ) == expected
 
 
 def test_cpquery_session_state_distinguishes_uninitialized_and_wrong_origin():
     from web_dossier.browser.manager import BrowserManager
 
     manager = BrowserManager("cnipa")
-    assert manager.cpquery_session_state(now=time.time()) == "NOT_INITIALIZED"
+    assert manager.cpquery_session_state(
+        cnipa_module.BASE_URL, now=time.time()
+    ) == "NOT_INITIALIZED"
     manager._context = object()
     manager._page = _TokenPage(
         _jwt(exp=time.time() + 3_600), url="https://example.com/"
     )
-    assert manager.cpquery_session_state(now=time.time()) == "AUTH_REQUIRED"
+    assert manager.cpquery_session_state(
+        cnipa_module.BASE_URL, now=time.time()
+    ) == "AUTH_REQUIRED"
+
+
+def test_cpquery_session_state_accepts_exact_override_origin():
+    from web_dossier.browser.manager import BrowserManager
+
+    override = "https://cnipa.internal.example:8443/custom/base"
+    manager = BrowserManager("cnipa")
+    manager._context = object()
+    manager._page = _TokenPage(
+        _jwt(exp=10_000),
+        url="https://cnipa.internal.example:8443/dossier",
+    )
+
+    assert manager.cpquery_session_state(
+        override, now=2_000
+    ) == "AUTHENTICATED"
+    manager._page = _TokenPage(
+        _jwt(exp=10_000),
+        url="https://cnipa.internal.example.evil:8443/dossier",
+    )
+    assert manager.cpquery_session_state(
+        override, now=2_000
+    ) == "AUTH_REQUIRED"
+
+
+def test_cnipa_existing_session_state_passes_configured_base_url(monkeypatch):
+    override = "https://override-cnipa.example:9443/root"
+    seen = []
+
+    class FakeManager:
+        def cpquery_session_state(self, expected_origin, **_kwargs):
+            seen.append(expected_origin)
+            return "AUTHENTICATED"
+
+    monkeypatch.setattr(cnipa_module, "BASE_URL", override)
+    provider = cnipa_module.CNIPAWebProvider(browser_manager=FakeManager())
+
+    assert provider.existing_session_state() == "AUTHENTICATED"
+    assert seen == [override]
+
+
+def test_cnipa_ensure_login_rejects_expired_token_callback(monkeypatch):
+    now = time.time()
+    expired_page = _TokenPage(_jwt(exp=now - 1))
+
+    class FakeManager:
+        def cpquery_session_state(self, expected_origin, *, page=None, **_kwargs):
+            assert expected_origin == cnipa_module.BASE_URL
+            assert page is expired_page
+            return "SESSION_EXPIRED"
+
+        def ensure_login(self, _url, is_logged_in_fn, _cancel, **_kwargs):
+            return (
+                ResultCode.OK
+                if is_logged_in_fn(expired_page)
+                else ResultCode.AUTH_REQUIRED
+            )
+
+    provider = cnipa_module.CNIPAWebProvider(browser_manager=FakeManager())
+
+    assert provider.ensure_login(threading.Event()) == ResultCode.AUTH_REQUIRED
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("AUTHENTICATED", ResultCode.OK),
+        ("SESSION_EXPIRED", ResultCode.SESSION_EXPIRED),
+        ("AUTH_REQUIRED", ResultCode.AUTH_REQUIRED),
+    ],
+)
+def test_cnipa_check_auth_uses_shared_session_validation(state, expected):
+    page = _TokenPage(_jwt(exp=time.time() + 3_600))
+
+    class FakeManager:
+        def open_page(self, url, _cancel):
+            assert url == cnipa_module.BASE_URL
+            return page
+
+        def cpquery_session_state(self, expected_origin, *, page=None, **_kwargs):
+            assert expected_origin == cnipa_module.BASE_URL
+            assert page is not None
+            return state
+
+    provider = cnipa_module.CNIPAWebProvider(browser_manager=FakeManager())
+
+    assert provider.check_auth(threading.Event()) == expected
 
 
 def test_background_cnipa_gate_preserves_session_state_and_normalizes_success():

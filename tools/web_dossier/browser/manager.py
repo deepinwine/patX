@@ -14,6 +14,7 @@ import base64
 import binascii
 import datetime as _dt
 import json
+import math
 import os
 import sys
 import time
@@ -119,19 +120,30 @@ class BrowserManager:
             return False
 
     def cpquery_session_state(
-        self, *, now: Optional[float] = None, min_ttl_seconds: float = 60
+        self,
+        expected_origin: str,
+        *,
+        page=None,
+        now: Optional[float] = None,
+        min_ttl_seconds: float = 60,
     ) -> str:
         """Inspect an existing CNIPA session without launching or navigating."""
-        if self._context is None or self._page is None:
-            return "NOT_INITIALIZED"
+        target_page = page
+        if target_page is None:
+            if self._context is None or self._page is None:
+                return "NOT_INITIALIZED"
+            target_page = self._page
         try:
-            parsed = urllib.parse.urlparse(str(self._page.url or ""))
+            expected = urllib.parse.urlparse(str(expected_origin or ""))
+            parsed = urllib.parse.urlparse(str(target_page.url or ""))
+            if expected.scheme not in ("http", "https") or not expected.netloc:
+                return "SESSION_EXPIRED"
             if (
-                parsed.scheme not in ("http", "https")
-                or parsed.hostname != "cpquery.cnipa.gov.cn"
+                parsed.scheme.lower() != expected.scheme.lower()
+                or parsed.netloc.lower() != expected.netloc.lower()
             ):
                 return "AUTH_REQUIRED"
-            token = self._page.evaluate("localStorage.getItem('ACCESS_TOKEN')")
+            token = target_page.evaluate("localStorage.getItem('ACCESS_TOKEN')")
         except Exception:
             return "SESSION_EXPIRED"
         if not isinstance(token, str) or not token:
@@ -151,10 +163,13 @@ class BrowserManager:
             if (
                 isinstance(expires_at, bool)
                 or not isinstance(expires_at, (int, float))
+                or not math.isfinite(float(expires_at))
             ):
-                raise ValueError("JWT has no numeric exp")
+                raise ValueError("JWT has no finite numeric exp")
             reference_time = time.time() if now is None else float(now)
             ttl_margin = max(0.0, float(min_ttl_seconds))
+            if not math.isfinite(reference_time) or not math.isfinite(ttl_margin):
+                raise ValueError("invalid expiry comparison clock")
         except (
             ValueError,
             TypeError,

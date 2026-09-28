@@ -434,7 +434,7 @@ class CNIPAWebProvider(DossierProvider):
         if not callable(state_reader):
             return "NOT_INITIALIZED"
         try:
-            state = state_reader()
+            state = state_reader(BASE_URL)
         except Exception:  # noqa: BLE001 - read-only manager boundary
             return "SESSION_EXPIRED"
         if state in {
@@ -465,19 +465,14 @@ class CNIPAWebProvider(DossierProvider):
             page.wait_for_timeout(3000)   # let the SPA settle / redirect
         except Exception:
             pass
-        if self._manager.has_cpquery_token():
+        state = self._manager.cpquery_session_state(BASE_URL, page=page)
+        if state == "AUTHENTICATED":
             return ResultCode.OK
-        try:
-            for p in self._manager._context.pages:
-                if not p.is_closed() and "cpquery" in p.url:
-                    if p.evaluate("localStorage.getItem('ACCESS_TOKEN')"):
-                        self._manager._page = p
-                        return ResultCode.OK
-        except Exception:
-            pass
         html = page.content()
         if looks_blocked(html):
             return ResultCode.RATE_LIMITED
+        if state == "SESSION_EXPIRED":
+            return ResultCode.SESSION_EXPIRED
         return ResultCode.AUTH_REQUIRED
 
     def ensure_login(self, cancel) -> ResultCode:
@@ -486,14 +481,9 @@ class CNIPAWebProvider(DossierProvider):
             return ResultCode.OK   # fixture mode is always "logged in"
 
         def _done(page) -> bool:
-            # Only the cpquery origin holding an ACCESS_TOKEN counts as
-            # logged in - the identity platform's post-scan page does not.
-            try:
-                if "cpquery" not in page.url:
-                    return False
-                return bool(page.evaluate("localStorage.getItem('ACCESS_TOKEN')"))
-            except Exception:
-                return False
+            return self._manager.cpquery_session_state(
+                BASE_URL, page=page
+            ) == "AUTHENTICATED"
 
         return self._manager.ensure_login(
             BASE_URL, _done, cancel,
