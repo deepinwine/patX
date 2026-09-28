@@ -22,9 +22,11 @@
 #include <wx/regex.h>
 #include <wx/timer.h>
 #include <memory>
+#include <chrono>
 #include <fstream>
 #include <set>
 #include <filesystem>
+#include <stdexcept>
 
 #include "patx/version.h"
 #include "patx/log.hpp"
@@ -161,8 +163,11 @@ public:
     PatXFrame()
         : wxFrame(nullptr, wxID_ANY, wxString("patX - Patent Manager v") + PATX_VERSION,
                   wxDefaultPosition, wxSize(1600, 900)) {
-        db = std::make_unique<Database>("patents.db");
         patx::InitLogging("patx.log");
+        db = std::make_unique<Database>("patents.db");
+        if (!db->IsOpen()) {
+            throw std::runtime_error("Database initialization failed: " + db->LastError());
+        }
         PATX_LOG_INFO(std::string("patX v") + PATX_VERSION + " started (schema v" +
                       std::to_string(db->SchemaVersion()) + ")");
         dossier_controller = std::make_unique<WebDossierController>(
@@ -2247,7 +2252,24 @@ private:
         }
     }
 
+    void AdoptDatabase(std::unique_ptr<Database> candidate) {
+        auto controller = std::make_unique<WebDossierController>(
+            this, *candidate, [this](const std::string& code) { ShowPatentByCode(code); });
+        controller->set_on_finished([this]() { LoadOA(); });
+
+        // Destroy the old controller before its Database reference, then move
+        // both validated replacements into the frame.
+        dossier_controller = std::move(controller);
+        db = std::move(candidate);
+        LoadAllData();
+    }
+
     void OnSwitchDatabase(wxCommandEvent&) {
+        if (dossier_controller && dossier_controller->busy()) {
+            wxMessageBox(UTF8_STR("审查信息同步进行中，完成后才能切换数据库。"),
+                         UTF8_STR("切换数据库"), wxOK | wxICON_INFORMATION);
+            return;
+        }
         wxFileDialog dlg(this, "Open Database", "", "",
                          "Database (*.db)|*.db|All files (*.*)|*.*",
                          wxFD_OPEN | wxFD_FILE_MUST_EXIST);
@@ -2255,11 +2277,13 @@ private:
             if (wxMessageBox(wxString::Format("Switch to database:\n%s", dlg.GetPath()),
                              "Switch Database", wxYES_NO | wxICON_QUESTION) == wxYES) {
                 std::string new_path = ToStd(dlg.GetPath());
-                dossier_controller.reset();
-                db = std::make_unique<Database>(new_path);
-                dossier_controller = std::make_unique<WebDossierController>(
-                    this, *db, [this](const std::string& code) { ShowPatentByCode(code); });
-                LoadAllData();
+                auto candidate = std::make_unique<Database>(new_path);
+                if (!candidate->IsOpen()) {
+                    wxMessageBox("Cannot open database: " + candidate->LastError(),
+                                 "Switch Database", wxOK | wxICON_ERROR);
+                    return;
+                }
+                AdoptDatabase(std::move(candidate));
                 status_bar->SetStatusText(wxString("patX v") + PATX_VERSION + " | Database: " +
                                           wxFileName(dlg.GetPath()).GetFullName());
             }
@@ -2267,20 +2291,129 @@ private:
     }
 
     void OnRestore(wxCommandEvent&) {
+        if (dossier_controller && dossier_controller->busy()) {
+            wxMessageBox(UTF8_STR("审查信息同步进行中，完成后才能恢复数据库。"),
+                         UTF8_STR("恢复备份"), wxOK | wxICON_INFORMATION);
+            return;
+        }
+        const std::string current_path = db ? db->path() : "";
+        if (current_path.empty() || current_path == ":memory:") {
+            wxMessageBox(UTF8_STR("当前数据库不是文件，无法用备份原位替换。"),
+                         UTF8_STR("恢复备份"), wxOK | wxICON_ERROR);
+            return;
+        }
         wxFileDialog dlg(this, "Restore Backup", "", "",
                          "Database files (*.db)|*.db", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dlg.ShowModal() == wxID_OK) {
             if (wxMessageBox("This will replace the current database. Continue?",
                              "Warning", wxYES_NO | wxICON_WARNING) == wxYES) {
                 std::string src = ToStd(dlg.GetPath());
+                const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+                const auto work_dir = std::filesystem::temp_directory_path() /
+                    ("patx_restore_" + std::to_string(static_cast<long long>(nonce)));
+                const auto staged_path = work_dir / "candidate.db";
+                const auto rollback_path = work_dir / "rollback.db";
+                const std::filesystem::path target_path = current_path;
+                std::error_code file_error;
+                const bool same_as_current =
+                    std::filesystem::equivalent(src, target_path, file_error);
+                if (!file_error && same_as_current) {
+                    wxMessageBox(UTF8_STR("不能选择当前正在使用的数据库作为恢复源。"),
+                                 UTF8_STR("恢复备份"), wxOK | wxICON_ERROR);
+                    return;
+                }
+                file_error.clear();
+                const auto source_size = std::filesystem::file_size(src, file_error);
+                if (file_error || source_size == 0) {
+                    wxMessageBox(UTF8_STR("所选备份为空或无法读取。"),
+                                 UTF8_STR("恢复备份"), wxOK | wxICON_ERROR);
+                    return;
+                }
+                file_error.clear();
+                std::filesystem::create_directories(work_dir, file_error);
+                if (file_error) {
+                    wxMessageBox("Restore preparation failed: " + file_error.message(),
+                                 "Restore Backup", wxOK | wxICON_ERROR);
+                    std::filesystem::remove_all(work_dir, file_error);
+                    return;
+                }
+                std::string snapshot_error;
+                if (!Database::CopyConsistentSnapshot(src, staged_path.string(),
+                                                      &snapshot_error)) {
+                    wxMessageBox("Restore preparation failed: " + snapshot_error,
+                                 "Restore Backup", wxOK | wxICON_ERROR);
+                    std::filesystem::remove_all(work_dir, file_error);
+                    return;
+                }
+
+                // Validate and migrate a disposable copy first. The active
+                // Database/controller remain untouched if this fails.
+                {
+                    auto staged = std::make_unique<Database>(staged_path.string());
+                    if (!staged->IsOpen()) {
+                        wxMessageBox("Backup is not a usable database: " + staged->LastError(),
+                                     "Restore Backup", wxOK | wxICON_ERROR);
+                        std::filesystem::remove_all(work_dir, file_error);
+                        return;
+                    }
+                }
+
+                if (!db->BackupTo(rollback_path.string())) {
+                    wxMessageBox("Cannot create restore rollback: " + db->LastError(),
+                                 "Restore Backup", wxOK | wxICON_ERROR);
+                    std::filesystem::remove_all(work_dir, file_error);
+                    return;
+                }
+
                 dossier_controller.reset();
                 db.reset();
-                std::filesystem::copy_file(src, "patents.db",
-                                           std::filesystem::copy_options::overwrite_existing);
-                db = std::make_unique<Database>("patents.db");
-                dossier_controller = std::make_unique<WebDossierController>(
-                    this, *db, [this](const std::string& code) { ShowPatentByCode(code); });
-                LoadAllData();
+                file_error.clear();
+                std::filesystem::copy_file(staged_path, target_path,
+                    std::filesystem::copy_options::overwrite_existing, file_error);
+                auto restored = file_error
+                    ? std::unique_ptr<Database>()
+                    : std::make_unique<Database>(target_path.string());
+                if (restored && restored->IsOpen()) {
+                    AdoptDatabase(std::move(restored));
+                    std::filesystem::remove_all(work_dir, file_error);
+                    status_bar->SetStatusText(wxString("patX v") + PATX_VERSION +
+                        " | Database: " + wxFileName(wxString::FromUTF8(current_path)).GetFullName());
+                    return;
+                }
+
+                const std::string restore_error = file_error
+                    ? file_error.message()
+                    : (restored ? restored->LastError() : "unknown restore error");
+                restored.reset();
+                file_error.clear();
+                std::filesystem::copy_file(rollback_path, target_path,
+                    std::filesystem::copy_options::overwrite_existing, file_error);
+                auto fallback = file_error
+                    ? std::make_unique<Database>(rollback_path.string())
+                    : std::make_unique<Database>(target_path.string());
+                if (fallback->IsOpen()) {
+                    const bool fallback_uses_temp = file_error.value() != 0;
+                    AdoptDatabase(std::move(fallback));
+                    wxMessageBox("Restore failed; the previous database was retained.\n" +
+                                     restore_error +
+                                     (fallback_uses_temp
+                                          ? "\nRecovery copy: " + rollback_path.string()
+                                          : ""),
+                                 "Restore Backup", wxOK | wxICON_ERROR);
+                    if (fallback_uses_temp) {
+                        status_bar->SetStatusText(
+                            wxString("patX v") + PATX_VERSION + " | Database: " +
+                            wxString::FromUTF8(rollback_path.string().c_str()));
+                    } else {
+                        std::filesystem::remove_all(work_dir, file_error);
+                    }
+                    return;
+                }
+
+                wxMessageBox("Restore failed and the previous database could not be reopened.\n" +
+                                 restore_error,
+                             "Restore Backup", wxOK | wxICON_ERROR);
+                Close(true);
             }
         }
     }
@@ -2385,9 +2518,23 @@ private:
 class PatXApp : public wxApp {
 public:
     bool OnInit() override {
-        PatXFrame* frame = new PatXFrame();
-        frame->Show(true);
-        return true;
+        try {
+            PatXFrame* frame = new PatXFrame();
+            frame->Show(true);
+            return true;
+        } catch (const std::exception& error) {
+            PATX_LOG_ERROR(std::string("patX startup aborted: ") + error.what());
+            wxMessageBox(wxString::FromUTF8(error.what()),
+                         UTF8_STR("patX 启动失败"), wxOK | wxICON_ERROR);
+            patx::ShutDownLogging();
+            return false;
+        } catch (...) {
+            PATX_LOG_ERROR("patX startup aborted by an unknown initialization error");
+            wxMessageBox(UTF8_STR("数据库或界面初始化失败，patX 已中止启动。"),
+                         UTF8_STR("patX 启动失败"), wxOK | wxICON_ERROR);
+            patx::ShutDownLogging();
+            return false;
+        }
     }
 };
 

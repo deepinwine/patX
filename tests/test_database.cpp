@@ -5,6 +5,7 @@
 #include "database.hpp"
 #include "patx/schema_migrations.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <sqlite3.h>
@@ -39,6 +40,59 @@ Patent MakePatent() {
     return p;
 }
 
+bool SqliteHasColumn(sqlite3* db, const char* table, const char* column) {
+    sqlite3_stmt* stmt = nullptr;
+    std::string sql = std::string("PRAGMA table_info(") + table + ")";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    bool found = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        if (name && std::string(name) == column) {
+            found = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool SqliteHasIndex(sqlite3* db, const char* index) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql = "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, index, -1, SQLITE_TRANSIENT);
+    bool found = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+std::vector<std::string> SqliteIndexColumns(sqlite3* db, const char* index) {
+    std::vector<std::string> columns;
+    sqlite3_stmt* stmt = nullptr;
+    std::string sql = std::string("PRAGMA index_info(") + index + ")";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return columns;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        if (name) columns.emplace_back(name);
+    }
+    sqlite3_finalize(stmt);
+    return columns;
+}
+
+std::string SqliteIndexSql(sqlite3* db, const char* index) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* query = "SELECT sql FROM sqlite_master WHERE type='index' AND name=?";
+    if (sqlite3_prepare_v2(db, query, -1, &stmt, nullptr) != SQLITE_OK) return "";
+    sqlite3_bind_text(stmt, 1, index, -1, SQLITE_TRANSIENT);
+    std::string sql;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (text) sql = text;
+    }
+    sqlite3_finalize(stmt);
+    return sql;
+}
+
 } // namespace
 
 TEST(database_fresh_schema_is_versioned) {
@@ -48,6 +102,389 @@ TEST(database_fresh_schema_is_versioned) {
         Database db(path);
         CHECK(db.IsOpen());
         CHECK_EQ(db.SchemaVersion(), patx::kSchemaVersionCurrent);
+        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "raw_title"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "document_code"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "document_version"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "event_key"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "source_trace"));
+        CHECK(SqliteHasIndex(db.GetHandle(), "idx_prosecution_docs_event_key"));
+        CHECK(SqliteHasIndex(db.GetHandle(), "idx_patents_next_dossier_check"));
+
+        auto repeated = patx::RunSchemaMigrations(db.GetHandle(), path);
+        CHECK(repeated.ok);
+        CHECK_EQ(repeated.from_version, 5);
+        CHECK_EQ(repeated.to_version, 5);
+    }
+    const std::string backup_prefix = std::filesystem::path(path).filename().string() +
+                                      ".pre_migration_";
+    for (const auto& entry : std::filesystem::directory_iterator(
+             std::filesystem::path(path).parent_path())) {
+        if (entry.path().filename().string().find(backup_prefix) == 0) {
+            std::filesystem::remove(entry.path());
+        }
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(database_v4_to_v5_migration_is_incremental_and_preserves_data) {
+    std::string path = TempDbPath("v4_to_v5");
+    std::filesystem::remove(path);
+    {
+        sqlite3* raw = nullptr;
+        CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+        const char* sql =
+            "CREATE TABLE schema_info (version INTEGER NOT NULL);"
+            "INSERT INTO schema_info VALUES (4);"
+            "CREATE TABLE prosecution_documents ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT, patent_id INTEGER, jurisdiction TEXT,"
+            " application_number TEXT, publication_number TEXT, source TEXT,"
+            " remote_document_id TEXT, document_type TEXT, document_title TEXT,"
+            " official_date TEXT, direction TEXT, source_url TEXT, download_url TEXT,"
+            " download_available INTEGER DEFAULT 0, fingerprint TEXT,"
+            " first_seen_at INTEGER, last_seen_at INTEGER, local_path TEXT,"
+            " downloaded_at INTEGER DEFAULT 0, raw_metadata TEXT,"
+            " UNIQUE(source, application_number, fingerprint));"
+            "INSERT INTO prosecution_documents (patent_id, application_number, source,"
+            " remote_document_id, document_title, official_date, fingerprint, raw_metadata)"
+            " VALUES (7, '202410000001.1', 'cnipa', 'remote-old', '旧通知书',"
+            " '2025-01-02', 'fp-old', '{\"old\":true}');";
+        char* error = nullptr;
+        CHECK_EQ(sqlite3_exec(raw, sql, nullptr, nullptr, &error), SQLITE_OK);
+        if (error) sqlite3_free(error);
+        sqlite3_close(raw);
+    }
+
+    {
+        Database db(path);
+        CHECK(db.IsOpen());
+        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "raw_title"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "document_code"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "document_version"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "event_key"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "source_trace"));
+        CHECK(SqliteHasIndex(db.GetHandle(), "idx_prosecution_docs_event_key"));
+        CHECK(SqliteHasIndex(db.GetHandle(), "idx_patents_next_dossier_check"));
+
+        ProsecutionDocumentRecord migrated = db.GetProsecutionDocumentById(1);
+        CHECK_EQ(migrated.id, 1);
+        CHECK_EQ(migrated.patent_id, 7);
+        CHECK_STR_EQ(migrated.source, "cnipa");
+        CHECK_STR_EQ(migrated.remote_document_id, "remote-old");
+        CHECK_STR_EQ(migrated.document_title, "旧通知书");
+        CHECK_STR_EQ(migrated.raw_metadata, "{\"old\":true}");
+        CHECK_STR_EQ(migrated.raw_title, "");
+        CHECK_STR_EQ(migrated.document_code, "");
+        CHECK_STR_EQ(migrated.document_version, "ORIGINAL");
+        CHECK_STR_EQ(migrated.event_key, "");
+        CHECK_STR_EQ(migrated.source_trace, "");
+
+        auto repeated = patx::RunSchemaMigrations(db.GetHandle(), path);
+        CHECK(repeated.ok);
+        CHECK_EQ(repeated.from_version, 5);
+        CHECK_EQ(repeated.to_version, 5);
+    }
+    const std::string v4_backup_prefix = std::filesystem::path(path).filename().string() +
+                                         ".pre_migration_";
+    for (const auto& entry : std::filesystem::directory_iterator(
+             std::filesystem::path(path).parent_path())) {
+        if (entry.path().filename().string().find(v4_backup_prefix) == 0) {
+            std::filesystem::remove(entry.path());
+        }
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(database_constructor_backs_up_v4_before_initializing_current_tables) {
+    std::string path = TempDbPath("constructor_v4_backup_order");
+    std::filesystem::remove(path);
+    const std::string backup_prefix = std::filesystem::path(path).filename().string() +
+                                      ".pre_migration_";
+    for (const auto& entry : std::filesystem::directory_iterator(
+             std::filesystem::path(path).parent_path())) {
+        if (entry.path().filename().string().find(backup_prefix) == 0) {
+            std::filesystem::remove(entry.path());
+        }
+    }
+    sqlite3* raw = nullptr;
+    CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    const char* schema =
+        "CREATE TABLE schema_info(version INTEGER NOT NULL);"
+        "INSERT INTO schema_info VALUES(4);"
+        "CREATE TABLE patents(id INTEGER PRIMARY KEY, next_dossier_check_at INTEGER DEFAULT 0);"
+        "CREATE TABLE prosecution_documents("
+        "id INTEGER PRIMARY KEY, patent_id INTEGER, source TEXT, application_number TEXT,"
+        "fingerprint TEXT, UNIQUE(source,application_number,fingerprint));"
+        "CREATE TABLE v4_marker(value TEXT);"
+        "INSERT INTO v4_marker VALUES('before-init');";
+    CHECK_EQ(sqlite3_exec(raw, schema, nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(raw);
+
+    {
+        Database db(path);
+        CHECK(db.IsOpen());
+        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK(SqliteHasIndex(db.GetHandle(), "idx_patents_next_dossier_check"));
+    }
+
+    std::filesystem::path backup_path;
+    for (const auto& entry : std::filesystem::directory_iterator(
+             std::filesystem::path(path).parent_path())) {
+        if (entry.path().filename().string().find(backup_prefix) == 0) {
+            backup_path = entry.path();
+            break;
+        }
+    }
+    CHECK(!backup_path.empty());
+    sqlite3* backup = nullptr;
+    CHECK_EQ(sqlite3_open_v2(backup_path.string().c_str(), &backup,
+                             SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    CHECK_EQ(patx::ReadSchemaVersion(backup), 4);
+    CHECK(!SqliteHasColumn(backup, "prosecution_documents", "event_key"));
+    sqlite3_stmt* added_table = nullptr;
+    CHECK_EQ(sqlite3_prepare_v2(backup,
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='oa_records'",
+        -1, &added_table, nullptr), SQLITE_OK);
+    CHECK(sqlite3_step(added_table) == SQLITE_DONE);
+    sqlite3_finalize(added_table);
+    sqlite3_close(backup);
+
+    if (!backup_path.empty()) std::filesystem::remove(backup_path);
+    std::filesystem::remove(path);
+}
+
+TEST(database_constructor_backup_failure_does_not_initialize_or_migrate_v4) {
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() /
+        ("patx_constructor_backup_failure_" + std::to_string(
+            static_cast<long long>(std::chrono::steady_clock::now().time_since_epoch().count())));
+    std::filesystem::create_directories(directory);
+    const std::string path = (directory / "patents.db").string();
+    sqlite3* raw = nullptr;
+    CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    const char* schema =
+        "CREATE TABLE schema_info(version INTEGER NOT NULL);"
+        "INSERT INTO schema_info VALUES(4);"
+        "CREATE TABLE patents(id INTEGER PRIMARY KEY, next_dossier_check_at INTEGER DEFAULT 0);"
+        "CREATE TABLE prosecution_documents("
+        "id INTEGER PRIMARY KEY, patent_id INTEGER, source TEXT, application_number TEXT,"
+        "fingerprint TEXT, UNIQUE(source,application_number,fingerprint));";
+    CHECK_EQ(sqlite3_exec(raw, schema, nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(raw);
+
+    auto read_file = [](const std::string& file_path) {
+        std::ifstream stream(file_path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream),
+                           std::istreambuf_iterator<char>());
+    };
+    const std::string bytes_before = read_file(path);
+
+    std::filesystem::permissions(directory,
+        std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec,
+        std::filesystem::perm_options::replace);
+    {
+        Database db(path);
+        CHECK(!db.IsOpen());
+        CHECK(db.GetHandle() == nullptr);
+        CHECK_EQ(db.SchemaVersion(), 4);
+        CHECK(!db.LastError().empty());
+    }
+    CHECK_STR_EQ(read_file(path), bytes_before);
+    std::filesystem::permissions(directory, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace);
+
+    sqlite3* unchanged = nullptr;
+    CHECK_EQ(sqlite3_open_v2(path.c_str(), &unchanged, SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    CHECK_EQ(patx::ReadSchemaVersion(unchanged), 4);
+    CHECK(!SqliteHasColumn(unchanged, "prosecution_documents", "event_key"));
+    sqlite3_stmt* added_table = nullptr;
+    CHECK_EQ(sqlite3_prepare_v2(unchanged,
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='oa_records'",
+        -1, &added_table, nullptr), SQLITE_OK);
+    CHECK(sqlite3_step(added_table) == SQLITE_DONE);
+    sqlite3_finalize(added_table);
+    sqlite3_close(unchanged);
+    std::filesystem::remove_all(directory);
+}
+
+TEST(database_reopens_v5_and_repairs_missing_due_index) {
+    std::string path = TempDbPath("v5_due_index_repair");
+    std::filesystem::remove(path);
+    {
+        Database db(path);
+        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK(db.Execute("DROP INDEX idx_patents_next_dossier_check"));
+        CHECK(!SqliteHasIndex(db.GetHandle(), "idx_patents_next_dossier_check"));
+    }
+    {
+        Database reopened(path);
+        CHECK_EQ(reopened.SchemaVersion(), 5);
+        CHECK(SqliteHasIndex(reopened.GetHandle(), "idx_patents_next_dossier_check"));
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(database_constructor_migration_failure_closes_database) {
+    std::string path = TempDbPath("constructor_migration_failure");
+    std::filesystem::remove(path);
+    sqlite3* raw = nullptr;
+    CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    const char* broken_v4 =
+        "CREATE TABLE schema_info(version INTEGER NOT NULL);"
+        "INSERT INTO schema_info VALUES(4);"
+        "CREATE TABLE patents(id INTEGER PRIMARY KEY, next_dossier_check_at INTEGER DEFAULT 0);";
+    CHECK_EQ(sqlite3_exec(raw, broken_v4, nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(raw);
+
+    {
+        Database db(path);
+        CHECK(!db.IsOpen());
+        CHECK(db.GetHandle() == nullptr);
+        CHECK_EQ(db.SchemaVersion(), 4);
+        CHECK(!db.LastError().empty());
+    }
+
+    sqlite3* unchanged = nullptr;
+    CHECK_EQ(sqlite3_open_v2(path.c_str(), &unchanged, SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    CHECK_EQ(patx::ReadSchemaVersion(unchanged), 4);
+    CHECK(!SqliteHasColumn(unchanged, "patents", "publication_number"));
+    sqlite3_close(unchanged);
+    const std::string backup_prefix = std::filesystem::path(path).filename().string() +
+                                      ".pre_migration_";
+    for (const auto& entry : std::filesystem::directory_iterator(
+             std::filesystem::path(path).parent_path())) {
+        if (entry.path().filename().string().find(backup_prefix) == 0) {
+            std::filesystem::remove(entry.path());
+        }
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(database_v4_file_migration_creates_one_openable_pre_migration_backup) {
+    std::string path = TempDbPath("v4_backup");
+    std::filesystem::remove(path);
+    sqlite3* raw = nullptr;
+    CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    const char* schema =
+        "CREATE TABLE schema_info(version INTEGER NOT NULL);"
+        "INSERT INTO schema_info VALUES(4);"
+        "CREATE TABLE patents(id INTEGER PRIMARY KEY, next_dossier_check_at INTEGER DEFAULT 0);"
+        "CREATE TABLE prosecution_documents("
+        "id INTEGER PRIMARY KEY, patent_id INTEGER, source TEXT, application_number TEXT,"
+        "fingerprint TEXT, document_title TEXT, local_path TEXT, downloaded_at INTEGER DEFAULT 0,"
+        "raw_metadata TEXT, UNIQUE(source,application_number,fingerprint));"
+        "INSERT INTO prosecution_documents VALUES(1,9,'cnipa','202410000001.1','fp-backup',"
+        "'迁移前数据','',0,'old');";
+    CHECK_EQ(sqlite3_exec(raw, schema, nullptr, nullptr, nullptr), SQLITE_OK);
+
+    auto migration = patx::RunSchemaMigrations(raw, path);
+    CHECK(migration.ok);
+    CHECK(migration.performed_backup);
+    CHECK(!migration.backup_path.empty());
+    CHECK(std::filesystem::exists(migration.backup_path));
+    CHECK_EQ(patx::ReadSchemaVersion(raw), 5);
+    CHECK(!SqliteHasIndex(raw, "idx_patents_next_dossier_check"));
+    int backup_count = 0;
+    const std::string backup_prefix = std::filesystem::path(path).filename().string() +
+                                      ".pre_migration_";
+    for (const auto& entry : std::filesystem::directory_iterator(
+             std::filesystem::path(path).parent_path())) {
+        if (entry.path().filename().string().find(backup_prefix) == 0) ++backup_count;
+    }
+    CHECK_EQ(backup_count, 1);
+
+    sqlite3* backup = nullptr;
+    CHECK_EQ(sqlite3_open_v2(migration.backup_path.c_str(), &backup, SQLITE_OPEN_READONLY, nullptr),
+             SQLITE_OK);
+    CHECK_EQ(patx::ReadSchemaVersion(backup), 4);
+    CHECK(!SqliteHasColumn(backup, "prosecution_documents", "event_key"));
+    sqlite3_stmt* row = nullptr;
+    CHECK_EQ(sqlite3_prepare_v2(backup,
+        "SELECT document_title,raw_metadata FROM prosecution_documents WHERE id=1",
+        -1, &row, nullptr), SQLITE_OK);
+    CHECK_EQ(sqlite3_step(row), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(row, 0)), "迁移前数据");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(row, 1)), "old");
+    sqlite3_finalize(row);
+    sqlite3_close(backup);
+    sqlite3_close(raw);
+    std::filesystem::remove(migration.backup_path);
+    std::filesystem::remove(path);
+}
+
+TEST(database_backup_failure_aborts_v4_migration_without_changes) {
+    std::string path = TempDbPath("v4_backup_failure");
+    std::filesystem::remove(path);
+    sqlite3* raw = nullptr;
+    CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    const char* schema =
+        "CREATE TABLE schema_info(version INTEGER NOT NULL);"
+        "INSERT INTO schema_info VALUES(4);"
+        "CREATE TABLE prosecution_documents("
+        "id INTEGER PRIMARY KEY, patent_id INTEGER, source TEXT, application_number TEXT,"
+        "fingerprint TEXT, raw_metadata TEXT, UNIQUE(source,application_number,fingerprint));"
+        "INSERT INTO prosecution_documents VALUES(1,9,'cnipa','202410000001.1','fp','keep');";
+    CHECK_EQ(sqlite3_exec(raw, schema, nullptr, nullptr, nullptr), SQLITE_OK);
+
+    std::string impossible = path + "/missing-parent/patents.db";
+    auto migration = patx::RunSchemaMigrations(raw, impossible);
+    CHECK(!migration.ok);
+    CHECK(!migration.performed_backup);
+    CHECK_EQ(patx::ReadSchemaVersion(raw), 4);
+    CHECK(!SqliteHasColumn(raw, "prosecution_documents", "event_key"));
+    sqlite3_stmt* row = nullptr;
+    CHECK_EQ(sqlite3_prepare_v2(raw,
+        "SELECT raw_metadata FROM prosecution_documents WHERE id=1", -1, &row, nullptr),
+        SQLITE_OK);
+    CHECK_EQ(sqlite3_step(row), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(row, 0)), "keep");
+    sqlite3_finalize(row);
+    sqlite3_close(raw);
+    std::filesystem::remove(path);
+}
+
+TEST(database_v5_event_key_index_is_partial_and_scoped_by_patent) {
+    std::string path = TempDbPath("event_index");
+    std::filesystem::remove(path);
+    {
+        Database db(path);
+        auto columns = SqliteIndexColumns(db.GetHandle(), "idx_prosecution_docs_event_key");
+        CHECK_EQ(columns.size(), 2u);
+        CHECK_STR_EQ(columns[0], "patent_id");
+        CHECK_STR_EQ(columns[1], "event_key");
+        std::string index_sql = SqliteIndexSql(db.GetHandle(), "idx_prosecution_docs_event_key");
+        CHECK(index_sql.find("WHERE event_key <> ''") != std::string::npos);
+
+        const char* first =
+            "INSERT INTO prosecution_documents "
+            "(patent_id,event_key,source,application_number,fingerprint) "
+            "VALUES (41,'event-1','source-a','app-a','fp-a')";
+        CHECK_EQ(sqlite3_exec(db.GetHandle(), first, nullptr, nullptr, nullptr), SQLITE_OK);
+
+        char* error = nullptr;
+        const char* duplicate =
+            "INSERT INTO prosecution_documents "
+            "(patent_id,event_key,source,application_number,fingerprint) "
+            "VALUES (41,'event-1','source-b','app-b','fp-b')";
+        CHECK_EQ(sqlite3_exec(db.GetHandle(), duplicate, nullptr, nullptr, &error),
+                 SQLITE_CONSTRAINT);
+        sqlite3_free(error);
+
+        const char* other_patent =
+            "INSERT INTO prosecution_documents "
+            "(patent_id,event_key,source,application_number,fingerprint) "
+            "VALUES (42,'event-1','source-c','app-c','fp-c')";
+        CHECK_EQ(sqlite3_exec(db.GetHandle(), other_patent, nullptr, nullptr, nullptr), SQLITE_OK);
+
+        const char* empty_keys =
+            "INSERT INTO prosecution_documents "
+            "(patent_id,event_key,source,application_number,fingerprint) "
+            "VALUES (41,'','source-d','app-d','fp-d');"
+            "INSERT INTO prosecution_documents "
+            "(patent_id,event_key,source,application_number,fingerprint) "
+            "VALUES (41,'','source-e','app-e','fp-e');";
+        CHECK_EQ(sqlite3_exec(db.GetHandle(), empty_keys, nullptr, nullptr, nullptr), SQLITE_OK);
     }
     std::filesystem::remove(path);
 }
@@ -86,6 +523,65 @@ TEST(database_patent_full_field_roundtrip) {
         CHECK(after.updated_at >= out.updated_at);
     }
     std::filesystem::remove(path);
+}
+
+TEST(database_failed_peer_destruction_preserves_primary_undo_manager) {
+    Database primary(":memory:");
+    CHECK(primary.IsOpen());
+    Patent patent = MakePatent();
+    patent.geke_code = "UNDO-PRIMARY";
+    int id = primary.InsertPatent(patent);
+    CHECK(id > 0);
+    CHECK(primary.CanUndo());
+
+    const std::filesystem::path missing_parent =
+        std::filesystem::temp_directory_path() /
+        ("patx_missing_peer_" + std::to_string(
+            static_cast<long long>(std::chrono::steady_clock::now().time_since_epoch().count())));
+    std::filesystem::remove_all(missing_parent);
+    {
+        Database failed_peer((missing_parent / "patents.db").string());
+        CHECK(!failed_peer.IsOpen());
+        CHECK(!failed_peer.LastError().empty());
+    }
+
+    CHECK(primary.CanUndo());
+    CHECK(primary.GetPatentById(id).id == id);
+}
+
+TEST(database_successful_peers_keep_instance_owned_undo_in_both_destruction_orders) {
+    {
+        Database primary(":memory:");
+        Patent primary_patent = MakePatent();
+        primary_patent.geke_code = "UNDO-NESTED-PRIMARY";
+        int primary_id = primary.InsertPatent(primary_patent);
+        CHECK(primary_id > 0 && primary.CanUndo());
+        {
+            Database secondary(":memory:");
+            Patent secondary_patent = MakePatent();
+            secondary_patent.geke_code = "UNDO-NESTED-SECONDARY";
+            int secondary_id = secondary.InsertPatent(secondary_patent);
+            CHECK(secondary_id > 0 && secondary.CanUndo());
+        }
+        CHECK(primary.CanUndo());
+        CHECK(primary.GetPatentById(primary_id).id == primary_id);
+    }
+
+    auto first = std::make_unique<Database>(":memory:");
+    auto second = std::make_unique<Database>(":memory:");
+    Patent first_patent = MakePatent();
+    first_patent.geke_code = "UNDO-FIRST-DESTROYED";
+    Patent second_patent = MakePatent();
+    second_patent.geke_code = "UNDO-SECOND-SURVIVES";
+    int first_id = first->InsertPatent(first_patent);
+    int second_id = second->InsertPatent(second_patent);
+    CHECK(first_id > 0 && second_id > 0);
+    CHECK(first->CanUndo());
+    CHECK(second->CanUndo());
+
+    first.reset();
+    CHECK(second->CanUndo());
+    CHECK(second->GetPatentById(second_id).id == second_id);
 }
 
 TEST(database_legacy_migration_preserves_data) {
@@ -164,6 +660,78 @@ TEST(database_legacy_migration_preserves_data) {
         }
         CHECK(backup_found);
     }
+    std::filesystem::remove(path);
+}
+
+TEST(database_v1_migration_fills_historical_columns_before_creating_indexes) {
+    std::string path = TempDbPath("v1_missing_historical_columns");
+    std::filesystem::remove(path);
+    sqlite3* raw = nullptr;
+    CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    const char* legacy_schema =
+        "CREATE TABLE patents("
+        "id INTEGER PRIMARY KEY, geke_code TEXT UNIQUE, application_number TEXT, title TEXT,"
+        "application_status TEXT, patent_type TEXT, application_date TEXT,"
+        "authorization_date TEXT, expiration_date TEXT, inventor TEXT, notes TEXT,"
+        "updated_at INTEGER DEFAULT 0);"
+        "INSERT INTO patents(id,geke_code,application_number,title,application_status,notes)"
+        "VALUES(1,'GK-V1-MIN','202410123456.7','最小旧库','pending','保留数据');"
+        "CREATE TABLE oa_records(id INTEGER PRIMARY KEY, geke_code TEXT, official_deadline TEXT);"
+        "CREATE TABLE pct_patents(id INTEGER PRIMARY KEY, geke_code TEXT, application_no TEXT);"
+        "CREATE TABLE software_copyrights(id INTEGER PRIMARY KEY, case_no TEXT);"
+        "CREATE TABLE ic_layouts(id INTEGER PRIMARY KEY, case_no TEXT);"
+        "CREATE TABLE foreign_patents(id INTEGER PRIMARY KEY, case_no TEXT);"
+        "CREATE TABLE annual_fees(id INTEGER PRIMARY KEY, patent_id INTEGER);";
+    CHECK_EQ(sqlite3_exec(raw, legacy_schema, nullptr, nullptr, nullptr), SQLITE_OK);
+
+    auto migration = patx::RunSchemaMigrations(raw, path);
+    CHECK(migration.ok);
+    CHECK(migration.performed_backup);
+    CHECK_EQ(migration.from_version, 0);
+    CHECK_EQ(migration.to_version, 5);
+    CHECK_EQ(patx::ReadSchemaVersion(raw), 5);
+
+    for (const char* column : {"patent_level", "geke_handler", "class_level1", "class_level2",
+                               "class_level3", "rd_department", "agency_firm",
+                               "original_applicant", "current_applicant", "proposal_name"}) {
+        CHECK(SqliteHasColumn(raw, "patents", column));
+    }
+    for (const char* column : {"writer", "progress", "agency", "oa_summary", "is_extendable",
+                               "extension_requested", "extension_months", "extended_deadline"}) {
+        CHECK(SqliteHasColumn(raw, "oa_records", column));
+    }
+    for (const char* column : {"domestic_source", "country_app_no", "filing_date",
+                               "priority_date", "country"}) {
+        CHECK(SqliteHasColumn(raw, "pct_patents", column));
+    }
+    for (const char* column : {"original_owner", "current_owner", "developer",
+                               "dev_complete_date", "version"}) {
+        CHECK(SqliteHasColumn(raw, "software_copyrights", column));
+    }
+    for (const char* column : {"original_owner", "current_owner", "designer",
+                               "creation_date", "cert_date"}) {
+        CHECK(SqliteHasColumn(raw, "ic_layouts", column));
+    }
+    for (const char* column : {"pct_no", "country_app_no", "owner", "patent_status",
+                               "country", "application_no"}) {
+        CHECK(SqliteHasColumn(raw, "foreign_patents", column));
+    }
+    sqlite3_stmt* preserved = nullptr;
+    CHECK_EQ(sqlite3_prepare_v2(raw,
+        "SELECT title,notes FROM patents WHERE id=1", -1, &preserved, nullptr), SQLITE_OK);
+    CHECK_EQ(sqlite3_step(preserved), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved, 0)), "最小旧库");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved, 1)), "保留数据");
+    sqlite3_finalize(preserved);
+    sqlite3_close(raw);
+
+    sqlite3* backup = nullptr;
+    CHECK_EQ(sqlite3_open_v2(migration.backup_path.c_str(), &backup,
+                             SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    CHECK_EQ(patx::ReadSchemaVersion(backup), 0);
+    CHECK(!SqliteHasColumn(backup, "patents", "geke_handler"));
+    sqlite3_close(backup);
+    std::filesystem::remove(migration.backup_path);
     std::filesystem::remove(path);
 }
 
@@ -399,4 +967,95 @@ TEST(database_backup_api) {
     }
     std::filesystem::remove(path);
     std::filesystem::remove(dest);
+}
+
+TEST(database_consistent_snapshot_includes_committed_wal_pages) {
+    const std::string source = TempDbPath("live_wal_source");
+    const std::string snapshot = TempDbPath("live_wal_snapshot");
+    std::filesystem::remove(source);
+    std::filesystem::remove(snapshot);
+
+    sqlite3* live = nullptr;
+    CHECK_EQ(sqlite3_open(source.c_str(), &live), SQLITE_OK);
+    CHECK_EQ(sqlite3_exec(live,
+        "PRAGMA journal_mode=WAL;"
+        "CREATE TABLE live_rows(value TEXT);"
+        "PRAGMA wal_checkpoint(TRUNCATE);"
+        "INSERT INTO live_rows VALUES('committed-in-wal');",
+        nullptr, nullptr, nullptr), SQLITE_OK);
+
+    std::string error;
+    CHECK(Database::CopyConsistentSnapshot(source, snapshot, &error));
+    CHECK(error.empty());
+
+    sqlite3* copied = nullptr;
+    CHECK_EQ(sqlite3_open(snapshot.c_str(), &copied), SQLITE_OK);
+    sqlite3_stmt* row = nullptr;
+    const int prepare_rc = sqlite3_prepare_v2(copied,
+        "SELECT value FROM live_rows", -1, &row, nullptr);
+    if (prepare_rc != SQLITE_OK) Fail(sqlite3_errmsg(copied));
+    CHECK_EQ(sqlite3_step(row), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(row, 0)),
+                 "committed-in-wal");
+    sqlite3_finalize(row);
+    sqlite3_close(copied);
+    sqlite3_close(live);
+
+    std::filesystem::remove(snapshot);
+    std::filesystem::remove(source);
+}
+
+TEST(database_consistent_snapshot_rejects_aliases_without_deleting_source) {
+    const std::string source = TempDbPath("snapshot_alias_source");
+    const std::string alias = TempDbPath("snapshot_alias_link");
+    std::filesystem::remove(source);
+    std::filesystem::remove(alias);
+    sqlite3* db = nullptr;
+    CHECK_EQ(sqlite3_open(source.c_str(), &db), SQLITE_OK);
+    CHECK_EQ(sqlite3_exec(db,
+        "CREATE TABLE keep_me(value TEXT); INSERT INTO keep_me VALUES('safe');",
+        nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(db);
+
+    std::string error;
+    CHECK(!Database::CopyConsistentSnapshot(source, source, &error));
+    CHECK(std::filesystem::exists(source));
+
+    std::filesystem::create_hard_link(source, alias);
+    error.clear();
+    CHECK(!Database::CopyConsistentSnapshot(source, alias, &error));
+    CHECK(std::filesystem::exists(source));
+    CHECK(std::filesystem::exists(alias));
+
+    sqlite3* intact = nullptr;
+    CHECK_EQ(sqlite3_open_v2(source.c_str(), &intact, SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    sqlite3_stmt* row = nullptr;
+    CHECK_EQ(sqlite3_prepare_v2(intact,
+        "SELECT value FROM keep_me", -1, &row, nullptr), SQLITE_OK);
+    CHECK_EQ(sqlite3_step(row), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(row, 0)), "safe");
+    sqlite3_finalize(row);
+    sqlite3_close(intact);
+    std::filesystem::remove(alias);
+    std::filesystem::remove(source);
+}
+
+TEST(database_consistent_snapshot_missing_source_preserves_existing_destination) {
+    const std::string missing = TempDbPath("snapshot_missing_source");
+    const std::string destination = TempDbPath("snapshot_existing_destination");
+    std::filesystem::remove(missing);
+    std::filesystem::remove(destination);
+    {
+        std::ofstream out(destination, std::ios::binary);
+        out << "do-not-delete";
+    }
+
+    std::string error;
+    CHECK(!Database::CopyConsistentSnapshot(missing, destination, &error));
+    CHECK(std::filesystem::exists(destination));
+    std::ifstream in(destination, std::ios::binary);
+    CHECK_STR_EQ(std::string(std::istreambuf_iterator<char>(in),
+                             std::istreambuf_iterator<char>()),
+                 "do-not-delete");
+    std::filesystem::remove(destination);
 }

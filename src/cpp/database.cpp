@@ -11,21 +11,99 @@
 #include <sstream>
 #include <iostream>
 #include <cstring>
+#include <cctype>
+#include <algorithm>
+#include <filesystem>
 #include <set>
+#include <stdexcept>
 
 static UndoManager* g_undo_manager = nullptr;
+static std::vector<UndoManager*> g_live_undo_managers;
+
+namespace {
+
+void RegisterUndoManager(UndoManager* manager) {
+    if (!manager) return;
+    g_live_undo_managers.push_back(manager);
+    g_undo_manager = manager;
+}
+
+void UnregisterUndoManager(UndoManager* manager) {
+    if (!manager) return;
+    g_live_undo_managers.erase(
+        std::remove(g_live_undo_managers.begin(), g_live_undo_managers.end(), manager),
+        g_live_undo_managers.end());
+    g_undo_manager = g_live_undo_managers.empty() ? nullptr : g_live_undo_managers.back();
+}
+
+} // namespace
 
 UndoManager& GetUndoManager() {
+    if (!g_undo_manager) throw std::logic_error("no live database undo manager");
     return *g_undo_manager;
 }
 
 Database::Database(const std::string& db_path) : db_path_(db_path) {
+    auto close_database = [&]() {
+        if (undo_manager_) {
+            UnregisterUndoManager(undo_manager_.get());
+            undo_manager_.reset();
+        }
+        if (db_) {
+            sqlite3_close_v2(db_);
+            db_ = nullptr;
+        }
+    };
+
+    bool existing_nonempty_file = false;
+    std::string path_inspection_error;
+    if (db_path != ":memory:") {
+        std::error_code error;
+        const bool exists = std::filesystem::exists(db_path, error);
+        if (error) {
+            path_inspection_error = "cannot inspect database path: " + error.message();
+        } else if (exists) {
+            const auto size = std::filesystem::file_size(db_path, error);
+            if (error) {
+                path_inspection_error = "cannot inspect database size: " + error.message();
+            } else {
+                existing_nonempty_file = size > 0;
+            }
+        }
+    }
+
     int rc = sqlite3_open(db_path.c_str(), &db_);
     if (rc != SQLITE_OK) {
         last_error_ = db_ ? sqlite3_errmsg(db_) : "sqlite3_open failed";
         PATX_LOG_ERROR(std::string("Cannot open database: ") + last_error_ + " (" + db_path + ")");
-        db_ = nullptr;
+        close_database();
         return;
+    }
+
+    if (!path_inspection_error.empty()) {
+        last_error_ = path_inspection_error;
+        PATX_LOG_ERROR(last_error_);
+        close_database();
+        return;
+    }
+
+    sqlite3_busy_timeout(db_, 5000);
+
+    // Existing file databases must be backed up and migrated before any
+    // CREATE/ALTER statements or write-capable PRAGMAs run.
+    if (existing_nonempty_file) {
+        auto migration = patx::RunSchemaMigrations(db_, db_path_);
+        schema_version_ = patx::ReadSchemaVersion(db_);
+        if (!migration.ok) {
+            last_error_ = migration.error;
+            PATX_LOG_ERROR("Schema migration failed: " + migration.error);
+            close_database();
+            return;
+        }
+        if (migration.to_version > migration.from_version) {
+            PATX_LOG_INFO("Database schema is now v" +
+                          std::to_string(migration.to_version));
+        }
     }
 
     // Enable WAL mode for better performance
@@ -33,29 +111,34 @@ Database::Database(const std::string& db_path) : db_path_(db_path) {
     sqlite3_exec(db_, "PRAGMA synchronous=NORMAL;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "PRAGMA cache_size=10000;", nullptr, nullptr, nullptr);
     sqlite3_exec(db_, "PRAGMA foreign_keys=ON;", nullptr, nullptr, nullptr);
-
     // Initialize undo manager
-    g_undo_manager = new UndoManager();
-    g_undo_manager->SetDatabase(db_);
+    undo_manager_ = std::make_unique<UndoManager>();
+    undo_manager_->SetDatabase(db_);
+    RegisterUndoManager(undo_manager_.get());
 
-    // Create tables (idempotent, creates the current schema shape)
+    // Fill in the idempotent current shape after an existing database has
+    // safely migrated, or initialize a new/empty database before stamping it.
     InitTables();
 
-    // Bring an existing database up to the current schema version. This is
-    // transactional and backs up the file first - see schema_migrations.cpp.
-    auto migration = patx::RunSchemaMigrations(db_, db_path_);
+    if (existing_nonempty_file) {
+        schema_version_ = patx::ReadSchemaVersion(db_);
+        return;
+    }
+
+    auto migration = patx::RunSchemaMigrations(db_, db_path_, false);
     schema_version_ = patx::ReadSchemaVersion(db_);
     if (!migration.ok) {
         last_error_ = migration.error;
         PATX_LOG_ERROR("Schema migration failed: " + migration.error);
+        close_database();
     } else if (migration.to_version > migration.from_version) {
         PATX_LOG_INFO("Database schema is now v" + std::to_string(migration.to_version));
     }
 }
 
 Database::~Database() {
-    delete g_undo_manager;
-    g_undo_manager = nullptr;
+    UnregisterUndoManager(undo_manager_.get());
+    undo_manager_.reset();
     if (db_) {
         sqlite3_close(db_);
     }
@@ -113,6 +196,8 @@ void Database::InitTables() {
             next_dossier_check_at INTEGER DEFAULT 0
         )
     )");
+    Execute("CREATE INDEX IF NOT EXISTS idx_patents_next_dossier_check "
+            "ON patents(next_dossier_check_at)");
 
     Execute(R"(
         CREATE TABLE IF NOT EXISTS oa_records (
@@ -250,12 +335,17 @@ void Database::InitTables() {
             remote_document_id TEXT,
             document_type TEXT,
             document_title TEXT,
+            raw_title TEXT DEFAULT '',
+            document_code TEXT DEFAULT '',
+            document_version TEXT DEFAULT 'ORIGINAL',
             official_date TEXT,
             direction TEXT,
             source_url TEXT,
             download_url TEXT,
             download_available INTEGER DEFAULT 0,
             fingerprint TEXT,
+            event_key TEXT DEFAULT '',
+            source_trace TEXT DEFAULT '',
             first_seen_at INTEGER,
             last_seen_at INTEGER,
             local_path TEXT,
@@ -266,6 +356,24 @@ void Database::InitTables() {
     )");
     Execute("CREATE INDEX IF NOT EXISTS idx_prosecution_docs_patent "
             "ON prosecution_documents(patent_id)");
+    sqlite3_stmt* event_key_column = nullptr;
+    bool has_event_key = false;
+    if (sqlite3_prepare_v2(db_, "PRAGMA table_info(prosecution_documents)", -1,
+                           &event_key_column, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(event_key_column) == SQLITE_ROW) {
+            const char* name = reinterpret_cast<const char*>(
+                sqlite3_column_text(event_key_column, 1));
+            if (name && std::strcmp(name, "event_key") == 0) {
+                has_event_key = true;
+                break;
+            }
+        }
+    }
+    sqlite3_finalize(event_key_column);
+    if (has_event_key) {
+        Execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_prosecution_docs_event_key "
+                "ON prosecution_documents(patent_id, event_key) WHERE event_key <> ''");
+    }
 
     Execute(R"(
         CREATE TABLE IF NOT EXISTS dossier_sync_state (
@@ -415,6 +523,118 @@ std::string ColByName(sqlite3_stmt* stmt, const char* name) {
         if (column_name && std::strcmp(column_name, name) == 0) return Col(stmt, i);
     }
     return "";
+}
+
+std::string TrimToken(const std::string& value) {
+    size_t begin = 0;
+    while (begin < value.size() && std::isspace(static_cast<unsigned char>(value[begin]))) ++begin;
+    size_t end = value.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(value[end - 1]))) --end;
+    return value.substr(begin, end - begin);
+}
+
+std::string MergeSourceTrace(const std::string& existing, const std::string& source,
+                             const std::string& incoming) {
+    std::vector<std::string> tokens;
+    std::set<std::string> seen;
+    auto append_token = [&](const std::string& value) {
+        std::string token = TrimToken(value);
+        std::transform(token.begin(), token.end(), token.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (token.empty()) return;
+        for (unsigned char c : token) {
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                  c == '_' || c == '.' || c == '-')) {
+                return;
+            }
+        }
+        if (seen.insert(token).second) tokens.push_back(std::move(token));
+    };
+    auto append_trace = [&](const std::string& value) {
+        size_t start = 0;
+        while (start <= value.size()) {
+            size_t comma = value.find(',', start);
+            append_token(value.substr(
+                start, comma == std::string::npos ? std::string::npos : comma - start));
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+    };
+    append_trace(existing);
+    append_token(source);
+    append_trace(incoming);
+
+    std::string merged;
+    for (const auto& token : tokens) {
+        if (!merged.empty()) merged += ',';
+        merged += token;
+    }
+    return merged;
+}
+
+bool IsAsciiDigits(const std::string& value) {
+    if (value.empty()) return false;
+    for (unsigned char c : value) {
+        if (!std::isdigit(c)) return false;
+    }
+    return true;
+}
+
+bool IsCnApplicationBody(const std::string& body) {
+    const size_t dot = body.find('.');
+    if (dot == std::string::npos) {
+        if (body.size() == 12) return IsAsciiDigits(body);
+        if (body.size() != 13 || !IsAsciiDigits(body.substr(0, 12))) return false;
+        const char check = body.back();
+        return std::isdigit(static_cast<unsigned char>(check)) || check == 'X' || check == 'x';
+    }
+    if (dot != 12 || body.size() != 14 ||
+        body.find('.', dot + 1) != std::string::npos ||
+        !IsAsciiDigits(body.substr(0, 12))) {
+        return false;
+    }
+    const char check = body.back();
+    return std::isdigit(static_cast<unsigned char>(check)) || check == 'X' || check == 'x';
+}
+
+bool IsCnPublicationIdentifier(const std::string& identifier) {
+    if (identifier.size() < 2 || std::toupper(static_cast<unsigned char>(identifier[0])) != 'C' ||
+        std::toupper(static_cast<unsigned char>(identifier[1])) != 'N') {
+        return false;
+    }
+    const std::string body = identifier.substr(2);
+    size_t digits_end = 0;
+    while (digits_end < body.size() &&
+           std::isdigit(static_cast<unsigned char>(body[digits_end]))) {
+        ++digits_end;
+    }
+    if (digits_end != 9) return false;
+    const std::string suffix = body.substr(digits_end);
+    std::string normalized_suffix = suffix;
+    std::transform(normalized_suffix.begin(), normalized_suffix.end(),
+                   normalized_suffix.begin(), [](unsigned char c) {
+                       return static_cast<char>(std::toupper(c));
+                   });
+    return normalized_suffix.empty() || normalized_suffix == "A" ||
+           normalized_suffix == "A1" || normalized_suffix == "B" ||
+           normalized_suffix == "B1" || normalized_suffix == "U";
+}
+
+bool IsCnDossierIdentifier(const std::string& application_number,
+                           const std::string& publication_number) {
+    const std::string application = TrimToken(application_number);
+    if (!application.empty()) {
+        if (application.size() >= 2 &&
+            std::toupper(static_cast<unsigned char>(application[0])) == 'C' &&
+            std::toupper(static_cast<unsigned char>(application[1])) == 'N') {
+            const std::string body = application.substr(2);
+            if (IsCnApplicationBody(body) || IsCnPublicationIdentifier(application)) return true;
+        } else if (IsCnApplicationBody(application)) {
+            return true;
+        }
+    }
+    return IsCnPublicationIdentifier(TrimToken(publication_number));
 }
 
 void ReadPatent(sqlite3_stmt* stmt, Patent& p) {
@@ -692,8 +912,8 @@ int Database::InsertPatent(const Patent& p, bool log_undo) {
 
     if (Execute(sql)) {
         int id = static_cast<int>(sqlite3_last_insert_rowid(db_));
-        if (log_undo && g_undo_manager) {
-            g_undo_manager->LogOperation("delete", "patents", id, PatentToJson(p), "");
+        if (log_undo && undo_manager_) {
+            undo_manager_->LogOperation("delete", "patents", id, PatentToJson(p), "");
         }
         return id;
     }
@@ -701,9 +921,9 @@ int Database::InsertPatent(const Patent& p, bool log_undo) {
 }
 
 bool Database::UpdatePatent(int id, const Patent& p, bool log_undo) {
-    if (log_undo && g_undo_manager) {
+    if (log_undo && undo_manager_) {
         Patent old = GetPatentById(id);
-        g_undo_manager->LogOperation("update", "patents", id, PatentToJson(old), PatentToJson(p));
+        undo_manager_->LogOperation("update", "patents", id, PatentToJson(old), PatentToJson(p));
     }
 
     std::string sql =
@@ -756,9 +976,9 @@ bool Database::UpdatePatent(int id, const Patent& p, bool log_undo) {
 }
 
 bool Database::DeletePatent(int id, bool log_undo) {
-    if (log_undo && g_undo_manager) {
+    if (log_undo && undo_manager_) {
         Patent old = GetPatentById(id);
-        g_undo_manager->LogOperation("delete", "patents", id, PatentToJson(old), "");
+        undo_manager_->LogOperation("delete", "patents", id, PatentToJson(old), "");
     }
     return Execute("DELETE FROM patents WHERE id = " + std::to_string(id));
 }
@@ -863,8 +1083,8 @@ int Database::InsertOA(const OARecord& oa, bool log_undo) {
 
     if (Execute(sql)) {
         int id = static_cast<int>(sqlite3_last_insert_rowid(db_));
-        if (log_undo && g_undo_manager) {
-            g_undo_manager->LogOperation("delete", "oa_records", id, OAToJson(oa), "");
+        if (log_undo && undo_manager_) {
+            undo_manager_->LogOperation("delete", "oa_records", id, OAToJson(oa), "");
         }
         return id;
     }
@@ -872,9 +1092,9 @@ int Database::InsertOA(const OARecord& oa, bool log_undo) {
 }
 
 bool Database::UpdateOA(int id, const OARecord& oa, bool log_undo) {
-    if (log_undo && g_undo_manager) {
+    if (log_undo && undo_manager_) {
         OARecord old = GetOAById(id);
-        g_undo_manager->LogOperation("update", "oa_records", id, OAToJson(old), OAToJson(oa));
+        undo_manager_->LogOperation("update", "oa_records", id, OAToJson(old), OAToJson(oa));
     }
 
     std::string sql =
@@ -904,9 +1124,9 @@ bool Database::UpdateOA(int id, const OARecord& oa, bool log_undo) {
 }
 
 bool Database::DeleteOA(int id, bool log_undo) {
-    if (log_undo && g_undo_manager) {
+    if (log_undo && undo_manager_) {
         OARecord old = GetOAById(id);
-        g_undo_manager->LogOperation("delete", "oa_records", id, OAToJson(old), "");
+        undo_manager_->LogOperation("delete", "oa_records", id, OAToJson(old), "");
     }
     return Execute("DELETE FROM oa_records WHERE id = " + std::to_string(id));
 }
@@ -1434,6 +1654,82 @@ bool Database::BackupTo(const std::string& dest_path) {
     return true;
 }
 
+bool Database::CopyConsistentSnapshot(const std::string& source_path,
+                                      const std::string& dest_path,
+                                      std::string* error) {
+    if (error) error->clear();
+    auto reject = [&](const std::string& message) {
+        if (error) *error = message;
+        return false;
+    };
+    std::error_code path_error;
+    const bool source_exists = std::filesystem::exists(source_path, path_error);
+    if (path_error || !source_exists) {
+        return reject(path_error ? path_error.message() : "snapshot source does not exist");
+    }
+    path_error.clear();
+    const bool destination_exists = std::filesystem::exists(dest_path, path_error);
+    if (path_error) return reject(path_error.message());
+    if (destination_exists) {
+        path_error.clear();
+        const bool same_file = std::filesystem::equivalent(source_path, dest_path, path_error);
+        if (!path_error && same_file) {
+            return reject("snapshot source and destination are the same file");
+        }
+        return reject("snapshot destination already exists");
+    }
+
+    sqlite3* source = nullptr;
+    sqlite3* destination = nullptr;
+    bool destination_created = false;
+    auto fail = [&](const std::string& message) {
+        if (error) *error = message;
+        if (destination) sqlite3_close(destination);
+        if (source) sqlite3_close(source);
+        if (destination_created) {
+            std::error_code remove_error;
+            std::filesystem::remove(dest_path, remove_error);
+        }
+        return false;
+    };
+
+    int rc = sqlite3_open_v2(source_path.c_str(), &source, SQLITE_OPEN_READONLY, nullptr);
+    if (rc != SQLITE_OK) {
+        return fail(source ? sqlite3_errmsg(source) : "cannot open snapshot source");
+    }
+    sqlite3_busy_timeout(source, 5000);
+    rc = sqlite3_open(dest_path.c_str(), &destination);
+    path_error.clear();
+    destination_created = std::filesystem::exists(dest_path, path_error) && !path_error;
+    if (rc != SQLITE_OK) {
+        return fail(destination ? sqlite3_errmsg(destination)
+                                : "cannot open snapshot destination");
+    }
+    sqlite3_busy_timeout(destination, 5000);
+
+    sqlite3_backup* backup = sqlite3_backup_init(destination, "main", source, "main");
+    if (!backup) return fail(sqlite3_errmsg(destination));
+
+    int attempts = 0;
+    do {
+        rc = sqlite3_backup_step(backup, -1);
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) sqlite3_sleep(10);
+    } while ((rc == SQLITE_BUSY || rc == SQLITE_LOCKED) && ++attempts < 500);
+    const int finish_rc = sqlite3_backup_finish(backup);
+    if (rc != SQLITE_DONE || finish_rc != SQLITE_OK) {
+        return fail(sqlite3_errmsg(destination));
+    }
+
+    const int destination_close_rc = sqlite3_close(destination);
+    destination = nullptr;
+    const int source_close_rc = sqlite3_close(source);
+    source = nullptr;
+    if (destination_close_rc != SQLITE_OK || source_close_rc != SQLITE_OK) {
+        return fail("cannot close SQLite snapshot cleanly");
+    }
+    return true;
+}
+
 // ============== Undo support ==============
 
 std::string Database::PatentToJson(const Patent& p) {
@@ -1523,16 +1819,16 @@ std::string Database::OAToJson(const OARecord& oa) {
 }
 
 void Database::BeginBatch() {
-    if (g_undo_manager) g_undo_manager->BeginBatch();
+    if (undo_manager_) undo_manager_->BeginBatch();
 }
 
 int Database::Undo() {
-    if (g_undo_manager) return g_undo_manager->Undo();
+    if (undo_manager_) return undo_manager_->Undo();
     return 0;
 }
 
 bool Database::CanUndo() const {
-    if (g_undo_manager) return g_undo_manager->CanUndo();
+    if (undo_manager_) return undo_manager_->CanUndo();
     return false;
 }
 
@@ -1593,61 +1889,372 @@ std::vector<Patent> Database::GetPatentsForDossierCheck(bool include_granted, in
     return results;
 }
 
+std::vector<Patent> Database::GetPatentsDueForDossierCheck(bool include_granted,
+                                                            long long now, int limit) {
+    std::string sql =
+        " WHERE COALESCE(application_status, '') NOT LIKE '%放弃%'"
+        " AND COALESCE(application_status, '') NOT LIKE '%失效%'"
+        " AND COALESCE(application_status, '') NOT LIKE '%撤回%'"
+        " AND COALESCE(application_status, '') NOT LIKE '%视撤%'"
+        " AND COALESCE(application_status, '') NOT LIKE '%终止%'";
+    if (!include_granted) {
+        sql += " AND COALESCE(application_status, '') NOT LIKE '%授权%'"
+               " AND COALESCE(application_status, '') NOT LIKE '%Granted%'";
+    }
+    sql += " AND (next_dossier_check_at IS NULL OR next_dossier_check_at = 0"
+           " OR next_dossier_check_at <= " + std::to_string(now) + ")"
+           " ORDER BY COALESCE(next_dossier_check_at, 0) ASC, id ASC";
+    auto candidates = QueryPatents(db_, sql);
+    std::vector<Patent> results;
+    for (auto& patent : candidates) {
+        if (!IsCnDossierIdentifier(patent.application_number, patent.publication_number)) continue;
+        results.push_back(std::move(patent));
+        if (limit > 0 && static_cast<int>(results.size()) >= limit) break;
+    }
+    return results;
+}
+
 int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* created) {
     if (created) *created = false;
-    long long now = static_cast<long long>(time(nullptr));
+    const long long now = static_cast<long long>(time(nullptr));
+    if (!Execute("BEGIN IMMEDIATE TRANSACTION")) return 0;
 
-    // Fingerprint already known? Only refresh last_seen_at.
-    sqlite3_stmt* stmt;
-    std::string find = "SELECT id FROM prosecution_documents WHERE source = ? AND "
-                       "application_number = ? AND fingerprint = ?";
-    if (sqlite3_prepare_v2(db_, find.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+    auto rollback = [&]() {
+        Execute("ROLLBACK");
+        return 0;
+    };
+
+    struct ExistingDocument {
+        int id = 0;
+        int patent_id = 0;
+        std::string source_trace;
+        long long first_seen_at = 0;
+        long long last_seen_at = 0;
+        std::string source;
+        std::string event_key;
+        std::string local_path;
+        std::string download_url;
+        std::string source_url;
+        long long downloaded_at = 0;
+        bool download_available = false;
+        std::string raw_metadata;
+    };
+    auto read_existing = [](sqlite3_stmt* stmt) {
+        ExistingDocument existing;
+        existing.id = sqlite3_column_int(stmt, 0);
+        existing.patent_id = sqlite3_column_int(stmt, 1);
+        auto text = [stmt](int column) {
+            const char* value = reinterpret_cast<const char*>(sqlite3_column_text(stmt, column));
+            return std::string(value ? value : "");
+        };
+        existing.source_trace = text(2);
+        existing.first_seen_at = sqlite3_column_int64(stmt, 3);
+        existing.last_seen_at = sqlite3_column_int64(stmt, 4);
+        existing.source = text(5);
+        existing.event_key = text(6);
+        existing.local_path = text(7);
+        existing.download_url = text(8);
+        existing.source_url = text(9);
+        existing.downloaded_at = sqlite3_column_int64(stmt, 10);
+        existing.download_available = sqlite3_column_int(stmt, 11) != 0;
+        existing.raw_metadata = text(12);
+        return existing;
+    };
+    auto find_event = [&]() {
+        ExistingDocument existing;
+        sqlite3_stmt* stmt = nullptr;
+        const char* sql =
+            "SELECT id,patent_id,source_trace,first_seen_at,last_seen_at,source,event_key,"
+            "local_path,download_url,source_url,downloaded_at,download_available,raw_metadata "
+            "FROM prosecution_documents "
+            "WHERE patent_id = ? AND event_key = ? LIMIT 1";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return existing;
+        sqlite3_bind_int(stmt, 1, doc.patent_id);
+        sqlite3_bind_text(stmt, 2, doc.event_key.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(stmt) == SQLITE_ROW) existing = read_existing(stmt);
+        sqlite3_finalize(stmt);
+        return existing;
+    };
+    auto find_legacy = [&](bool empty_event_key_only) {
+        ExistingDocument existing;
+        sqlite3_stmt* stmt = nullptr;
+        std::string sql =
+            "SELECT id,patent_id,source_trace,first_seen_at,last_seen_at,source,event_key,"
+            "local_path,download_url,source_url,downloaded_at,download_available,raw_metadata "
+            "FROM prosecution_documents "
+            "WHERE source = ? AND application_number = ? AND fingerprint = ? LIMIT 1";
+        if (empty_event_key_only) {
+            sql =
+                "SELECT id,patent_id,source_trace,first_seen_at,last_seen_at,source,event_key,"
+                "local_path,download_url,source_url,downloaded_at,download_available,raw_metadata "
+                "FROM prosecution_documents "
+                "WHERE source = ? AND application_number = ? AND fingerprint = ? "
+                "AND (event_key IS NULL OR event_key = '') LIMIT 1";
+        }
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return existing;
         sqlite3_bind_text(stmt, 1, doc.source.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, doc.application_number.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 3, doc.fingerprint.c_str(), -1, SQLITE_TRANSIENT);
-        int existing = 0;
-        if (sqlite3_step(stmt) == SQLITE_ROW) existing = sqlite3_column_int(stmt, 0);
+        if (sqlite3_step(stmt) == SQLITE_ROW) existing = read_existing(stmt);
         sqlite3_finalize(stmt);
-        if (existing > 0) {
-            Execute("UPDATE prosecution_documents SET last_seen_at = " + std::to_string(now) +
-                    ", raw_metadata = '" + EscapeString(doc.raw_metadata) + "'" +
-                    " WHERE id = " + std::to_string(existing));
-            doc.id = existing;
-            doc.last_seen_at = now;
-            return existing;
+        return existing;
+    };
+    auto refresh_existing = [&](const ExistingDocument& existing) {
+        const std::string merged_trace =
+            MergeSourceTrace(existing.source_trace, doc.source, doc.source_trace);
+        sqlite3_stmt* update = nullptr;
+        const char* sql =
+            "UPDATE prosecution_documents SET last_seen_at = ?, raw_metadata = ?, "
+            "source_trace = ? WHERE id = ?";
+        if (sqlite3_prepare_v2(db_, sql, -1, &update, nullptr) != SQLITE_OK) return rollback();
+        sqlite3_bind_int64(update, 1, now);
+        sqlite3_bind_text(update, 2, doc.raw_metadata.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(update, 3, merged_trace.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(update, 4, existing.id);
+        const int rc = sqlite3_step(update);
+        sqlite3_finalize(update);
+        if (rc != SQLITE_DONE || sqlite3_changes(db_) != 1 || !Execute("COMMIT")) {
+            return rollback();
         }
+        doc.id = existing.id;
+        doc.first_seen_at = existing.first_seen_at;
+        doc.last_seen_at = now;
+        doc.source_trace = merged_trace;
+        return existing.id;
+    };
+    auto merge_legacy_into_canonical = [&](const ExistingDocument& canonical,
+                                            const ExistingDocument& legacy) {
+        if (legacy.id == canonical.id) return refresh_existing(canonical);
+        if (legacy.patent_id != canonical.patent_id || !legacy.event_key.empty()) {
+            return rollback();
+        }
+
+        std::string merged_trace =
+            MergeSourceTrace(canonical.source_trace, canonical.source, legacy.source_trace);
+        merged_trace = MergeSourceTrace(merged_trace, legacy.source, doc.source_trace);
+        merged_trace = MergeSourceTrace(merged_trace, doc.source, "");
+        long long first_seen = canonical.first_seen_at;
+        if (first_seen == 0 || (legacy.first_seen_at > 0 && legacy.first_seen_at < first_seen)) {
+            first_seen = legacy.first_seen_at;
+        }
+        const long long last_seen = std::max({canonical.last_seen_at, legacy.last_seen_at, now});
+        auto prefer_canonical = [](const std::string& canonical_value,
+                                   const std::string& legacy_value) {
+            return canonical_value.empty() ? legacy_value : canonical_value;
+        };
+        const std::string local_path =
+            prefer_canonical(canonical.local_path, legacy.local_path);
+        const std::string download_url =
+            prefer_canonical(canonical.download_url, legacy.download_url);
+        const std::string source_url =
+            prefer_canonical(canonical.source_url, legacy.source_url);
+        const long long downloaded_at = canonical.downloaded_at > 0
+            ? canonical.downloaded_at : legacy.downloaded_at;
+        const bool download_available =
+            canonical.download_available || legacy.download_available;
+        const std::string& raw_metadata = doc.raw_metadata;
+
+        sqlite3_stmt* update = nullptr;
+        const char* update_sql =
+            "UPDATE prosecution_documents SET source_trace=?, first_seen_at=?, last_seen_at=?, "
+            "local_path=?, download_url=?, source_url=?, downloaded_at=?, "
+            "download_available=?, raw_metadata=? WHERE id=?";
+        if (sqlite3_prepare_v2(db_, update_sql, -1, &update, nullptr) != SQLITE_OK) {
+            return rollback();
+        }
+        int parameter = 1;
+        sqlite3_bind_text(update, parameter++, merged_trace.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(update, parameter++, first_seen);
+        sqlite3_bind_int64(update, parameter++, last_seen);
+        sqlite3_bind_text(update, parameter++, local_path.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(update, parameter++, download_url.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(update, parameter++, source_url.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(update, parameter++, downloaded_at);
+        sqlite3_bind_int(update, parameter++, download_available ? 1 : 0);
+        sqlite3_bind_text(update, parameter++, raw_metadata.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(update, parameter++, canonical.id);
+        const int update_rc = sqlite3_step(update);
+        const int updated = sqlite3_changes(db_);
+        sqlite3_finalize(update);
+        if (update_rc != SQLITE_DONE || updated != 1) return rollback();
+
+        sqlite3_stmt* remove = nullptr;
+        const char* delete_sql =
+            "DELETE FROM prosecution_documents WHERE id=? "
+            "AND (event_key IS NULL OR event_key='')";
+        if (sqlite3_prepare_v2(db_, delete_sql, -1, &remove, nullptr) != SQLITE_OK) {
+            return rollback();
+        }
+        sqlite3_bind_int(remove, 1, legacy.id);
+        const int delete_rc = sqlite3_step(remove);
+        const int deleted = sqlite3_changes(db_);
+        sqlite3_finalize(remove);
+        if (delete_rc != SQLITE_DONE || deleted != 1 || !Execute("COMMIT")) return rollback();
+
+        doc.id = canonical.id;
+        doc.first_seen_at = first_seen;
+        doc.last_seen_at = last_seen;
+        doc.source_trace = merged_trace;
+        return canonical.id;
+    };
+    auto promote_legacy = [&](const ExistingDocument& legacy) {
+        const std::string merged_trace =
+            MergeSourceTrace(legacy.source_trace, doc.source, doc.source_trace);
+        sqlite3_stmt* promote = nullptr;
+        const char* sql =
+            "UPDATE prosecution_documents SET event_key = ?, last_seen_at = ?, "
+            "raw_metadata = ?, source_trace = ? WHERE id = ? "
+            "AND (event_key IS NULL OR event_key = '')";
+        if (sqlite3_prepare_v2(db_, sql, -1, &promote, nullptr) != SQLITE_OK) {
+            return rollback();
+        }
+        sqlite3_bind_text(promote, 1, doc.event_key.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(promote, 2, now);
+        sqlite3_bind_text(promote, 3, doc.raw_metadata.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(promote, 4, merged_trace.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(promote, 5, legacy.id);
+        const int rc = sqlite3_step(promote);
+        const int changed = sqlite3_changes(db_);
+        sqlite3_finalize(promote);
+        if (rc == SQLITE_DONE && changed == 1) {
+            if (!Execute("COMMIT")) return rollback();
+            doc.id = legacy.id;
+            doc.first_seen_at = legacy.first_seen_at;
+            doc.last_seen_at = now;
+            doc.source_trace = merged_trace;
+            return legacy.id;
+        }
+
+        // If another compatible writer already claimed the partial key,
+        // merge into that canonical event row instead of violating it.
+        if ((rc & 0xff) == SQLITE_CONSTRAINT || changed == 0) {
+            ExistingDocument event = find_event();
+            if (event.id > 0) return merge_legacy_into_canonical(event, legacy);
+        }
+        return rollback();
+    };
+
+    if (!doc.event_key.empty()) {
+        ExistingDocument event = find_event();
+        if (event.id > 0) {
+            ExistingDocument legacy = find_legacy(false);
+            if (legacy.id > 0 && legacy.id != event.id) {
+                return merge_legacy_into_canonical(event, legacy);
+            }
+            return refresh_existing(event);
+        }
+
+        ExistingDocument legacy = find_legacy(true);
+        if (legacy.id > 0) return promote_legacy(legacy);
+    } else {
+        ExistingDocument legacy = find_legacy(false);
+        if (legacy.id > 0) return refresh_existing(legacy);
     }
 
     doc.first_seen_at = now;
     doc.last_seen_at = now;
-    std::string sql =
-        "INSERT INTO prosecution_documents (patent_id, jurisdiction, application_number, "
-        "publication_number, source, remote_document_id, document_type, document_title, "
-        "official_date, direction, source_url, download_url, download_available, fingerprint, "
-        "first_seen_at, last_seen_at, raw_metadata) VALUES (" +
-        std::to_string(doc.patent_id) + ",'" +
-        EscapeString(doc.jurisdiction) + "','" +
-        EscapeString(doc.application_number) + "','" +
-        EscapeString(doc.publication_number) + "','" +
-        EscapeString(doc.source) + "','" +
-        EscapeString(doc.remote_document_id) + "','" +
-        EscapeString(doc.document_type) + "','" +
-        EscapeString(doc.document_title) + "','" +
-        EscapeString(doc.official_date) + "','" +
-        EscapeString(doc.direction) + "','" +
-        EscapeString(doc.source_url) + "','" +
-        EscapeString(doc.download_url) + "'," +
-        std::to_string(doc.download_available ? 1 : 0) + ",'" +
-        EscapeString(doc.fingerprint) + "'," +
-        std::to_string(doc.first_seen_at) + "," +
-        std::to_string(doc.last_seen_at) + ",'" +
-        EscapeString(doc.raw_metadata) + "')";
-    if (Execute(sql)) {
-        doc.id = sqlite3_last_insert_rowid(db_);
+    doc.source_trace = MergeSourceTrace("", doc.source, doc.source_trace);
+    sqlite3_stmt* insert = nullptr;
+    const char* insert_sql =
+        "INSERT INTO prosecution_documents ("
+        "patent_id, jurisdiction, application_number, publication_number, source, "
+        "remote_document_id, document_type, document_title, raw_title, document_code, "
+        "document_version, official_date, direction, source_url, download_url, "
+        "download_available, fingerprint, event_key, source_trace, first_seen_at, "
+        "last_seen_at, raw_metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+    if (sqlite3_prepare_v2(db_, insert_sql, -1, &insert, nullptr) != SQLITE_OK) return rollback();
+    int bind = 1;
+    sqlite3_bind_int(insert, bind++, doc.patent_id);
+    auto bind_text = [&](const std::string& value) {
+        sqlite3_bind_text(insert, bind++, value.c_str(), -1, SQLITE_TRANSIENT);
+    };
+    bind_text(doc.jurisdiction);
+    bind_text(doc.application_number);
+    bind_text(doc.publication_number);
+    bind_text(doc.source);
+    bind_text(doc.remote_document_id);
+    bind_text(doc.document_type);
+    bind_text(doc.document_title);
+    bind_text(doc.raw_title);
+    bind_text(doc.document_code);
+    bind_text(doc.document_version);
+    bind_text(doc.official_date);
+    bind_text(doc.direction);
+    bind_text(doc.source_url);
+    bind_text(doc.download_url);
+    sqlite3_bind_int(insert, bind++, doc.download_available ? 1 : 0);
+    bind_text(doc.fingerprint);
+    bind_text(doc.event_key);
+    bind_text(doc.source_trace);
+    sqlite3_bind_int64(insert, bind++, doc.first_seen_at);
+    sqlite3_bind_int64(insert, bind++, doc.last_seen_at);
+    bind_text(doc.raw_metadata);
+    const int insert_rc = sqlite3_step(insert);
+    sqlite3_finalize(insert);
+    if (insert_rc == SQLITE_DONE && sqlite3_changes(db_) == 1) {
+        doc.id = static_cast<int>(sqlite3_last_insert_rowid(db_));
+        if (!Execute("COMMIT")) return rollback();
         if (created) *created = true;
         return doc.id;
     }
-    return 0;
+
+    if ((insert_rc & 0xff) == SQLITE_CONSTRAINT) {
+        ExistingDocument existing = doc.event_key.empty() ? find_legacy(false) : find_event();
+        if (existing.id > 0) {
+            if (!doc.event_key.empty()) {
+                ExistingDocument legacy = find_legacy(false);
+                if (legacy.id > 0 && legacy.id != existing.id) {
+                    return merge_legacy_into_canonical(existing, legacy);
+                }
+            }
+            return refresh_existing(existing);
+        }
+        if (!doc.event_key.empty()) {
+            ExistingDocument legacy = find_legacy(true);
+            if (legacy.id > 0) return promote_legacy(legacy);
+        }
+    }
+    return rollback();
+}
+
+ProsecutionDocumentRecord Database::GetProsecutionDocumentById(int id) {
+    ProsecutionDocumentRecord doc;
+    sqlite3_stmt* stmt = nullptr;
+    const char* sql =
+        "SELECT id, patent_id, jurisdiction, application_number, publication_number, source, "
+        "remote_document_id, document_type, document_title, raw_title, document_code, "
+        "document_version, official_date, direction, source_url, download_url, "
+        "download_available, fingerprint, event_key, source_trace, first_seen_at, "
+        "last_seen_at, raw_metadata FROM prosecution_documents WHERE id = ?";
+    if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) return doc;
+    sqlite3_bind_int(stmt, 1, id);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        doc.id = sqlite3_column_int(stmt, 0);
+        doc.patent_id = sqlite3_column_int(stmt, 1);
+        doc.jurisdiction = Col(stmt, 2);
+        doc.application_number = Col(stmt, 3);
+        doc.publication_number = Col(stmt, 4);
+        doc.source = Col(stmt, 5);
+        doc.remote_document_id = Col(stmt, 6);
+        doc.document_type = Col(stmt, 7);
+        doc.document_title = Col(stmt, 8);
+        doc.raw_title = Col(stmt, 9);
+        doc.document_code = Col(stmt, 10);
+        doc.document_version = Col(stmt, 11);
+        doc.official_date = Col(stmt, 12);
+        doc.direction = Col(stmt, 13);
+        doc.source_url = Col(stmt, 14);
+        doc.download_url = Col(stmt, 15);
+        doc.download_available = sqlite3_column_int(stmt, 16) != 0;
+        doc.fingerprint = Col(stmt, 17);
+        doc.event_key = Col(stmt, 18);
+        doc.source_trace = Col(stmt, 19);
+        doc.first_seen_at = sqlite3_column_int64(stmt, 20);
+        doc.last_seen_at = sqlite3_column_int64(stmt, 21);
+        doc.raw_metadata = Col(stmt, 22);
+    }
+    sqlite3_finalize(stmt);
+    return doc;
 }
 
 bool Database::UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at) {

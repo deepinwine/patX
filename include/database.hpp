@@ -12,6 +12,8 @@
 #include <ctime>
 #include <sqlite3.h>
 
+class UndoManager;
+
 // ---------------------------------------------------------------------------
 // Data models
 // ---------------------------------------------------------------------------
@@ -217,12 +219,17 @@ struct ProsecutionDocumentRecord {
     std::string remote_document_id;   // stable id when the site offers one
     std::string document_type;        // OFFICE_ACTION_SECOND / GRANT_NOTICE / ...
     std::string document_title;       // normalized title
+    std::string raw_title;            // provider title before normalization
+    std::string document_code;        // provider document/category code
+    std::string document_version = "ORIGINAL";
     std::string official_date;        // YYYY-MM-DD ("" when unknown)
     std::string direction;            // official / applicant
     std::string source_url;
     std::string download_url;
     bool download_available = false;
     std::string fingerprint;          // sha256(jurisdiction+app+title+date+id)
+    std::string event_key;            // cross-provider semantic event identity
+    std::string source_trace;         // ordered, unique comma-separated providers
     long long first_seen_at = 0;      // unix epoch
     long long last_seen_at = 0;
     std::string raw_metadata;         // small JSON blob, never credentials
@@ -324,15 +331,26 @@ public:
     // Copy the database file (safe point-in-time backup using SQLite's
     // backup API; works while the connection is open).
     bool BackupTo(const std::string& dest_path);
+    // Create a consistent snapshot of another SQLite database, including
+    // committed pages that still reside in its WAL file. The destination
+    // must not already exist and is removed only when this call created it.
+    static bool CopyConsistentSnapshot(const std::string& source_path,
+                                       const std::string& dest_path,
+                                       std::string* error = nullptr);
 
     // ---------- Web dossier sync (CNIPA 网页审查信息同步) ----------
     // Cases worth checking: active prosecution statuses first. Terminal
     // statuses (放弃/失效/撤回/视撤/终止) are skipped; granted cases only
     // when include_granted (they are checked on the slow cycle).
     std::vector<Patent> GetPatentsForDossierCheck(bool include_granted, int limit = 0);
-    // Dedup key: (source, application_number, fingerprint). Sets *created
-    // when the row is new; otherwise only last_seen_at is refreshed.
+    // Due CN cases only. next_dossier_check_at at/before now (or unset) is
+    // eligible; limit 0 means unlimited.
+    std::vector<Patent> GetPatentsDueForDossierCheck(bool include_granted,
+                                                     long long now, int limit = 0);
+    // A non-empty event_key deduplicates across providers within one patent;
+    // otherwise the legacy (source, application_number, fingerprint) key is used.
     int UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* created = nullptr);
+    ProsecutionDocumentRecord GetProsecutionDocumentById(int id);
     // Records where a downloaded dossier file landed (schema v4 columns).
     bool UpdateProsecutionDocumentDownload(int document_id, const std::string& local_path);
     bool UpdatePatentDossierCheck(int patent_id, long long last_at, long long next_at);
@@ -363,6 +381,7 @@ private:
     std::string db_path_;
     int schema_version_ = 0;
     std::string last_error_;
+    std::unique_ptr<UndoManager> undo_manager_;
 
     void InitTables();
     void MigrateTables();
@@ -372,6 +391,5 @@ private:
     std::string OAToJson(const OARecord& oa);
 };
 
-// Global undo manager accessor
-class UndoManager;
+// Accesses the most recently created live database's undo manager.
 UndoManager& GetUndoManager();

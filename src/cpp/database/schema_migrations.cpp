@@ -4,7 +4,6 @@
 #include <sqlite3.h>
 #include <cstdio>
 #include <ctime>
-#include <fstream>
 #include <map>
 #include <sstream>
 #include <vector>
@@ -56,6 +55,47 @@ bool HasColumn(sqlite3* db, const std::string& table, const std::string& column)
     return false;
 }
 
+bool HasIndex(sqlite3* db, const std::string& index) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db,
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, index.c_str(), -1, SQLITE_TRANSIENT);
+    const bool found = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool BackupDatabase(sqlite3* source, const std::string& path, std::string* error) {
+    sqlite3* destination = nullptr;
+    int rc = sqlite3_open(path.c_str(), &destination);
+    if (rc != SQLITE_OK) {
+        if (error) *error = destination ? sqlite3_errmsg(destination) : "cannot open backup";
+        if (destination) sqlite3_close(destination);
+        std::remove(path.c_str());
+        return false;
+    }
+
+    sqlite3_backup* backup = sqlite3_backup_init(destination, "main", source, "main");
+    if (!backup) {
+        if (error) *error = sqlite3_errmsg(destination);
+        sqlite3_close(destination);
+        std::remove(path.c_str());
+        return false;
+    }
+    rc = sqlite3_backup_step(backup, -1);
+    const int finish_rc = sqlite3_backup_finish(backup);
+    const int close_rc = sqlite3_close(destination);
+    if (rc != SQLITE_DONE || finish_rc != SQLITE_OK || close_rc != SQLITE_OK) {
+        if (error && error->empty()) *error = "SQLite backup failed";
+        std::remove(path.c_str());
+        return false;
+    }
+    return true;
+}
+
 std::string Quote(const std::string& s) {
     std::string out = "'";
     for (char c : s) {
@@ -100,7 +140,161 @@ const std::vector<std::pair<std::string, std::string>>& PatentV2Columns() {
     return cols;
 }
 
+bool EnsureV1SupportingTables(sqlite3* db) {
+    // Some pre-versioning installations contain only the patents table.
+    // Migration owns creation of the other v1-era tables so constructor
+    // initialization never needs to run before the pre-migration backup.
+    return Exec(db, R"(
+        CREATE TABLE IF NOT EXISTS oa_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patent_id INTEGER,
+            geke_code TEXT,
+            patent_title TEXT,
+            oa_type TEXT,
+            official_deadline TEXT,
+            issue_date TEXT,
+            response_date TEXT,
+            handler TEXT,
+            writer TEXT,
+            progress TEXT,
+            agency TEXT,
+            oa_summary TEXT,
+            is_completed INTEGER DEFAULT 0,
+            is_extendable INTEGER DEFAULT 0,
+            extension_requested INTEGER DEFAULT 0,
+            extension_months INTEGER,
+            extended_deadline TEXT,
+            notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS pct_patents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            geke_code TEXT UNIQUE,
+            domestic_source TEXT,
+            application_no TEXT,
+            country_app_no TEXT,
+            title TEXT,
+            application_status TEXT,
+            handler TEXT,
+            inventor TEXT,
+            filing_date TEXT,
+            application_date TEXT,
+            priority_date TEXT,
+            country TEXT,
+            notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS software_copyrights (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_no TEXT UNIQUE,
+            reg_no TEXT,
+            title TEXT,
+            original_owner TEXT,
+            current_owner TEXT,
+            application_status TEXT,
+            handler TEXT,
+            developer TEXT,
+            inventor TEXT,
+            dev_complete_date TEXT,
+            application_date TEXT,
+            reg_date TEXT,
+            version TEXT,
+            notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS ic_layouts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_no TEXT UNIQUE,
+            reg_no TEXT,
+            title TEXT,
+            original_owner TEXT,
+            current_owner TEXT,
+            application_status TEXT,
+            handler TEXT,
+            designer TEXT,
+            inventor TEXT,
+            application_date TEXT,
+            creation_date TEXT,
+            cert_date TEXT,
+            notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS foreign_patents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            case_no TEXT UNIQUE,
+            pct_no TEXT,
+            country_app_no TEXT,
+            title TEXT,
+            owner TEXT,
+            patent_status TEXT,
+            handler TEXT,
+            inventor TEXT,
+            application_date TEXT,
+            authorization_date TEXT,
+            country TEXT,
+            application_no TEXT,
+            notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS annual_fees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patent_id INTEGER,
+            geke_code TEXT,
+            patent_title TEXT,
+            patent_type TEXT,
+            fee_year INTEGER,
+            fee_amount TEXT,
+            fee_period_end TEXT,
+            grace_period_end TEXT,
+            is_paid INTEGER DEFAULT 0,
+            payment_date TEXT,
+            notes TEXT
+        );
+    )");
+}
+
+bool EnsureHistoricalColumns(sqlite3* db) {
+    const std::map<std::string, std::vector<std::pair<std::string, std::string>>> columns = {
+        {"patents", {
+            {"patent_level", "TEXT"}, {"geke_handler", "TEXT"},
+            {"class_level1", "TEXT"}, {"class_level2", "TEXT"},
+            {"class_level3", "TEXT"}, {"rd_department", "TEXT"},
+            {"agency_firm", "TEXT"}, {"original_applicant", "TEXT"},
+            {"current_applicant", "TEXT"}, {"proposal_name", "TEXT"},
+        }},
+        {"oa_records", {
+            {"writer", "TEXT"}, {"progress", "TEXT"}, {"agency", "TEXT"},
+            {"oa_summary", "TEXT"}, {"is_extendable", "INTEGER DEFAULT 0"},
+            {"extension_requested", "INTEGER DEFAULT 0"},
+            {"extension_months", "INTEGER"}, {"extended_deadline", "TEXT"},
+        }},
+        {"pct_patents", {
+            {"domestic_source", "TEXT"}, {"country_app_no", "TEXT"},
+            {"filing_date", "TEXT"}, {"priority_date", "TEXT"}, {"country", "TEXT"},
+        }},
+        {"software_copyrights", {
+            {"original_owner", "TEXT"}, {"current_owner", "TEXT"},
+            {"developer", "TEXT"}, {"dev_complete_date", "TEXT"}, {"version", "TEXT"},
+        }},
+        {"ic_layouts", {
+            {"original_owner", "TEXT"}, {"current_owner", "TEXT"},
+            {"designer", "TEXT"}, {"creation_date", "TEXT"}, {"cert_date", "TEXT"},
+        }},
+        {"foreign_patents", {
+            {"pct_no", "TEXT"}, {"country_app_no", "TEXT"}, {"owner", "TEXT"},
+            {"patent_status", "TEXT"}, {"country", "TEXT"}, {"application_no", "TEXT"},
+        }},
+    };
+    for (const auto& [table, table_columns] : columns) {
+        for (const auto& [column, type] : table_columns) {
+            if (!HasColumn(db, table, column) &&
+                !Exec(db, "ALTER TABLE " + table + " ADD COLUMN " + column + " " + type + ";")) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool ApplyV1ToV2(sqlite3* db) {
+    if (!EnsureV1SupportingTables(db)) return false;
+    if (!EnsureHistoricalColumns(db)) return false;
+
     // 1. Structured patent columns
     for (const auto& [column, prefix] : PatentV2Columns()) {
         if (!HasColumn(db, "patents", column)) {
@@ -435,7 +629,32 @@ bool ApplyV3ToV4(sqlite3* db) {
     return true;
 }
 
-SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_path) {
+bool ApplyV4ToV5(sqlite3* db) {
+    const std::vector<std::pair<std::string, std::string>> document_cols = {
+        {"raw_title", "TEXT DEFAULT ''"},
+        {"document_code", "TEXT DEFAULT ''"},
+        {"document_version", "TEXT DEFAULT 'ORIGINAL'"},
+        {"event_key", "TEXT DEFAULT ''"},
+        {"source_trace", "TEXT DEFAULT ''"},
+    };
+    for (const auto& [column, type] : document_cols) {
+        if (!HasColumn(db, "prosecution_documents", column) &&
+            !Exec(db, "ALTER TABLE prosecution_documents ADD COLUMN " + column + " " + type + ";")) {
+            return false;
+        }
+    }
+    if (!Exec(db, R"(
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prosecution_docs_event_key
+            ON prosecution_documents(patent_id, event_key)
+            WHERE event_key <> '';
+    )")) {
+        return false;
+    }
+    return true;
+}
+
+SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_path,
+                                          bool create_backup) {
     SchemaMigrationResult result;
     if (!db) {
         result.ok = false;
@@ -450,64 +669,79 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
     int version = ReadSchemaVersion(db);
     result.from_version = version;
 
+    bool stamp_current_shape = false;
+    bool has_patents = false;
     if (version == 0) {
         const bool has_v2_shape =
             HasTable(db, "patents") && HasColumn(db, "patents", "technology_route");
         const bool has_current_shape = has_v2_shape &&
             HasColumn(db, "patents", "publication_number") &&
             HasColumn(db, "oa_records", "sync_flag") &&
-            HasTable(db, "prosecution_documents") && HasTable(db, "dossier_sync_state");
-        if (has_current_shape || !HasTable(db, "patents")) {
-            // Fresh database (or one without business tables): nothing to
-            // migrate, stamp the current version.
-            if (!Exec(db, "CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);",
-                      &result.error) ||
-                !Exec(db, "INSERT INTO schema_info (version) VALUES (" +
-                              std::to_string(kSchemaVersionCurrent) + ");", &result.error)) {
-                result.ok = false;
-                return result;
-            }
-            SeedDeadlineRulesIfEmpty(db);
-            result.to_version = kSchemaVersionCurrent;
+            HasTable(db, "prosecution_documents") && HasTable(db, "dossier_sync_state") &&
+            HasColumn(db, "prosecution_documents", "raw_title") &&
+            HasColumn(db, "prosecution_documents", "document_code") &&
+            HasColumn(db, "prosecution_documents", "document_version") &&
+            HasColumn(db, "prosecution_documents", "event_key") &&
+            HasColumn(db, "prosecution_documents", "source_trace") &&
+            HasIndex(db, "idx_prosecution_docs_event_key");
+        has_patents = HasTable(db, "patents");
+        if (has_current_shape || !has_patents) {
+            stamp_current_shape = true;
+        } else {
+            version = has_v2_shape ? 2 : 1;
+        }
+    }
+
+    // One consistent SQLite snapshot per upgrade flow, before the first
+    // migration statement. In-memory databases intentionally skip backups.
+    const bool needs_backup = create_backup && db_path != ":memory:" &&
+        (version < kSchemaVersionCurrent || (stamp_current_shape && has_patents));
+    if (needs_backup) {
+        time_t now = time(nullptr);
+        struct tm tm_buf;
+#ifdef _WIN32
+        localtime_s(&tm_buf, &now);
+#else
+        localtime_r(&now, &tm_buf);
+#endif
+        char ts[64];
+        snprintf(ts, sizeof(ts), "%04d%02d%02d_%02d%02d%02d",
+                 tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
+                 tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+        const std::string backup_path = db_path + ".pre_migration_" + ts + ".bak";
+        if (!BackupDatabase(db, backup_path, &result.error)) {
+            result.ok = false;
+            result.error = "pre-migration backup failed: " + result.error;
             return result;
         }
-        if (has_v2_shape) {
-            if (!Exec(db, "CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);",
-                      &result.error) ||
-                !Exec(db, "INSERT INTO schema_info (version) VALUES (2);", &result.error)) {
-                result.ok = false;
-                return result;
-            }
-            version = 2;
+        result.performed_backup = true;
+        result.backup_path = backup_path;
+        PATX_LOG_INFO("Pre-migration backup written: " + backup_path);
+    }
+
+    if (stamp_current_shape) {
+        // New/empty databases are initialized by Database::InitTables first;
+        // unversioned existing current-shaped databases have been backed up.
+        if (!Exec(db, "CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);",
+                  &result.error) ||
+            !Exec(db, "INSERT INTO schema_info (version) VALUES (" +
+                          std::to_string(kSchemaVersionCurrent) + ");", &result.error)) {
+            result.ok = false;
+            return result;
         }
-        // Legacy v1 database with real user data - back it up before touching
-        // anything. The backup is a byte-for-byte copy taken before the
-        // migration transaction starts.
-        if (db_path != ":memory:") {
-            time_t now = time(nullptr);
-            struct tm tm_buf;
-#ifdef _WIN32
-            localtime_s(&tm_buf, &now);
-#else
-            localtime_r(&now, &tm_buf);
-#endif
-            char ts[64];
-            snprintf(ts, sizeof(ts), "%04d%02d%02d_%02d%02d%02d",
-                     tm_buf.tm_year + 1900, tm_buf.tm_mon + 1, tm_buf.tm_mday,
-                     tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
-            std::string backup = db_path + ".pre_migration_" + ts + ".bak";
-            std::ifstream src(db_path, std::ios::binary);
-            if (src.is_open()) {
-                std::ofstream dst(backup, std::ios::binary);
-                dst << src.rdbuf();
-                dst.close();
-                src.close();
-                result.performed_backup = true;
-                result.backup_path = backup;
-                PATX_LOG_INFO("Pre-migration backup written: " + backup);
-            }
+        SeedDeadlineRulesIfEmpty(db);
+        result.to_version = kSchemaVersionCurrent;
+        return result;
+    }
+
+    // Unversioned v2-shaped databases are stamped only after their backup.
+    if (result.from_version == 0 && version == 2) {
+        if (!Exec(db, "CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);",
+                  &result.error) ||
+            !Exec(db, "INSERT INTO schema_info (version) VALUES (2);", &result.error)) {
+            result.ok = false;
+            return result;
         }
-        if (!has_v2_shape) version = 1;
     }
 
     while (version < kSchemaVersionCurrent) {
@@ -597,6 +831,38 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
             }
             version = 4;
             PATX_LOG_INFO("Schema migration v3 -> v4 committed");
+        } else if (version == 4) {
+            PATX_LOG_INFO("Applying schema migration v4 -> v5");
+            if (!Exec(db, "BEGIN TRANSACTION;", &result.error)) {
+                result.ok = false;
+                return result;
+            }
+            if (!ApplyV4ToV5(db)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v4->v5 migration failed (rolled back)";
+                return result;
+            }
+            if (!HasColumn(db, "prosecution_documents", "raw_title") ||
+                !HasColumn(db, "prosecution_documents", "document_code") ||
+                !HasColumn(db, "prosecution_documents", "document_version") ||
+                !HasColumn(db, "prosecution_documents", "event_key") ||
+                !HasColumn(db, "prosecution_documents", "source_trace") ||
+                !HasIndex(db, "idx_prosecution_docs_event_key")) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v4->v5 verification failed (rolled back)";
+                return result;
+            }
+            if (!Exec(db, "DELETE FROM schema_info;", &result.error) ||
+                !Exec(db, "INSERT INTO schema_info (version) VALUES (5);", &result.error) ||
+                !Exec(db, "COMMIT;", &result.error)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                return result;
+            }
+            version = 5;
+            PATX_LOG_INFO("Schema migration v4 -> v5 committed");
         } else {
             result.ok = false;
             result.error = "unknown schema version " + std::to_string(version);
