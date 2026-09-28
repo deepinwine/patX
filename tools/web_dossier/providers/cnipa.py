@@ -196,6 +196,8 @@ def parse_dossier_documents(html: str, application_number: str = "",
             confidence=Confidence.HIGH if (header_strong and date) else
                        (Confidence.MEDIUM if date else Confidence.LOW),
             oa_ordinal=ordinal,
+            document_code="",
+            document_version="ORIGINAL",
         ))
 
     if not docs:
@@ -251,6 +253,7 @@ def parse_cpquery_list_response(bodies, application_number="", publication_numbe
             title = (m.group(2) if m else name).strip()
             add = row.get("additionalData") or {}
             rid = str(add.get("rid") or row.get("nodeId") or f"row-{i+1}")
+            wenjiandm = str(add.get("wenjiandm") or "")
             doc_type, ordinal, confidence = classify_cn_title(title)
             docs.append(ProsecutionDocument(
                 jurisdiction="CN",
@@ -268,7 +271,9 @@ def parse_cpquery_list_response(bodies, application_number="", publication_numbe
                 confidence=Confidence.HIGH if date else Confidence.MEDIUM,
                 oa_ordinal=ordinal,
                 ds=str(row.get("ds") or add.get("ds") or ""),
-                wenjiandm=str(add.get("wenjiandm") or ""),
+                wenjiandm=wenjiandm,
+                document_code=wenjiandm,
+                document_version="ORIGINAL",
             ))
     if not docs:
         return SyncOutcome(code=ResultCode.PAGE_STRUCTURE_CHANGED,
