@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import threading
 
 import pytest
@@ -182,8 +184,6 @@ def test_latest_official_event_uses_date_ordinal_and_remote_id_ordering():
             DocumentType.OFFICE_ACTION_FIRST,
             oa_ordinal=1,
             remote_document_id="z-low-ordinal",
-            direction="  OFFICIAL  ",
-            document_version=" original ",
         ),
         _document(
             DocumentType.OFFICE_ACTION_NTH,
@@ -235,6 +235,18 @@ def test_latest_official_event_filters_translated_applicant_invalid_and_unknown(
             DocumentType.OFFICE_ACTION_UNKNOWN,
             official_date="2026-12-31",
             remote_document_id="unknown-oa",
+        ),
+        _document(
+            DocumentType.GRANT_NOTICE,
+            official_date="2026-12-31",
+            remote_document_id="padded-direction",
+            direction="  OFFICIAL  ",
+        ),
+        _document(
+            DocumentType.GRANT_NOTICE,
+            official_date="2026-12-31",
+            remote_document_id="lower-version",
+            document_version="original",
         ),
     ]
 
@@ -308,6 +320,86 @@ def test_get_chain_is_lazy_singleton_and_constructors_do_not_launch_browser(monk
         "epo_global_dossier",
         "cnipa",
     ]
+
+
+def test_real_chain_gates_cnipa_without_opening_browser_until_explicit_login(monkeypatch):
+    managers = {}
+
+    class FakeManager:
+        def __init__(self, provider, **_kwargs):
+            self.provider = provider
+            self._context = None
+            self._page = None
+            self.launch_calls = 0
+            self.open_page_calls = 0
+            self.ensure_login_calls = 0
+            self.token_checks = 0
+            managers[provider] = self
+
+        def has_cpquery_token(self):
+            self.token_checks += 1
+            return False
+
+        def launch(self):
+            self.launch_calls += 1
+            return True
+
+        def open_page(self, *_args, **_kwargs):
+            self.open_page_calls += 1
+            self.launch()
+            raise AssertionError("background sync must not open CNIPA")
+
+        def ensure_login(self, *_args, **_kwargs):
+            self.ensure_login_calls += 1
+            self.launch()
+            return ResultCode.OK
+
+    class FakeUspto:
+        provider_id = "uspto_global_dossier"
+
+        def __init__(self, browser_manager=None):
+            self._manager = browser_manager
+
+        def list_documents(self, *_args):
+            return SyncOutcome(code=ResultCode.NETWORK_ERROR, message="uspto down")
+
+    class FakeEpo:
+        provider_id = "epo_global_dossier"
+
+        def list_documents(self, *_args):
+            return SyncOutcome(code=ResultCode.NETWORK_ERROR, message="epo down")
+
+    monkeypatch.setattr("web_dossier.browser.manager.BrowserManager", FakeManager)
+    monkeypatch.setattr(
+        "web_dossier.providers.uspto_global_dossier.UsptoGlobalDossierProvider",
+        FakeUspto,
+    )
+    monkeypatch.setattr(
+        "web_dossier.providers.epo_global_dossier.EpoGlobalDossierProvider", FakeEpo
+    )
+
+    outcome = service._get_chain().list_documents(
+        APPLICATION_NUMBER, PUBLICATION_NUMBER, threading.Event()
+    )
+
+    cnipa_manager = managers["cnipa"]
+    assert outcome.code == ResultCode.AUTH_REQUIRED
+    assert outcome.provider_used == "cnipa"
+    assert [attempt.provider for attempt in outcome.attempts] == [
+        "uspto_global_dossier",
+        "epo_global_dossier",
+        "cnipa",
+    ]
+    assert cnipa_manager.launch_calls == 0
+    assert cnipa_manager.open_page_calls == 0
+    assert cnipa_manager.ensure_login_calls == 0
+    assert cnipa_manager.token_checks == 0
+
+    login = service._op_login({}, threading.Event())
+
+    assert login["code"] == "OK"
+    assert cnipa_manager.ensure_login_calls == 1
+    assert cnipa_manager.launch_calls == 1
 
 
 def test_explicit_login_still_only_uses_cnipa(monkeypatch):
@@ -432,3 +524,70 @@ def test_sync_case_exception_keeps_the_full_protocol_shape(monkeypatch):
     assert payload["latest_event"] is None
     assert payload["latest_oa"] is None
     assert "secret" not in payload["message"]
+
+
+def test_sync_case_malformed_args_keeps_the_full_protocol_shape(monkeypatch):
+    chain = _install_chain(monkeypatch, SyncOutcome(code=ResultCode.OK))
+
+    payload = service._op_sync_case([], threading.Event())
+
+    assert set(payload) == {
+        "ok",
+        "code",
+        "message",
+        "auth_state",
+        "provider_used",
+        "attempts",
+        "resolved_application_number",
+        "documents",
+        "latest_event",
+        "latest_oa",
+    }
+    assert payload["code"] == "TEMPORARY_ERROR"
+    assert chain.calls == []
+
+
+def test_main_rejects_non_mapping_request_and_continues(monkeypatch):
+    stdin = io.StringIO('[]\n{"op":"ping"}\n')
+    stdout = io.StringIO()
+    monkeypatch.setattr(service.sys, "stdin", stdin)
+    monkeypatch.setattr(service.sys, "stdout", stdout)
+
+    assert service.main() == 0
+
+    responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert responses[0]["code"] == "TEMPORARY_ERROR"
+    assert responses[1]["op"] == "pong"
+
+
+def test_main_dispatches_malformed_sync_args_as_stable_outcome(monkeypatch):
+    class ImmediateThread:
+        def __init__(self, target, daemon=False):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    stdin = io.StringIO('{"op":"sync_case","args":[]}\n')
+    stdout = io.StringIO()
+    monkeypatch.setattr(service.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(service.sys, "stdin", stdin)
+    monkeypatch.setattr(service.sys, "stdout", stdout)
+
+    assert service.main() == 0
+
+    response = json.loads(stdout.getvalue())
+    assert set(response) == {
+        "ok",
+        "code",
+        "message",
+        "auth_state",
+        "provider_used",
+        "attempts",
+        "resolved_application_number",
+        "documents",
+        "latest_event",
+        "latest_oa",
+    }
+    assert response["code"] == "TEMPORARY_ERROR"

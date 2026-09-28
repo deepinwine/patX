@@ -283,9 +283,9 @@ def pick_latest_official_event(documents):
         try:
             if document.document_type not in _OFFICIAL_EVENT_TYPES:
                 continue
-            if str(document.direction or "").strip().lower() != "official":
+            if document.direction != "official":
                 continue
-            if str(document.document_version or "").strip().upper() != "ORIGINAL":
+            if document.document_version != "ORIGINAL":
                 continue
             if not _valid_iso_date(document.official_date):
                 continue

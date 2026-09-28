@@ -30,6 +30,7 @@ import os
 import sys
 import threading
 import traceback
+from collections.abc import Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -40,6 +41,42 @@ from web_dossier.providers.cnipa import CNIPAWebProvider                    # no
 
 _PROVIDERS = {}
 _CHAIN = None
+
+
+class _BackgroundCnipaProvider:
+    """Use CNIPA only when an authenticated browser session already exists."""
+
+    provider_id = "cnipa"
+
+    def __init__(self, provider):
+        self._provider = provider
+
+    def _has_reusable_authenticated_session(self) -> bool:
+        manager = getattr(self._provider, "_manager", None)
+        if manager is None:
+            return False
+        if getattr(manager, "_context", None) is None:
+            return False
+        if getattr(manager, "_page", None) is None:
+            return False
+        has_token = getattr(manager, "has_cpquery_token", None)
+        if not callable(has_token):
+            return False
+        try:
+            return has_token() is True
+        except Exception:  # noqa: BLE001 - read-only provider state boundary
+            return False
+
+    def list_documents(self, application_number, publication_number, cancel):
+        if not self._has_reusable_authenticated_session():
+            return SyncOutcome(
+                code=ResultCode.AUTH_REQUIRED,
+                message="CNIPA 需要已有的已认证浏览器会话，请先显式登录",
+                auth_state="AUTH_REQUIRED",
+            )
+        return self._provider.list_documents(
+            application_number, publication_number, cancel
+        )
 
 
 def _get_provider(name: str):
@@ -79,7 +116,7 @@ def _get_chain():
     _CHAIN = ProviderChain([
         _PROVIDERS["uspto_global_dossier"],
         _PROVIDERS["epo_global_dossier"],
-        cnipa,
+        _BackgroundCnipaProvider(cnipa),
     ])
     return _CHAIN
 
@@ -102,25 +139,26 @@ def _op_login(args, cancel):
 
 
 def _op_sync_case(args, cancel):
-    app_no = args.get("application_number", "")
-    pub_no = args.get("publication_number", "")
     try:
+        if not isinstance(args, Mapping):
+            raise TypeError("sync_case args must be a JSON object")
+        app_no = args.get("application_number", "")
+        pub_no = args.get("publication_number", "")
         outcome = _get_chain().list_documents(app_no, pub_no, cancel)
         if not isinstance(outcome, SyncOutcome):
             raise TypeError("provider chain returned an invalid outcome")
+        latest_event = pick_latest_official_event(outcome.documents)
+        # Bypass ChainOutcome's legacy latest_oa override; SyncOutcome owns the
+        # protocol shape and safely serializes task-3 ProviderAttempt objects.
+        response = SyncOutcome.to_dict(outcome, latest_event)
+        if response["code"] == ResultCode.NEW_OFFICE_ACTION.value:
+            response["code"] = ResultCode.NEW_OFFICIAL_EVENT.value
+        return response
     except Exception as exc:  # noqa: BLE001 - sidecar safety boundary
-        outcome = SyncOutcome(
+        return SyncOutcome(
             code=ResultCode.TEMPORARY_ERROR,
             message=f"Provider 链内部错误: {type(exc).__name__}",
-        )
-
-    latest_event = pick_latest_official_event(outcome.documents)
-    # Bypass ChainOutcome's legacy latest_oa override; SyncOutcome owns the
-    # protocol shape and safely serializes task-3 ProviderAttempt objects.
-    response = SyncOutcome.to_dict(outcome, latest_event)
-    if response["code"] == ResultCode.NEW_OFFICE_ACTION.value:
-        response["code"] = ResultCode.NEW_OFFICIAL_EVENT.value
-    return response
+        ).to_dict()
 
 
 def _op_epo(args, cancel):
@@ -183,18 +221,30 @@ def main() -> int:
             sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
             sys.stdout.flush()
 
-    def run_op(handler, args):
+    def run_op(handler, args, *, sync_protocol=False):
         if busy.is_set():
-            send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
-                  "message": "上一件案件的查询仍在进行，请稍候"})
+            if sync_protocol:
+                send(SyncOutcome(
+                    code=ResultCode.TEMPORARY_ERROR,
+                    message="上一件案件的查询仍在进行，请稍候",
+                ).to_dict())
+            else:
+                send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
+                      "message": "上一件案件的查询仍在进行，请稍候"})
             return
 
         def target():
             try:
                 send(handler(args, cancel_event))
-            except Exception:
-                send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
-                      "message": "sidecar 内部错误（详见 stderr）"})
+            except Exception as exc:
+                if sync_protocol:
+                    send(SyncOutcome(
+                        code=ResultCode.TEMPORARY_ERROR,
+                        message=f"sidecar 内部错误: {type(exc).__name__}",
+                    ).to_dict())
+                else:
+                    send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
+                          "message": "sidecar 内部错误（详见 stderr）"})
                 traceback.print_exc(file=sys.stderr)
             finally:
                 busy.clear()
@@ -213,8 +263,19 @@ def main() -> int:
             send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
                   "message": "malformed JSON request"})
             continue
+        if not isinstance(request, Mapping):
+            send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
+                  "message": "JSON request must be an object"})
+            continue
         op = request.get("op", "")
-        args = request.get("args", {}) or {}
+        args = request.get("args", {})
+        if not isinstance(args, Mapping):
+            if op == "sync_case":
+                run_op(_op_sync_case, args, sync_protocol=True)
+            else:
+                send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
+                      "message": "request args must be an object"})
+            continue
         if op == "ping":
             send(_op_ping(args))
         elif op == "cancel":
@@ -230,7 +291,7 @@ def main() -> int:
         elif op == "login":
             run_op(_op_login, args)
         elif op == "sync_case":
-            run_op(_op_sync_case, args)
+            run_op(_op_sync_case, args, sync_protocol=True)
         elif op == "download_document":
             run_op(_op_download_document, args)
         elif op == "epo":
