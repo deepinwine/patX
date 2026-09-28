@@ -727,13 +727,13 @@ class EpoGlobalDossierProvider(DossierProvider):
                 status, html = self._fetch_html(url)
             else:
                 page = self._manager.open_page(url, cancel, fresh=True)
+                if cancel is not None and cancel.is_set():
+                    return SyncOutcome(
+                        code=ResultCode.TEMPORARY_ERROR,
+                        message="EPO Global Dossier 查询已取消",
+                    )
                 status = getattr(self._manager, "last_navigation_status", None)
                 if page is None:
-                    if cancel is not None and cancel.is_set():
-                        return SyncOutcome(
-                            code=ResultCode.TEMPORARY_ERROR,
-                            message="EPO Global Dossier 查询已取消",
-                        )
                     return SyncOutcome(
                         code=ResultCode.NETWORK_ERROR,
                         message="EPO Global Dossier 浏览器导航失败",
@@ -749,6 +749,11 @@ class EpoGlobalDossierProvider(DossierProvider):
                 code=ResultCode.NETWORK_ERROR,
                 message=f"EPO Global Dossier 请求失败: {type(exc).__name__}",
             )
+        if cancel is not None and cancel.is_set():
+            return SyncOutcome(
+                code=ResultCode.TEMPORARY_ERROR,
+                message="EPO Global Dossier 查询已取消",
+            )
         status_error = _http_error(status if isinstance(status, int) else 0)
         if status_error is not None:
             return status_error
@@ -756,11 +761,6 @@ class EpoGlobalDossierProvider(DossierProvider):
             return SyncOutcome(
                 code=ResultCode.TEMPORARY_ERROR,
                 message="EPO Global Dossier 响应超过安全大小限制",
-            )
-        if cancel is not None and cancel.is_set():
-            return SyncOutcome(
-                code=ResultCode.TEMPORARY_ERROR,
-                message="EPO Global Dossier 查询已取消",
             )
         return parse_epo_document_list(
             html, resolved.resolved_application_number, publication_number

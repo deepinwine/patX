@@ -478,6 +478,7 @@ def test_epo_default_provider_uses_controlled_headless_browser(monkeypatch):
             return FakePage()
 
     monkeypatch.setattr("web_dossier.browser.manager.BrowserManager", FakeManager)
+    monkeypatch.setattr(epo_module, "_playwright_available", lambda: True)
     provider = EpoGlobalDossierProvider()
 
     outcome = provider.list_documents(
@@ -535,6 +536,45 @@ def test_epo_browser_http_error_is_mapped_before_reading_page_content():
     ).list_documents("CN202510469601.5", "", Event())
 
     assert outcome.code == ResultCode.ACCESS_DENIED
+
+
+def test_epo_browser_cancel_after_navigation_precedes_status_and_content():
+    cancel = Event()
+
+    class UnreadablePage:
+        def content(self):
+            raise AssertionError("cancelled page content must not be consumed")
+
+    class FakeManager:
+        @property
+        def last_navigation_status(self):
+            raise AssertionError("cancel must be checked before HTTP status")
+
+        def open_page(self, url, cancel_event, *, fresh=False):
+            cancel_event.set()
+            return UnreadablePage()
+
+    outcome = EpoGlobalDossierProvider(
+        browser_manager=FakeManager()
+    ).list_documents("CN202510469601.5", "", cancel)
+
+    assert outcome.code == ResultCode.TEMPORARY_ERROR
+    assert "已取消" in outcome.message
+
+
+def test_epo_injected_fetch_cancel_precedes_http_status_and_html():
+    cancel = Event()
+
+    def fetch(_url):
+        cancel.set()
+        return 403, "should not be inspected"
+
+    outcome = EpoGlobalDossierProvider(fetch_html=fetch).list_documents(
+        "CN202510469601.5", "", cancel
+    )
+
+    assert outcome.code == ResultCode.TEMPORARY_ERROR
+    assert "已取消" in outcome.message
 
 
 def test_epo_default_health_check_reports_missing_playwright(monkeypatch):
