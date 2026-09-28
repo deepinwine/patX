@@ -246,3 +246,54 @@ def pick_latest_office_action(documents):
     if not oas:
         return None
     return max(oas, key=lambda d: (d.official_date, d.oa_ordinal))
+
+
+_OFFICIAL_EVENT_TYPES = frozenset({
+    DocumentType.OFFICE_ACTION_FIRST,
+    DocumentType.OFFICE_ACTION_SECOND,
+    DocumentType.OFFICE_ACTION_NTH,
+    DocumentType.REJECTION_DECISION,
+    DocumentType.GRANT_NOTICE,
+    DocumentType.CORRECTION_NOTICE,
+    DocumentType.OTHER_OFFICIAL,
+})
+
+
+def _valid_iso_date(value) -> bool:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None
+    ):
+        return False
+    try:
+        _dt.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def pick_latest_official_event(documents):
+    """Return the latest original official event from a provider result."""
+    try:
+        source = list(documents or [])
+    except Exception:  # noqa: BLE001 - provider data boundary
+        return None
+    candidates = []
+    for document in source:
+        try:
+            if document.document_type not in _OFFICIAL_EVENT_TYPES:
+                continue
+            if str(document.direction or "").strip().lower() != "official":
+                continue
+            if str(document.document_version or "").strip().upper() != "ORIGINAL":
+                continue
+            if not _valid_iso_date(document.official_date):
+                continue
+            ordinal = int(document.oa_ordinal)
+            remote_id = str(document.remote_document_id or "")
+        except (AttributeError, TypeError, ValueError):
+            continue
+        candidates.append((document.official_date, ordinal, remote_id, document))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate[:3])[3]

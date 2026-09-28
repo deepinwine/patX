@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import List, Optional
 
 from ..models import ProsecutionDocument, ResultCode
@@ -19,23 +20,81 @@ class SyncOutcome:
     auth_state: str = "NOT_INITIALIZED"
     documents: List[ProsecutionDocument] = field(default_factory=list)
     resolved_application_number: str = ""
+    provider_used: str = ""
+    attempts: list = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return self.code in (ResultCode.OK, ResultCode.NO_CHANGE,
+                             ResultCode.NEW_OFFICIAL_EVENT,
                              ResultCode.NEW_OFFICE_ACTION)
 
-    def to_dict(self, latest_oa: Optional[ProsecutionDocument]) -> dict:
-        d = {
+    @staticmethod
+    def _serialize_document(document) -> Optional[dict]:
+        try:
+            payload = document.to_dict()
+        except Exception:  # noqa: BLE001 - protocol serialization boundary
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _serialize_attempt(attempt) -> Optional[dict]:
+        try:
+            if isinstance(attempt, Mapping):
+                payload = dict(attempt)
+            else:
+                payload = attempt.to_dict()
+            if not isinstance(payload, Mapping):
+                return None
+            provider = payload.get("provider", "")
+            code = payload.get("code", "")
+            message = payload.get("message", "")
+            if isinstance(code, ResultCode):
+                code = code.value
+            if not all(isinstance(value, str) for value in (provider, code, message)):
+                return None
+            return {"provider": provider, "code": code, "message": message}
+        except Exception:  # noqa: BLE001 - protocol serialization boundary
+            return None
+
+    @staticmethod
+    def _safe_items(value) -> list:
+        try:
+            return list(value or [])
+        except Exception:  # noqa: BLE001 - protocol serialization boundary
+            return []
+
+    def to_dict(self, latest_event: Optional[ProsecutionDocument] = None,
+                **legacy_kwargs) -> dict:
+        if latest_event is None and "latest_oa" in legacy_kwargs:
+            latest_event = legacy_kwargs["latest_oa"]
+        code = self.code.value if isinstance(self.code, ResultCode) else str(self.code or "")
+        documents = [
+            payload
+            for document in self._safe_items(self.documents)
+            if (payload := self._serialize_document(document)) is not None
+        ]
+        attempts = [
+            payload
+            for attempt in self._safe_items(self.attempts)
+            if (payload := self._serialize_attempt(attempt)) is not None
+        ]
+        latest_payload = self._serialize_document(latest_event) if latest_event else None
+        return {
             "ok": self.ok,
-            "code": self.code.value,
-            "message": self.message,
-            "auth_state": self.auth_state,
-            "resolved_application_number": self.resolved_application_number,
-            "documents": [doc.to_dict() for doc in self.documents],
-            "latest_oa": latest_oa.to_dict() if latest_oa else None,
+            "code": code,
+            "message": self.message if isinstance(self.message, str) else "",
+            "auth_state": self.auth_state if isinstance(self.auth_state, str) else "",
+            "provider_used": self.provider_used if isinstance(self.provider_used, str) else "",
+            "attempts": attempts,
+            "resolved_application_number": (
+                self.resolved_application_number
+                if isinstance(self.resolved_application_number, str) else ""
+            ),
+            "documents": documents,
+            "latest_event": latest_payload,
+            "latest_oa": None,
         }
-        return d
 
 
 class DossierProvider(abc.ABC):
