@@ -184,6 +184,11 @@ def test_provider_attempt_and_chain_outcome_serialization_are_stable():
     assert payload["attempts"] == [
         {"provider": "epo_global_dossier", "code": "OK", "message": ""}
     ]
+    assert payload["latest_event"]["remote_document_id"] == FIRST_OA.remote_document_id
+    assert payload["latest_oa"] is None
+
+    keyword_payload = outcome.to_dict(latest_event=FIRST_OA)
+    assert keyword_payload == payload
 
 
 def test_chain_honours_cancel_before_and_between_providers():

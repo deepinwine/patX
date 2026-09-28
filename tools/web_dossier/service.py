@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import sys
 import threading
 import traceback
@@ -51,32 +52,43 @@ class _BackgroundCnipaProvider:
     def __init__(self, provider):
         self._provider = provider
 
-    def _has_reusable_authenticated_session(self) -> bool:
-        manager = getattr(self._provider, "_manager", None)
-        if manager is None:
-            return False
-        if getattr(manager, "_context", None) is None:
-            return False
-        if getattr(manager, "_page", None) is None:
-            return False
-        has_token = getattr(manager, "has_cpquery_token", None)
-        if not callable(has_token):
-            return False
+    def _existing_session_state(self) -> str:
+        state_reader = getattr(self._provider, "existing_session_state", None)
+        if not callable(state_reader):
+            return "NOT_INITIALIZED"
         try:
-            return has_token() is True
+            state = state_reader()
         except Exception:  # noqa: BLE001 - read-only provider state boundary
-            return False
+            return "SESSION_EXPIRED"
+        if state in {
+            "NOT_INITIALIZED",
+            "AUTH_REQUIRED",
+            "SESSION_EXPIRED",
+            "AUTHENTICATED",
+        }:
+            return state
+        return "SESSION_EXPIRED"
 
     def list_documents(self, application_number, publication_number, cancel):
-        if not self._has_reusable_authenticated_session():
+        state = self._existing_session_state()
+        if state == "SESSION_EXPIRED":
+            return SyncOutcome(
+                code=ResultCode.SESSION_EXPIRED,
+                message="CNIPA 已有浏览器会话已过期，请重新显式登录",
+                auth_state="SESSION_EXPIRED",
+            )
+        if state != "AUTHENTICATED":
             return SyncOutcome(
                 code=ResultCode.AUTH_REQUIRED,
                 message="CNIPA 需要已有的已认证浏览器会话，请先显式登录",
                 auth_state="AUTH_REQUIRED",
             )
-        return self._provider.list_documents(
+        outcome = self._provider.list_documents(
             application_number, publication_number, cancel
         )
+        if isinstance(outcome, SyncOutcome) and outcome.ok:
+            outcome.auth_state = "AUTHENTICATED"
+        return outcome
 
 
 def _get_provider(name: str):
@@ -215,11 +227,61 @@ def main() -> int:
     busy = threading.Event()          # one long op at a time; the main thread
     cancel_event = threading.Event()  # stays free to read "cancel"/"shutdown"
     out_lock = threading.Lock()
+    work_queue = queue.Queue()
+    shutdown_queued = False
 
     def send(obj: dict):
         with out_lock:
             sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
             sys.stdout.flush()
+
+    def close_providers():
+        for provider in _PROVIDERS.values():
+            try:
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    close()
+            except Exception:
+                pass
+
+    def worker_loop():
+        while True:
+            task = work_queue.get()
+            kind = task[0]
+            if kind == "shutdown":
+                try:
+                    close_providers()
+                    busy.clear()
+                    if task[1]:
+                        send({"ok": True, "code": "OK"})
+                finally:
+                    work_queue.task_done()
+                return
+
+            _, handler, args, sync_protocol = task
+            try:
+                response = handler(args, cancel_event)
+            except Exception as exc:
+                if sync_protocol:
+                    response = SyncOutcome(
+                        code=ResultCode.TEMPORARY_ERROR,
+                        message=f"sidecar 内部错误: {type(exc).__name__}",
+                    ).to_dict()
+                else:
+                    response = {
+                        "ok": False,
+                        "code": ResultCode.TEMPORARY_ERROR.value,
+                        "message": "sidecar 内部错误（详见 stderr）",
+                    }
+                traceback.print_exc(file=sys.stderr)
+            busy.clear()
+            try:
+                send(response)
+            finally:
+                work_queue.task_done()
+
+    worker = threading.Thread(target=worker_loop, daemon=False)
+    worker.start()
 
     def run_op(handler, args, *, sync_protocol=False):
         if busy.is_set():
@@ -232,26 +294,9 @@ def main() -> int:
                 send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
                       "message": "上一件案件的查询仍在进行，请稍候"})
             return
-
-        def target():
-            try:
-                send(handler(args, cancel_event))
-            except Exception as exc:
-                if sync_protocol:
-                    send(SyncOutcome(
-                        code=ResultCode.TEMPORARY_ERROR,
-                        message=f"sidecar 内部错误: {type(exc).__name__}",
-                    ).to_dict())
-                else:
-                    send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
-                          "message": "sidecar 内部错误（详见 stderr）"})
-                traceback.print_exc(file=sys.stderr)
-            finally:
-                busy.clear()
-
         busy.set()
         cancel_event.clear()
-        threading.Thread(target=target, daemon=False).start()
+        work_queue.put(("call", handler, args, sync_protocol))
 
     for line in sys.stdin:
         line = line.strip()
@@ -281,13 +326,10 @@ def main() -> int:
         elif op == "cancel":
             cancel_event.set()
         elif op == "shutdown":
-            for provider in _PROVIDERS.values():
-                try:
-                    provider._manager.close()
-                except Exception:
-                    pass
-            send({"ok": True, "code": "OK"})
-            return 0
+            cancel_event.set()
+            work_queue.put(("shutdown", True))
+            shutdown_queued = True
+            break
         elif op == "login":
             run_op(_op_login, args)
         elif op == "sync_case":
@@ -299,6 +341,9 @@ def main() -> int:
         else:
             send({"ok": False, "code": ResultCode.TEMPORARY_ERROR.value,
                   "message": f"unknown op: {op}"})
+    if not shutdown_queued:
+        work_queue.put(("shutdown", False))
+    worker.join()
     return 0
 
 

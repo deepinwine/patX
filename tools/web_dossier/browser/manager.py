@@ -10,11 +10,14 @@ Guardrails baked in on purpose:
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import datetime as _dt
 import json
 import os
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -114,6 +117,55 @@ class BrowserManager:
             return bool(self._page.evaluate("localStorage.getItem('ACCESS_TOKEN')"))
         except Exception:
             return False
+
+    def cpquery_session_state(
+        self, *, now: Optional[float] = None, min_ttl_seconds: float = 60
+    ) -> str:
+        """Inspect an existing CNIPA session without launching or navigating."""
+        if self._context is None or self._page is None:
+            return "NOT_INITIALIZED"
+        try:
+            parsed = urllib.parse.urlparse(str(self._page.url or ""))
+            if (
+                parsed.scheme not in ("http", "https")
+                or parsed.hostname != "cpquery.cnipa.gov.cn"
+            ):
+                return "AUTH_REQUIRED"
+            token = self._page.evaluate("localStorage.getItem('ACCESS_TOKEN')")
+        except Exception:
+            return "SESSION_EXPIRED"
+        if not isinstance(token, str) or not token:
+            return "AUTH_REQUIRED"
+        try:
+            parts = token.split(".")
+            if len(parts) != 3:
+                raise ValueError("not a JWT")
+            payload_segment = parts[1]
+            padding = "=" * (-len(payload_segment) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(
+                (payload_segment + padding).encode("ascii")
+            ).decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("JWT payload is not an object")
+            expires_at = payload.get("exp")
+            if (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+            ):
+                raise ValueError("JWT has no numeric exp")
+            reference_time = time.time() if now is None else float(now)
+            ttl_margin = max(0.0, float(min_ttl_seconds))
+        except (
+            ValueError,
+            TypeError,
+            UnicodeError,
+            binascii.Error,
+            json.JSONDecodeError,
+        ):
+            return "SESSION_EXPIRED"
+        if float(expires_at) <= reference_time + ttl_margin:
+            return "SESSION_EXPIRED"
+        return "AUTHENTICATED"
 
     def _spawn_and_attach(self):
         """Launch a REAL browser ourselves with a debug port, then attach via

@@ -6,11 +6,16 @@ REST APIs later (USPTOODPProvider, EPOOPSProvider) without any caller change.
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass, field
+import json
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import List, Optional
 
-from ..models import ProsecutionDocument, ResultCode
+from ..models import DocumentType, ProsecutionDocument, ResultCode
+
+
+class ProtocolSerializationError(ValueError):
+    """A sidecar outcome contains data that cannot be serialized safely."""
 
 
 @dataclass
@@ -30,67 +35,94 @@ class SyncOutcome:
                              ResultCode.NEW_OFFICE_ACTION)
 
     @staticmethod
-    def _serialize_document(document) -> Optional[dict]:
+    def _serialize_document(document, label: str = "document") -> dict:
         try:
             payload = document.to_dict()
-        except Exception:  # noqa: BLE001 - protocol serialization boundary
-            return None
-        return payload if isinstance(payload, dict) else None
+        except Exception as exc:  # noqa: BLE001 - protocol serialization boundary
+            raise ProtocolSerializationError(
+                f"{label} to_dict failed: {type(exc).__name__}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ProtocolSerializationError(f"{label} to_dict must return dict")
+        valid_document_types = {item.value for item in DocumentType}
+        if payload.get("document_type") not in valid_document_types:
+            raise ProtocolSerializationError(f"{label} has invalid document_type")
+        try:
+            json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ProtocolSerializationError(
+                f"{label} contains non-JSON data"
+            ) from exc
+        return payload
 
     @staticmethod
-    def _serialize_attempt(attempt) -> Optional[dict]:
+    def _serialize_attempt(attempt) -> dict:
         try:
             if isinstance(attempt, Mapping):
                 payload = dict(attempt)
             else:
                 payload = attempt.to_dict()
-            if not isinstance(payload, Mapping):
-                return None
-            provider = payload.get("provider", "")
-            code = payload.get("code", "")
-            message = payload.get("message", "")
-            if isinstance(code, ResultCode):
-                code = code.value
-            if not all(isinstance(value, str) for value in (provider, code, message)):
-                return None
-            return {"provider": provider, "code": code, "message": message}
-        except Exception:  # noqa: BLE001 - protocol serialization boundary
-            return None
+        except Exception as exc:  # noqa: BLE001 - protocol serialization boundary
+            raise ProtocolSerializationError(
+                f"attempt to_dict failed: {type(exc).__name__}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ProtocolSerializationError("attempt to_dict must return dict")
+        provider = payload.get("provider", "")
+        code = payload.get("code", "")
+        message = payload.get("message", "")
+        if isinstance(code, ResultCode):
+            code = code.value
+        valid_codes = {item.value for item in ResultCode}
+        if not isinstance(provider, str) or not provider:
+            raise ProtocolSerializationError("attempt has invalid provider")
+        if code not in valid_codes:
+            raise ProtocolSerializationError("attempt has invalid code")
+        if not isinstance(message, str):
+            raise ProtocolSerializationError("attempt has invalid message")
+        return {"provider": provider, "code": code, "message": message}
 
     @staticmethod
-    def _safe_items(value) -> list:
+    def _strict_items(value, label: str) -> list:
         try:
-            return list(value or [])
-        except Exception:  # noqa: BLE001 - protocol serialization boundary
-            return []
+            return list(value)
+        except Exception as exc:  # noqa: BLE001 - protocol serialization boundary
+            raise ProtocolSerializationError(f"{label} must be iterable") from exc
 
     def to_dict(self, latest_event: Optional[ProsecutionDocument] = None,
                 **legacy_kwargs) -> dict:
         if latest_event is None and "latest_oa" in legacy_kwargs:
             latest_event = legacy_kwargs["latest_oa"]
-        code = self.code.value if isinstance(self.code, ResultCode) else str(self.code or "")
+        if not isinstance(self.code, ResultCode):
+            raise ProtocolSerializationError("outcome has invalid code")
+        for label, value in (
+            ("message", self.message),
+            ("auth_state", self.auth_state),
+            ("provider_used", self.provider_used),
+            ("resolved_application_number", self.resolved_application_number),
+        ):
+            if not isinstance(value, str):
+                raise ProtocolSerializationError(f"outcome has invalid {label}")
         documents = [
-            payload
-            for document in self._safe_items(self.documents)
-            if (payload := self._serialize_document(document)) is not None
+            self._serialize_document(document)
+            for document in self._strict_items(self.documents, "documents")
         ]
         attempts = [
-            payload
-            for attempt in self._safe_items(self.attempts)
-            if (payload := self._serialize_attempt(attempt)) is not None
+            self._serialize_attempt(attempt)
+            for attempt in self._strict_items(self.attempts, "attempts")
         ]
-        latest_payload = self._serialize_document(latest_event) if latest_event else None
+        latest_payload = (
+            self._serialize_document(latest_event, "latest_event")
+            if latest_event is not None else None
+        )
         return {
             "ok": self.ok,
-            "code": code,
-            "message": self.message if isinstance(self.message, str) else "",
-            "auth_state": self.auth_state if isinstance(self.auth_state, str) else "",
-            "provider_used": self.provider_used if isinstance(self.provider_used, str) else "",
+            "code": self.code.value,
+            "message": self.message,
+            "auth_state": self.auth_state,
+            "provider_used": self.provider_used,
             "attempts": attempts,
-            "resolved_application_number": (
-                self.resolved_application_number
-                if isinstance(self.resolved_application_number, str) else ""
-            ),
+            "resolved_application_number": self.resolved_application_number,
             "documents": documents,
             "latest_event": latest_payload,
             "latest_oa": None,
@@ -133,3 +165,9 @@ class DossierProvider(abc.ABC):
     def get_latest_office_action(self, outcome: SyncOutcome) -> Optional[ProsecutionDocument]:
         from ..models import pick_latest_office_action
         return pick_latest_office_action(outcome.documents)
+
+    def close(self) -> None:
+        """Close provider-owned browser resources, when present."""
+        manager = getattr(self, "_manager", None)
+        if manager is not None:
+            manager.close()

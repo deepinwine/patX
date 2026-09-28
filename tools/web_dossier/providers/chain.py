@@ -1,7 +1,7 @@
 """Ordered, auditable fallback across dossier metadata providers."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable, Optional
 
 from ..models import ProsecutionDocument, ResultCode
@@ -35,9 +35,6 @@ class ProviderAttempt:
 
 @dataclass
 class ChainOutcome(SyncOutcome):
-    provider_used: str = ""
-    attempts: list[ProviderAttempt] = field(default_factory=list)
-
     @classmethod
     def from_outcome(
         cls,
@@ -66,13 +63,6 @@ class ChainOutcome(SyncOutcome):
             provider_used=provider_used,
             attempts=list(attempts),
         )
-
-    def to_dict(self, latest_oa: Optional[ProsecutionDocument]) -> dict:
-        payload = super().to_dict(latest_oa)
-        payload["provider_used"] = self.provider_used
-        payload["attempts"] = [attempt.to_dict() for attempt in self.attempts]
-        return payload
-
 
 def _cancelled(cancel) -> bool:
     return cancel is not None and cancel.is_set()

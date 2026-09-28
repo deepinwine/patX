@@ -424,6 +424,28 @@ class CNIPAWebProvider(DossierProvider):
         except ImportError:
             return False
 
+    def existing_session_state(self) -> str:
+        """Return existing auth state without launching or navigating."""
+        if self._fixture_dir.name:
+            return "AUTHENTICATED"
+        if self._manager is None:
+            return "NOT_INITIALIZED"
+        state_reader = getattr(self._manager, "cpquery_session_state", None)
+        if not callable(state_reader):
+            return "NOT_INITIALIZED"
+        try:
+            state = state_reader()
+        except Exception:  # noqa: BLE001 - read-only manager boundary
+            return "SESSION_EXPIRED"
+        if state in {
+            "NOT_INITIALIZED",
+            "AUTH_REQUIRED",
+            "SESSION_EXPIRED",
+            "AUTHENTICATED",
+        }:
+            return state
+        return "SESSION_EXPIRED"
+
     def _pace(self):
         """Sleep so consecutive queries keep a human pace (per process)."""
         wait = self._last_query_at + MIN_QUERY_INTERVAL_SECONDS - time.monotonic()

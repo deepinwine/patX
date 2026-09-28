@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import io
 import json
+import base64
 import threading
+import time
 
 import pytest
 
-from tools.web_dossier import service
-from web_dossier import models
+from web_dossier import models, service
 from web_dossier.models import DocumentType, ProsecutionDocument, ResultCode
-from web_dossier.providers.base import SyncOutcome
+from web_dossier.providers.base import ProtocolSerializationError, SyncOutcome
 from web_dossier.providers.chain import ProviderAttempt
 
 
@@ -333,12 +334,12 @@ def test_real_chain_gates_cnipa_without_opening_browser_until_explicit_login(mon
             self.launch_calls = 0
             self.open_page_calls = 0
             self.ensure_login_calls = 0
-            self.token_checks = 0
+            self.state_checks = 0
             managers[provider] = self
 
-        def has_cpquery_token(self):
-            self.token_checks += 1
-            return False
+        def cpquery_session_state(self):
+            self.state_checks += 1
+            return "NOT_INITIALIZED"
 
         def launch(self):
             self.launch_calls += 1
@@ -393,7 +394,7 @@ def test_real_chain_gates_cnipa_without_opening_browser_until_explicit_login(mon
     assert cnipa_manager.launch_calls == 0
     assert cnipa_manager.open_page_calls == 0
     assert cnipa_manager.ensure_login_calls == 0
-    assert cnipa_manager.token_checks == 0
+    assert cnipa_manager.state_checks == 1
 
     login = service._op_login({}, threading.Event())
 
@@ -431,7 +432,7 @@ def test_explicit_login_still_only_uses_cnipa(monkeypatch):
     assert fake_cnipa.login_calls == 1
 
 
-def test_sync_outcome_serialization_tolerates_malformed_documents_and_attempts():
+def test_sync_outcome_serialization_rejects_malformed_documents_and_attempts():
     class Broken:
         def to_dict(self):
             raise KeyError("broken")
@@ -448,24 +449,72 @@ def test_sync_outcome_serialization_tolerates_malformed_documents_and_attempts()
         ],
     )
 
-    payload = outcome.to_dict(latest_event=None)
-
-    assert payload["documents"] == []
-    assert payload["attempts"] == [
-        {"provider": "first", "code": "NETWORK_ERROR", "message": "offline"},
-        {"provider": "second", "code": "OK", "message": ""},
-    ]
-    assert payload["latest_event"] is None
-    assert payload["latest_oa"] is None
+    with pytest.raises(ProtocolSerializationError, match="document"):
+        outcome.to_dict(latest_event=None)
 
 
-def test_sync_outcome_serialization_tolerates_non_iterable_containers():
+def test_sync_outcome_serialization_rejects_non_iterable_containers():
     outcome = SyncOutcome(code=ResultCode.OK)
     outcome.documents = object()
     outcome.attempts = object()
 
-    payload = outcome.to_dict()
+    with pytest.raises(ProtocolSerializationError, match="documents"):
+        outcome.to_dict()
 
+
+@pytest.mark.parametrize(
+    "attempt",
+    [
+        {"provider": "broken", "code": "NOT_A_RESULT_CODE", "message": ""},
+        object(),
+    ],
+)
+def test_sync_outcome_serialization_rejects_invalid_attempt(attempt):
+    outcome = SyncOutcome(code=ResultCode.OK, attempts=[attempt])
+
+    with pytest.raises(ProtocolSerializationError, match="attempt"):
+        outcome.to_dict()
+
+
+def test_sync_outcome_serialization_rejects_invalid_document_and_latest_event():
+    invalid = _document()
+    invalid.document_type = "NOT_A_DOCUMENT_TYPE"
+
+    with pytest.raises(ProtocolSerializationError, match="document"):
+        SyncOutcome(code=ResultCode.OK, documents=[invalid]).to_dict()
+    with pytest.raises(ProtocolSerializationError, match="latest_event"):
+        SyncOutcome(code=ResultCode.OK).to_dict(latest_event=invalid)
+
+
+def test_sync_outcome_serialization_rejects_non_dict_to_dict_results():
+    class ReturnsList:
+        def to_dict(self):
+            return []
+
+    with pytest.raises(ProtocolSerializationError, match="document"):
+        SyncOutcome(code=ResultCode.OK, documents=[ReturnsList()]).to_dict()
+    with pytest.raises(ProtocolSerializationError, match="attempt"):
+        SyncOutcome(code=ResultCode.OK, attempts=[ReturnsList()]).to_dict()
+
+
+def test_sync_case_converts_serialization_failure_to_stable_error(monkeypatch):
+    class BrokenDocument:
+        def to_dict(self):
+            raise KeyError("broken")
+
+    _install_chain(
+        monkeypatch,
+        SyncOutcome(
+            code=ResultCode.OK,
+            documents=[BrokenDocument()],
+            provider_used="broken-provider",
+        ),
+    )
+
+    payload = service._op_sync_case({}, threading.Event())
+
+    assert payload["code"] == "TEMPORARY_ERROR"
+    assert payload["ok"] is False
     assert payload["documents"] == []
     assert payload["attempts"] == []
 
@@ -561,17 +610,8 @@ def test_main_rejects_non_mapping_request_and_continues(monkeypatch):
 
 
 def test_main_dispatches_malformed_sync_args_as_stable_outcome(monkeypatch):
-    class ImmediateThread:
-        def __init__(self, target, daemon=False):
-            self.target = target
-            self.daemon = daemon
-
-        def start(self):
-            self.target()
-
     stdin = io.StringIO('{"op":"sync_case","args":[]}\n')
     stdout = io.StringIO()
-    monkeypatch.setattr(service.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(service.sys, "stdin", stdin)
     monkeypatch.setattr(service.sys, "stdout", stdout)
 
@@ -591,3 +631,244 @@ def test_main_dispatches_malformed_sync_args_as_stable_outcome(monkeypatch):
         "latest_oa",
     }
     assert response["code"] == "TEMPORARY_ERROR"
+
+
+class _WaitingOutput(io.StringIO):
+    def __init__(self):
+        super().__init__()
+        self._condition = threading.Condition()
+        self._line_count = 0
+
+    def write(self, value):
+        written = super().write(value)
+        if "\n" in value:
+            with self._condition:
+                self._line_count += value.count("\n")
+                self._condition.notify_all()
+        return written
+
+    def wait_for_lines(self, count):
+        with self._condition:
+            assert self._condition.wait_for(
+                lambda: self._line_count >= count, timeout=2
+            )
+
+
+class _SequencedInput:
+    def __init__(self, lines, output):
+        self._lines = lines
+        self._output = output
+
+    def __iter__(self):
+        for index, line in enumerate(self._lines):
+            if index:
+                self._output.wait_for_lines(index)
+            yield line
+
+
+def test_main_uses_one_long_lived_worker_for_provider_lifecycle(monkeypatch):
+    thread_ids = []
+
+    class FakeManager:
+        def __init__(self, provider, **_kwargs):
+            self.provider = provider
+            thread_ids.append((f"manager:{provider}", threading.get_ident()))
+
+        def close(self):
+            thread_ids.append((f"close:{self.provider}", threading.get_ident()))
+
+    class FakeCnipa:
+        provider_id = "cnipa"
+
+        def __init__(self, browser_manager=None):
+            self._manager = browser_manager
+            thread_ids.append(("provider:cnipa", threading.get_ident()))
+
+        def existing_session_state(self):
+            return "AUTHENTICATED"
+
+        def ensure_login(self, _cancel):
+            thread_ids.append(("login", threading.get_ident()))
+            return ResultCode.OK
+
+        def list_documents(self, *_args):
+            thread_ids.append(("cnipa-sync", threading.get_ident()))
+            return SyncOutcome(code=ResultCode.OK)
+
+        def download_document(self, *_args):
+            thread_ids.append(("download", threading.get_ident()))
+            return ResultCode.OK, {}
+
+        def close(self):
+            self._manager.close()
+
+    class FakeUspto:
+        provider_id = "uspto_global_dossier"
+
+        def __init__(self, browser_manager=None):
+            self._manager = browser_manager
+            thread_ids.append(("provider:uspto", threading.get_ident()))
+
+        def list_documents(self, *_args):
+            thread_ids.append(("sync", threading.get_ident()))
+            return SyncOutcome(code=ResultCode.OK)
+
+        def close(self):
+            self._manager.close()
+
+    class FakeEpo:
+        provider_id = "epo_global_dossier"
+
+        def __init__(self):
+            thread_ids.append(("provider:epo", threading.get_ident()))
+
+        def list_documents(self, *_args):
+            raise AssertionError("USPTO should satisfy this test")
+
+    monkeypatch.setattr("web_dossier.browser.manager.BrowserManager", FakeManager)
+    monkeypatch.setattr(service, "CNIPAWebProvider", FakeCnipa)
+    monkeypatch.setattr(
+        "web_dossier.providers.uspto_global_dossier.UsptoGlobalDossierProvider",
+        FakeUspto,
+    )
+    monkeypatch.setattr(
+        "web_dossier.providers.epo_global_dossier.EpoGlobalDossierProvider", FakeEpo
+    )
+    output = _WaitingOutput()
+    lines = [
+        '{"op":"login","args":{}}\n',
+        '{"op":"sync_case","args":{}}\n',
+        '{"op":"download_document","args":{}}\n',
+        '{"op":"sync_case","args":{}}\n',
+        '{"op":"shutdown","args":{}}\n',
+    ]
+    monkeypatch.setattr(service.sys, "stdin", _SequencedInput(lines, output))
+    monkeypatch.setattr(service.sys, "stdout", output)
+    main_thread = threading.get_ident()
+
+    assert service.main() == 0
+
+    operation_ids = [thread_id for _label, thread_id in thread_ids]
+    assert operation_ids
+    assert len(set(operation_ids)) == 1
+    assert operation_ids[0] != main_thread
+    assert [label for label, _thread_id in thread_ids].count("sync") == 2
+    assert any(label.startswith("close:") for label, _thread_id in thread_ids)
+
+
+def test_main_thread_can_cancel_the_long_lived_worker(monkeypatch):
+    started = threading.Event()
+    finished = threading.Event()
+    worker_threads = []
+
+    class BlockingChain:
+        def list_documents(self, _application, _publication, cancel):
+            worker_threads.append(threading.get_ident())
+            started.set()
+            assert cancel.wait(timeout=2)
+            finished.set()
+            return SyncOutcome(
+                code=ResultCode.TEMPORARY_ERROR,
+                message="cancelled",
+            )
+
+    class CancelInput:
+        def __iter__(self):
+            yield '{"op":"sync_case","args":{}}\n'
+            assert started.wait(timeout=2)
+            yield '{"op":"cancel","args":{}}\n'
+            assert finished.wait(timeout=2)
+            yield '{"op":"shutdown","args":{}}\n'
+
+    output = _WaitingOutput()
+    monkeypatch.setattr(service, "_get_chain", lambda: BlockingChain())
+    monkeypatch.setattr(service.sys, "stdin", CancelInput())
+    monkeypatch.setattr(service.sys, "stdout", output)
+    main_thread = threading.get_ident()
+
+    assert service.main() == 0
+
+    assert worker_threads and worker_threads[0] != main_thread
+
+
+def _jwt(exp=None):
+    def encode(payload):
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    payload = {} if exp is None else {"exp": exp}
+    return f"{encode({'alg': 'none'})}.{encode(payload)}.signature"
+
+
+class _TokenPage:
+    def __init__(self, token, url="https://cpquery.cnipa.gov.cn/"):
+        self.url = url
+        self._token = token
+
+    def evaluate(self, expression):
+        assert expression == "localStorage.getItem('ACCESS_TOKEN')"
+        return self._token
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        (None, "AUTH_REQUIRED"),
+        (_jwt(exp=1_000), "SESSION_EXPIRED"),
+        (_jwt(exp=10_000), "AUTHENTICATED"),
+        (_jwt(), "SESSION_EXPIRED"),
+        ("not-a-jwt", "SESSION_EXPIRED"),
+        ("eyJhbGciOiJub25lIn0.W10.signature", "SESSION_EXPIRED"),
+    ],
+)
+def test_cpquery_session_state_validates_token_without_launch(token, expected):
+    from web_dossier.browser.manager import BrowserManager
+
+    manager = BrowserManager("cnipa")
+    manager._context = object()
+    manager._page = _TokenPage(token)
+    manager.launch = lambda: pytest.fail("session state must not launch")
+
+    assert manager.cpquery_session_state(now=2_000, min_ttl_seconds=60) == expected
+
+
+def test_cpquery_session_state_distinguishes_uninitialized_and_wrong_origin():
+    from web_dossier.browser.manager import BrowserManager
+
+    manager = BrowserManager("cnipa")
+    assert manager.cpquery_session_state(now=time.time()) == "NOT_INITIALIZED"
+    manager._context = object()
+    manager._page = _TokenPage(
+        _jwt(exp=time.time() + 3_600), url="https://example.com/"
+    )
+    assert manager.cpquery_session_state(now=time.time()) == "AUTH_REQUIRED"
+
+
+def test_background_cnipa_gate_preserves_session_state_and_normalizes_success():
+    class FakeProvider:
+        def __init__(self, state):
+            self.state = state
+            self.calls = 0
+
+        def existing_session_state(self):
+            return self.state
+
+        def list_documents(self, *_args):
+            self.calls += 1
+            return SyncOutcome(code=ResultCode.OK)
+
+    expired = FakeProvider("SESSION_EXPIRED")
+    expired_outcome = service._BackgroundCnipaProvider(expired).list_documents(
+        "", "", threading.Event()
+    )
+    assert expired_outcome.code == ResultCode.SESSION_EXPIRED
+    assert expired_outcome.auth_state == "SESSION_EXPIRED"
+    assert expired.calls == 0
+
+    authenticated = FakeProvider("AUTHENTICATED")
+    ok = service._BackgroundCnipaProvider(authenticated).list_documents(
+        "", "", threading.Event()
+    )
+    assert ok.code == ResultCode.OK
+    assert ok.auth_state == "AUTHENTICATED"
+    assert authenticated.calls == 1
