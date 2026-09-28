@@ -16,6 +16,7 @@ import datetime as _dt
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -24,6 +25,25 @@ from typing import Optional, Tuple
 
 LOGIN_WAIT_TIMEOUT_SECONDS = float(os.environ.get("PATX_LOGIN_WAIT", str(20 * 60)))
 STEP_TIMEOUT_MS = 30_000
+_BASE64URL_SEGMENT = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _decode_base64url(segment: str) -> bytes:
+    if not isinstance(segment, str) or not _BASE64URL_SEGMENT.fullmatch(segment):
+        raise ValueError("invalid base64url segment")
+    padding = "=" * (-len(segment) % 4)
+    return base64.b64decode(
+        (segment + padding).encode("ascii"),
+        altchars=b"-_",
+        validate=True,
+    )
+
+
+def _decode_jwt_object(segment: str, name: str) -> dict:
+    value = json.loads(_decode_base64url(segment).decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"JWT {name} is not an object")
+    return value
 
 
 def default_profile_dir(provider: str) -> Path:
@@ -152,13 +172,9 @@ class BrowserManager:
             parts = token.split(".")
             if len(parts) != 3:
                 raise ValueError("not a JWT")
-            payload_segment = parts[1]
-            padding = "=" * (-len(payload_segment) % 4)
-            payload = json.loads(base64.urlsafe_b64decode(
-                (payload_segment + padding).encode("ascii")
-            ).decode("utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("JWT payload is not an object")
+            _decode_jwt_object(parts[0], "header")
+            payload = _decode_jwt_object(parts[1], "payload")
+            _decode_base64url(parts[2])
             expires_at = payload.get("exp")
             if (
                 isinstance(expires_at, bool)

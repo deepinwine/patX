@@ -794,13 +794,20 @@ def test_main_thread_can_cancel_the_long_lived_worker(monkeypatch):
     assert worker_threads and worker_threads[0] != main_thread
 
 
-def _jwt(exp=None):
-    def encode(payload):
-        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+def _base64url_json(value):
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
+
+_JWT_SIGNATURE = base64.urlsafe_b64encode(b"signature").rstrip(b"=").decode("ascii")
+
+
+def _jwt(exp=None):
     payload = {} if exp is None else {"exp": exp}
-    return f"{encode({'alg': 'none'})}.{encode(payload)}.signature"
+    return (
+        f"{_base64url_json({'alg': 'none'})}."
+        f"{_base64url_json(payload)}.{_JWT_SIGNATURE}"
+    )
 
 
 class _TokenPage:
@@ -843,6 +850,36 @@ def test_cpquery_session_state_validates_token_without_launch(token, expected):
         now=2_000,
         min_ttl_seconds=60,
     ) == expected
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        f".{_base64url_json({'exp': 10_000})}.{_JWT_SIGNATURE}",
+        f"{_base64url_json({'alg': 'none'})}.{_base64url_json({'exp': 10_000})}.",
+        (
+            f"{_base64url_json({'alg': 'none'})}."
+            f"{_base64url_json({'exp': 10_000})}$$$.{_JWT_SIGNATURE}"
+        ),
+        f"bad$header.{_base64url_json({'exp': 10_000})}.{_JWT_SIGNATURE}",
+        (
+            f"{_base64url_json({'alg': 'none'})}."
+            f"{_base64url_json({'exp': 10_000})}.bad$signature"
+        ),
+        f"{_base64url_json([])}.{_base64url_json({'exp': 10_000})}.{_JWT_SIGNATURE}",
+        f"{_base64url_json({'alg': 'none'})}.{_base64url_json([])}.{_JWT_SIGNATURE}",
+    ],
+)
+def test_cpquery_session_state_rejects_malformed_jwt_structure(token):
+    from web_dossier.browser.manager import BrowserManager
+
+    manager = BrowserManager("cnipa")
+    manager._context = object()
+    manager._page = _TokenPage(token)
+
+    assert manager.cpquery_session_state(
+        cnipa_module.BASE_URL, now=2_000
+    ) == "SESSION_EXPIRED"
 
 
 def test_cpquery_session_state_distinguishes_uninitialized_and_wrong_origin():
