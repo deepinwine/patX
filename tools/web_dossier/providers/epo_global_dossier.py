@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from typing import Optional
@@ -18,13 +19,14 @@ from ..document_classifier import (
     event_title_cn,
 )
 from ..models import Confidence, DocumentType, ProsecutionDocument, ResultCode, normalize_date
-from ..number_resolver import normalize_cn_identifier
+from ..number_resolver import cn_check_digit, normalize_cn_identifier
 from .base import DossierProvider, SyncOutcome
 
 
 EPO_DOSSIER_URL = (
     "https://register.epo.org/ipfwretrieve?apn=CN.{application}.A&lng=en"
 )
+MAX_HTML_BYTES = 5 * 1024 * 1024
 
 _BLOCK_MARKERS = (
     "access denied",
@@ -36,6 +38,10 @@ _BLOCK_MARKERS = (
     "security verification",
     "verify you are human",
     "captcha",
+    "just a moment",
+    "enable javascript and cookies",
+    "checking your browser",
+    "cloudflare ray id",
 )
 
 _REMINDABLE_TYPES = {
@@ -58,8 +64,12 @@ _OFFICIAL_DIRECTIONS = {
 
 def _hidden(attributes: dict[str, str]) -> bool:
     style = re.sub(r"\s+", "", attributes.get("style", "").lower())
+    classes = set(attributes.get("class", "").lower().split())
     return (
         "hidden" in attributes
+        or bool(
+            classes.intersection({"d-none", "hidden", "invisible", "is-hidden"})
+        )
         or attributes.get("aria-hidden", "").lower() == "true"
         or "display:none" in style
         or "visibility:hidden" in style
@@ -221,8 +231,33 @@ def _displayed_identifiers(page_text: str) -> tuple[set[str], set[str]]:
 
 
 def _normalized(raw: str, expected: str) -> str:
+    if expected == "application":
+        return _normalize_epo_application(raw)
     identifier = normalize_cn_identifier(raw)
     return identifier.normalized_number if identifier.number_type == expected else ""
+
+
+def _normalize_epo_application(raw: str) -> str:
+    """Normalize CN application inputs, including a validated X check digit."""
+    if not raw:
+        return ""
+    normalized = raw.translate(
+        str.maketrans("０１２３４５６７８９．Ｘｘ", "0123456789.XX")
+    )
+    normalized = re.sub(r"\s+", "", normalized).upper().removeprefix("CN")
+    match = re.fullmatch(r"(\d{12})(?:\.?([0-9X]))?", normalized)
+    if not match:
+        return ""
+    number, supplied_check = match.groups()
+    if supplied_check and supplied_check != cn_check_digit(number):
+        return ""
+    return f"CN{number}" + (f".{supplied_check}" if supplied_check else "")
+
+
+def _application_core(raw: str) -> str:
+    normalized = _normalize_epo_application(raw)
+    match = re.fullmatch(r"CN(\d{12})(?:\.[0-9X])?", normalized)
+    return match.group(1) if match else ""
 
 
 def _same_application(expected: str, displayed: str) -> bool:
@@ -270,6 +305,51 @@ def _document_code_from_id(remote_document_id: str, application_core: str) -> st
         re.IGNORECASE,
     )
     return f"{match.group(1)}-CN" if match else ""
+
+
+def _application_cores_from_href(href: str) -> tuple[set[str], bool]:
+    """Extract CN application identities embedded in EPO links/JavaScript."""
+    decoded = urllib.parse.unquote((href or "").replace("&amp;", "&"))
+    cores: set[str] = set()
+    invalid_check = False
+    for match in re.finditer(
+        r"(?:[?&]|\b)(?:number|apn|application(?:number)?)\s*=\s*"
+        r"(?:CN[._-]?)?(\d{12})(?:[._-]?([0-9X]))?(?:[._-]?A\d?)?"
+        r"(?=[^0-9]|$)",
+        decoded,
+        re.IGNORECASE,
+    ):
+        core = match.group(1)
+        supplied_check = (match.group(2) or "").upper()
+        cores.add(core)
+        if supplied_check and supplied_check != cn_check_digit(core):
+            invalid_check = True
+    return cores, invalid_check
+
+
+def _row_application_cores(
+    remote_document_id: str, id_cell: dict, title_cell: dict
+) -> tuple[set[str], bool]:
+    cores: set[str] = set()
+    remote_match = re.match(
+        r"^(?:CN[-_.]?)?(\d{12})([0-9X])?",
+        remote_document_id or "",
+        re.IGNORECASE,
+    )
+    invalid_check = False
+    if remote_match:
+        core = remote_match.group(1)
+        supplied_check = (remote_match.group(2) or "").upper()
+        cores.add(core)
+        if supplied_check and supplied_check != cn_check_digit(core):
+            invalid_check = True
+    for cell in (id_cell, title_cell):
+        href_cores, href_invalid_check = _application_cores_from_href(
+            cell.get("href") or ""
+        )
+        cores.update(href_cores)
+        invalid_check = invalid_check or href_invalid_check
+    return cores, invalid_check
 
 
 def _same_publication(expected: str, displayed: str) -> bool:
@@ -405,7 +485,6 @@ def parse_epo_document_list(
         )
 
     documents: list[ProsecutionDocument] = []
-    dated_candidates = 0
     date_failures = 0
     structural_failure = ""
     normalized_application = (
@@ -414,7 +493,7 @@ def parse_epo_document_list(
         else displayed_application
     )
     normalized_publication = displayed_publication or expected_publication
-    application_core = normalize_cn_identifier(normalized_application).number
+    application_core = _application_core(normalized_application)
     for row in selected_rows:
         semantic_version_index = indexes.get("version", indexes.get("pages", -1))
         required_indexes = (indexes["date"], indexes["title"], semantic_version_index)
@@ -466,20 +545,25 @@ def parse_epo_document_list(
             continue
         if document_type not in _REMINDABLE_TYPES or confidence != Confidence.HIGH:
             continue
-        dated_candidates += 1
+        if not remote_document_id:
+            structural_failure = "EPO 官方文件行缺少文档标识"
+            break
+        row_application_cores, invalid_row_check = _row_application_cores(
+            remote_document_id, id_cell, title_cell
+        )
+        if invalid_row_check:
+            structural_failure = "EPO 文档行案件校验位无效"
+            break
+        if not row_application_cores:
+            structural_failure = "EPO 官方文件行缺少可验证的案件标识"
+            break
+        if row_application_cores != {application_core}:
+            structural_failure = "EPO 文档行案件标识与页面申请号不一致"
+            break
         official_date = _normalize_epo_date(_cell(row, indexes["date"])["text"])
         if not official_date:
             date_failures += 1
             continue
-        if not remote_document_id:
-            structural_failure = "EPO 官方文件行缺少文档标识"
-            break
-        remote_application = re.match(
-            r"^(?:CN[-_.]?)?(\d{12})", remote_document_id.upper()
-        )
-        if remote_application and remote_application.group(1) != application_core:
-            structural_failure = "EPO 文档标识与页面申请号不一致"
-            break
         documents.append(
             ProsecutionDocument(
                 jurisdiction="CN",
@@ -507,10 +591,10 @@ def parse_epo_document_list(
             code=ResultCode.PAGE_STRUCTURE_CHANGED,
             message=structural_failure,
         )
-    if dated_candidates and date_failures == dated_candidates:
+    if date_failures:
         return SyncOutcome(
             code=ResultCode.DATE_PARSE_FAILED,
-            message="所有候选 EPO 官方文件的日期均无法解析",
+            message="EPO 官方文件中存在无法解析的日期",
         )
     return SyncOutcome(
         code=ResultCode.OK,
@@ -534,22 +618,76 @@ def fetch_html_public(url: str) -> tuple[int, str]:
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return int(response.status), response.read().decode("utf-8", errors="replace")
+            body = response.read(MAX_HTML_BYTES + 1)
+            return int(response.status), body.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        return int(exc.code), exc.read().decode("utf-8", errors="replace")
+        body = exc.read(MAX_HTML_BYTES + 1)
+        return int(exc.code), body.decode("utf-8", errors="replace")
     except (OSError, urllib.error.URLError):
         return 0, ""
+
+
+def _playwright_available() -> bool:
+    try:
+        from pathlib import Path
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            return Path(playwright.chromium.executable_path).is_file()
+    except Exception:  # noqa: BLE001 - optional runtime dependency probe
+        return False
+
+
+def _http_error(status: int) -> Optional[SyncOutcome]:
+    if status == 200:
+        return None
+    if status in (401, 403):
+        return SyncOutcome(
+            code=ResultCode.ACCESS_DENIED,
+            message=f"EPO Global Dossier 请求被拒绝（HTTP {status}）",
+        )
+    if status == 429:
+        return SyncOutcome(
+            code=ResultCode.RATE_LIMITED,
+            message="EPO Global Dossier 请求受限（HTTP 429）",
+        )
+    return SyncOutcome(
+        code=ResultCode.NETWORK_ERROR,
+        message=f"EPO Global Dossier HTTP {status}",
+    )
+
+
+def _html_too_large(html: str) -> bool:
+    return len((html or "").encode("utf-8")) > MAX_HTML_BYTES
 
 
 class EpoGlobalDossierProvider(DossierProvider):
     provider_id = "epo_global_dossier"
     jurisdiction = "CN"
 
-    def __init__(self, fetch_html=None):
-        self._fetch_html = fetch_html or fetch_html_public
+    def __init__(self, fetch_html=None, browser_manager=None):
+        self._fetch_html = fetch_html
+        self._manager_injected = browser_manager is not None
+        if fetch_html is not None:
+            self._manager = browser_manager
+        else:
+            if browser_manager is None:
+                from ..browser.manager import BrowserManager
+
+                browser_manager = BrowserManager(
+                    self.provider_id,
+                    prefer_system_browser=False,
+                    headless=True,
+                )
+            self._manager = browser_manager
 
     def health_check(self) -> bool:
-        return True
+        if self._fetch_html is not None:
+            return callable(self._fetch_html)
+        if self._manager_injected:
+            return self._manager is not None
+        return self._manager is not None and _playwright_available()
 
     def check_auth(self, cancel) -> ResultCode:
         return ResultCode.OK
@@ -560,15 +698,15 @@ class EpoGlobalDossierProvider(DossierProvider):
     def resolve_case(
         self, application_number: str, publication_number: str, cancel
     ) -> SyncOutcome:
-        identifier = normalize_cn_identifier(application_number)
-        if identifier.number_type != "application":
+        normalized = _normalize_epo_application(application_number)
+        if not normalized:
             return SyncOutcome(
                 code=ResultCode.RESOLVE_FAILED,
                 message="EPO Global Dossier 需要可识别的 CN 申请号",
             )
         return SyncOutcome(
             code=ResultCode.OK,
-            resolved_application_number=identifier.normalized_number,
+            resolved_application_number=normalized,
         )
 
     def list_documents(
@@ -582,21 +720,42 @@ class EpoGlobalDossierProvider(DossierProvider):
                 code=ResultCode.TEMPORARY_ERROR,
                 message="EPO Global Dossier 查询已取消",
             )
-        identifier = normalize_cn_identifier(resolved.resolved_application_number)
-        url = EPO_DOSSIER_URL.format(application=identifier.number)
+        application_core = _application_core(resolved.resolved_application_number)
+        url = EPO_DOSSIER_URL.format(application=application_core)
         try:
-            status, html = self._fetch_html(url)
+            if self._fetch_html is not None:
+                status, html = self._fetch_html(url)
+            else:
+                page = self._manager.open_page(url, cancel, fresh=True)
+                status = getattr(self._manager, "last_navigation_status", None)
+                if page is None:
+                    if cancel is not None and cancel.is_set():
+                        return SyncOutcome(
+                            code=ResultCode.TEMPORARY_ERROR,
+                            message="EPO Global Dossier 查询已取消",
+                        )
+                    return SyncOutcome(
+                        code=ResultCode.NETWORK_ERROR,
+                        message="EPO Global Dossier 浏览器导航失败",
+                    )
+                navigation_error = _http_error(
+                    status if isinstance(status, int) else 0
+                )
+                if navigation_error is not None:
+                    return navigation_error
+                html = page.content()
         except Exception as exc:  # noqa: BLE001 - provider boundary
             return SyncOutcome(
                 code=ResultCode.NETWORK_ERROR,
                 message=f"EPO Global Dossier 请求失败: {type(exc).__name__}",
             )
-        if status == 429:
-            return SyncOutcome(code=ResultCode.RATE_LIMITED, message="EPO 限流")
-        if status != 200:
+        status_error = _http_error(status if isinstance(status, int) else 0)
+        if status_error is not None:
+            return status_error
+        if _html_too_large(html):
             return SyncOutcome(
-                code=ResultCode.NETWORK_ERROR,
-                message=f"EPO Global Dossier HTTP {status}",
+                code=ResultCode.TEMPORARY_ERROR,
+                message="EPO Global Dossier 响应超过安全大小限制",
             )
         if cancel is not None and cancel.is_set():
             return SyncOutcome(
