@@ -242,9 +242,13 @@ def _normalize_epo_date(raw: str) -> str:
     return normalize_date(raw)
 
 
-def _version_from_title(raw_title: str) -> str:
-    match = re.search(r"\((ORIGINAL|TRANSLATED)\)\s*$", raw_title or "", re.IGNORECASE)
-    return match.group(1).upper() if match else ""
+def _versions_from_title(raw_title: str) -> set[str]:
+    return {
+        match.upper()
+        for match in re.findall(
+            r"\((ORIGINAL|TRANSLATED)\)", raw_title or "", re.IGNORECASE
+        )
+    }
 
 
 def _document_id_from_cells(id_cell: dict, title_cell: dict) -> str:
@@ -423,11 +427,20 @@ def parse_epo_document_list(
         direction = re.sub(
             r"\s+", " ", _cell(row, indexes.get("direction", -1))["text"]
         ).strip().lower()
-        version = (
+        title_versions = _versions_from_title(raw_title)
+        column_version = (
             _cell(row, indexes["version"])["text"].strip().upper()
             if "version" in indexes
-            else _version_from_title(raw_title)
+            else ""
         )
+        if len(title_versions) > 1:
+            structural_failure = "EPO 文档标题包含冲突的版本标记"
+            break
+        title_version = next(iter(title_versions), "")
+        if title_version and column_version and title_version != column_version:
+            structural_failure = "EPO 文档标题版本与版本列冲突"
+            break
+        version = column_version or title_version
         if not raw_title or not version:
             structural_failure = "EPO 文档行的标题或版本为空"
             break

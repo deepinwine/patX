@@ -68,6 +68,36 @@ def test_epo_keeps_only_original_official_high_confidence_remindable_events():
     assert document.source_trace == ["epo_global_dossier"]
 
 
+@pytest.mark.parametrize(
+    ("title", "version"),
+    [
+        ("First notice of examination opinions (TRANSLATED)", "ORIGINAL"),
+        ("First notice of examination opinions (ORIGINAL)", "TRANSLATED"),
+        ("First notice of examination opinions (TRANSLATED) [CN]", "ORIGINAL"),
+        (
+            "First notice of examination opinions (TRANSLATED) (ORIGINAL)",
+            "ORIGINAL",
+        ),
+    ],
+)
+def test_epo_rejects_conflicting_title_suffix_and_version_column(
+    title, version
+):
+    outcome = parse_epo_document_list(
+        _page(
+            _row(
+                title=title,
+                version=version,
+            )
+        ),
+        "CN202510469601.5",
+        "CN120134203A",
+    )
+
+    assert outcome.code == ResultCode.PAGE_STRUCTURE_CHANGED
+    assert outcome.documents == []
+
+
 def test_epo_parses_compact_register_table_with_row_document_id():
     html = """
     <html><head><title>European Patent Register</title></head><body>
