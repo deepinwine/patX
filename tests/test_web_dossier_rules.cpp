@@ -509,6 +509,20 @@ static void TestNativeUspto() {
               "First search", "").is_remindable == false);
     CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
               "Notification to grant patent right", "").document_type == "GRANT_NOTICE");
+    CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
+              "Notification to make rectification", "").document_type ==
+          "CORRECTION_NOTICE");
+    // 端到端：GD 返回补正通知书 -> 解析为可提醒官方事件
+    const std::string rect_json =
+        "{\"list\":[{\"countryCode\":\"CN\",\"docList\":{\"docs\":["
+        "{\"docCode\":\"241011-CN\","
+        "\"docDesc\":\"Notification to make rectification (ORIGINAL)\","
+        "\"docId\":\"X_CN\",\"legalDateStr\":\"05/20/2026\"}]}}]}";
+    CHECK_STR_EQ(webdossier::uspto::ParseFamilyJson(
+                     rect_json, "CN202610519918", "")
+                     .documents[0]
+                     .document_title,
+                 "补正通知");
 
     // 限流与结构错误
     CHECK_STR_EQ(webdossier::uspto::ParseFamilyJson(
