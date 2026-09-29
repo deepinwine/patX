@@ -58,8 +58,8 @@ ParseResult ParseFamilyJson(const std::string& body,
 
 // ---- 原生客户端 ----
 // fetch_json 可注入（测试用）；默认实现走 libcurl（浏览器 UA + Referer +
-// 最小 2 秒节流，与 Python 版一致）。
-using FetchJson = std::function<bool(const std::string& url, std::string& body)>;
+// 最小 2 秒节流，与 Python 版一致）。返回 HTTP 状态码，0 = 传输失败。
+using FetchJson = std::function<int(const std::string& url, std::string& body)>;
 
 class NativeUsptoClient {
 public:

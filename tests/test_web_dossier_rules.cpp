@@ -518,6 +518,10 @@ static void TestNativeUspto() {
         "PAGE_STRUCTURE_CHANGED");
     CHECK_STR_EQ(webdossier::uspto::ParseFamilyJson(
         "{\"list\":[{\"countryCode\":\"US\"}]}", "CN1", "").code, "CASE_NOT_FOUND");
+    // 未公开案件的 417 响应体 -> CASE_NOT_FOUND（不触发半小时重试）
+    CHECK_STR_EQ(webdossier::uspto::ParseFamilyJson(
+        "{\"msg\":\"Data does not appear to be available for the identified document.\"}",
+        "CN1", "").code, "CASE_NOT_FOUND");
 }
 
 // 真实联网自检：PATX_LIVE_USPTO=1 时执行（CI/离线默认跳过）

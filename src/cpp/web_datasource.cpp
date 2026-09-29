@@ -262,6 +262,11 @@ ParseResult ParseFamilyJson(const std::string& body,
         result.message = "USPTO Global Dossier 限流（429），稍后重试";
         return result;
     }
+    if (body.find("Data does not appear to be available") != std::string::npos) {
+        result.code = "CASE_NOT_FOUND";
+        result.message = "USPTO Global Dossier 未收录该案件（可能尚未公开）";
+        return result;
+    }
     nlohmann::json root;
     try {
         root = nlohmann::json::parse(body);
@@ -342,7 +347,7 @@ namespace {
 std::mutex g_pace_mutex;
 std::chrono::steady_clock::time_point g_last_request{};
 
-bool CurlFetch(const std::string& url, std::string& body) {
+int CurlFetch(const std::string& url, std::string& body) {
 #ifdef PATX_HAS_LIBCURL
     // 节流：与 Python 版一致的最小 2 秒间隔
     {
@@ -357,7 +362,7 @@ bool CurlFetch(const std::string& url, std::string& body) {
         g_last_request = std::chrono::steady_clock::now();
     }
     CURL* curl = curl_easy_init();
-    if (!curl) return false;
+    if (!curl) return 0;
     body.clear();
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
@@ -379,20 +384,19 @@ bool CurlFetch(const std::string& url, std::string& body) {
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
     CURLcode rc = curl_easy_perform(curl);
     long http_code = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    if (rc == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
-    if (rc != CURLE_OK) return false;
-    if (http_code != 200) {
+    if (rc != CURLE_OK) {
         body.clear();
-        if (http_code == 429) body = "{\"ERROR\":\"429 - CLOUDFRONT RATE LIMITED\"}";
-        return false;
+        return 0;
     }
-    return true;
+    // 非 200 保留原始响应体（417 的 "Data does not appear..." 是有意义的）
+    return static_cast<int>(http_code);
 #else
     (void)url;
     (void)body;
-    return false;
+    return 0;
 #endif
 }
 
@@ -413,12 +417,11 @@ ParseResult NativeUsptoClient::FetchDocuments(
         "https://d1kazzu6rbodne.cloudfront.net/patent-family/svc/family/"
         "application/CN/" + application_number_12_digits;
     std::string body;
-    if (!fetch_(url, body)) {
+    int http_code = fetch_(url, body);
+    if (http_code == 0) {
         ParseResult r;
         r.code = "NETWORK_ERROR";
-        r.message = body.find("429") != std::string::npos
-                        ? "USPTO Global Dossier 限流（429）"
-                        : "USPTO Global Dossier 连接失败";
+        r.message = "USPTO Global Dossier 连接失败";
         return r;
     }
     return ParseFamilyJson(body, application_number, publication_number);
