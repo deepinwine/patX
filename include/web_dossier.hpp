@@ -4,7 +4,7 @@
 // stdin/stdout JSON-RPC channel, builds the per-case sync queue, and applies
 // the remote results to the local database under strict merge rules:
 //
-//   - new Office Actions are INSERTed only from HIGH-confidence parses
+//   - new official events are INSERTed only from HIGH-confidence parses
 //   - an existing OA with an empty issue_date gets the date filled in
 //   - an existing OA with a DIFFERENT date is flagged DATE_CONFLICT and
 //     never overwritten
@@ -30,7 +30,7 @@ namespace webdossier {
 enum class ResultCode {
     Ok = 0,
     NoChange,
-    NewOfficeAction,
+    NewOfficialEvent,
     AuthRequired,
     SessionExpired,
     CaseNotFound,
@@ -54,9 +54,12 @@ ResultCode ResultCodeFromString(const std::string& name);
 
 // One discovered remote document, as reported by the sidecar.
 struct RemoteDocument {
+    std::string source;              // actual provider id
     std::string document_type;       // OFFICE_ACTION_SECOND / ...
     std::string document_title;      // normalized
     std::string raw_title;
+    std::string document_code;
+    std::string document_version = "ORIGINAL";
     std::string official_date;       // YYYY-MM-DD or ""
     std::string direction;           // official / applicant
     std::string remote_document_id;
@@ -64,6 +67,9 @@ struct RemoteDocument {
     std::string download_url;
     bool download_available = false;
     std::string fingerprint;
+    std::string event_key;
+    std::string source_trace;
+    std::string raw_metadata;
     std::string confidence;          // HIGH / MEDIUM / LOW
     int oa_ordinal = 0;              // 1/2/3.. for 第N次审查意见通知书
     std::string ds;                  // cpquery list kind (TZS/ZJWJ)
@@ -82,19 +88,30 @@ struct CaseSyncReport {
     int documents_new = 0;           // newly stored prosecution_documents
     int oa_created_id = 0;           // oa_records.id when a new OA was inserted
     bool date_conflict = false;      // existing OA flagged, needs the user
-    std::string downloaded_path;     // set when the OA PDF was fetched (Phase 2)
 };
 
 struct BatchSummary {
     int total = 0;
     int checked = 0;
-    int new_oa = 0;
+    int new_events = 0;
     int no_change = 0;
     int auth_required = 0;
     int failed = 0;
     int manual_review = 0;           // MEDIUM/LOW confidence, not applied
     std::vector<CaseSyncReport> findings;   // new OA + conflicts
     std::vector<CaseSyncReport> failures;
+};
+
+struct RemoteCaseResult {
+    bool ok = false;
+    std::string code;
+    std::string message;
+    std::string resolved_application_number;
+    std::string auth_state;
+    std::string provider_used;
+    std::vector<RemoteDocument> documents;
+    bool has_latest_event = false;
+    RemoteDocument latest_event;
 };
 
 // Chinese OA type normalization: "二通"/"第二次审查意见通知书"/"第2次审查意见
@@ -104,6 +121,26 @@ std::string NormalizeOaTypeCn(const std::string& raw);
 bool IsOfficeActionTypeCn(const std::string& normalized);
 // OA ordinal (第一次->1, 第二次->2, 第3次->3); 0 when unknown.
 int OaTypeOrdinalCn(const std::string& raw);
+
+struct EventMergeResult {
+    ResultCode code = ResultCode::NoChange;
+    int oa_created_id = 0;
+    bool date_conflict = false;
+    std::string canonical_title;
+    std::string message;
+};
+
+std::string OfficialEventTitleCn(const RemoteDocument& document);
+bool IsPersistableOfficialEvent(const RemoteDocument& document);
+EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
+                                    const RemoteDocument& document);
+int NormalizeCheckIntervalDays(int days);
+long long NextDossierCheckAt(ResultCode code, long long now, int interval_days);
+bool ParseRemoteCaseResultJson(const std::string& json_body, RemoteCaseResult& out);
+CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
+                                     const RemoteCaseResult& remote,
+                                     int interval_days, long long now);
+void AccumulateBatchSummary(BatchSummary& summary, const CaseSyncReport& report);
 
 class SidecarProcess;   // pimpl - hides wxProcess from this header
 
@@ -148,25 +185,13 @@ private:
     // Performs one JSON-RPC round trip. Returns false on transport trouble.
     bool Rpc(const std::string& op, const std::string& json_payload, std::string& response);
 
-    struct RemoteCaseResult {
-        bool ok = false;
-        std::string code;                    // result-code name from sidecar
-        std::string message;
-        std::string resolved_application_number;
-        std::string auth_state;
-        std::vector<RemoteDocument> documents;
-        // Latest true Office Action (only OFFICE_ACTION_* types):
-        bool has_latest_oa = false;
-        RemoteDocument latest_oa;
-    };
-
     CaseSyncReport ApplyRemoteResult(const Patent& patent, const RemoteCaseResult& remote);
     bool ParseCaseResult(const std::string& json_body, RemoteCaseResult& out);
 
     Database& db_;
     std::string script_dir_;
     SidecarProcess* sidecar_ = nullptr;
-    int check_interval_days_ = 7;
+    int check_interval_days_ = 1;
 };
 
 } // namespace webdossier

@@ -2359,11 +2359,23 @@ std::vector<OARecord> Database::GetOAsForPatentId(int patent_id) {
 }
 
 bool Database::UpdateOASyncFields(int oa_id, const std::string& issue_date_if_empty,
-                                  const std::string& sync_flag) {
+                                  const std::string& sync_flag,
+                                  const std::string& source_if_empty,
+                                  const std::string& remote_document_id_if_empty) {
     std::string sql = "UPDATE oa_records SET sync_flag = '" + EscapeString(sync_flag) + "'";
     if (!issue_date_if_empty.empty()) {
         sql += ", issue_date = CASE WHEN issue_date IS NULL OR issue_date = '' THEN '" +
                EscapeString(issue_date_if_empty) + "' ELSE issue_date END";
+    }
+    if (!source_if_empty.empty()) {
+        sql += ", source = CASE WHEN source IS NULL OR source = '' THEN '" +
+               EscapeString(source_if_empty) + "' ELSE source END";
+    }
+    if (!remote_document_id_if_empty.empty()) {
+        sql += ", remote_document_id = CASE WHEN remote_document_id IS NULL OR "
+               "remote_document_id = '' THEN '" +
+               EscapeString(remote_document_id_if_empty) +
+               "' ELSE remote_document_id END";
     }
     sql += " WHERE id = " + std::to_string(oa_id);
     return Execute(sql);

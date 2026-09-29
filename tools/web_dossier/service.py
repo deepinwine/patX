@@ -203,26 +203,6 @@ def _op_epo(args, cancel):
     return {"ok": False, "code": "TEMPORARY_ERROR", "message": f"unknown epo_op {op!r}"}
 
 
-def _op_download_document(args, cancel):
-    provider, err = _get_provider(args.get("provider", "cnipa"))
-    if err:
-        return {"ok": False, "code": err.value}
-    from web_dossier.models import ProsecutionDocument as _Doc
-    doc = _Doc(
-        application_number=args.get("application_number", ""),
-        remote_document_id=args.get("rid", ""),
-        document_title=args.get("title", ""),
-        official_date=args.get("official_date", ""),
-        ds=args.get("ds", "TZS"),
-        wenjiandm=args.get("wenjiandm", "100000"),
-    )
-    code, info = provider.download_document(doc, args.get("dest_dir", "data/dossiers/CN"), cancel)
-    return {"ok": code == ResultCode.OK, "code": code.value,
-            "message": info.get("message", ""),
-            "saved_path": info.get("saved_path", ""),
-            "page_count": info.get("page_count", 0)}
-
-
 def main() -> int:
     busy = threading.Event()          # one long op at a time; the main thread
     cancel_event = threading.Event()  # stays free to read "cancel"/"shutdown"
@@ -334,8 +314,6 @@ def main() -> int:
             run_op(_op_login, args)
         elif op == "sync_case":
             run_op(_op_sync_case, args, sync_protocol=True)
-        elif op == "download_document":
-            run_op(_op_download_document, args)
         elif op == "epo":
             run_op(_op_epo, args)
         else:

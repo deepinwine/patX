@@ -698,10 +698,6 @@ def test_main_uses_one_long_lived_worker_for_provider_lifecycle(monkeypatch):
             thread_ids.append(("cnipa-sync", threading.get_ident()))
             return SyncOutcome(code=ResultCode.OK)
 
-        def download_document(self, *_args):
-            thread_ids.append(("download", threading.get_ident()))
-            return ResultCode.OK, {}
-
         def close(self):
             self._manager.close()
 
@@ -756,6 +752,9 @@ def test_main_uses_one_long_lived_worker_for_provider_lifecycle(monkeypatch):
     assert len(set(operation_ids)) == 1
     assert operation_ids[0] != main_thread
     assert [label for label, _thread_id in thread_ids].count("sync") == 2
+    responses = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert responses[2]["message"] == "unknown op: download_document"
+    assert all(label != "download" for label, _thread_id in thread_ids)
     assert any(label.startswith("close:") for label, _thread_id in thread_ids)
 
 

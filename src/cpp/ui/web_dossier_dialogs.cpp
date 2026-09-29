@@ -25,7 +25,7 @@ public:
         auto* sizer = new wxBoxSizer(wxVERTICAL);
 
         stats_ = new wxStaticText(this, wxID_ANY,
-                                  UTF8_STR("已检查：0    发现新OA：0    无变化：0\n"
+                                  UTF8_STR("已检查：0    新官方事件：0    无变化：0\n"
                                            "需人工确认：0    需登录：0    失败：0"));
         stats_->SetFont(stats_->GetFont().Bold());
         sizer->Add(stats_, 0, wxALL | wxEXPAND, 10);
@@ -36,7 +36,7 @@ public:
         findings_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                    wxLC_REPORT | wxBORDER_SUNKEN);
         findings_->InsertColumn(0, UTF8_STR("案件"), wxLIST_FORMAT_LEFT, 110);
-        findings_->InsertColumn(1, UTF8_STR("审查意见"), wxLIST_FORMAT_LEFT, 230);
+        findings_->InsertColumn(1, UTF8_STR("官方事件"), wxLIST_FORMAT_LEFT, 230);
         findings_->InsertColumn(2, UTF8_STR("官文日"), wxLIST_FORMAT_LEFT, 110);
         findings_->InsertColumn(3, UTF8_STR("状态"), wxLIST_FORMAT_LEFT, 140);
         sizer->Add(findings_, 1, wxALL | wxEXPAND, 5);
@@ -78,7 +78,7 @@ public:
     }
 
     void BeginBatch(int total) {
-        checked_ = new_oa_ = no_change_ = review_ = auth_ = failed_ = 0;
+        checked_ = new_events_ = no_change_ = review_ = auth_ = failed_ = 0;
         findings_->DeleteAllItems();
         view_btn_->Enable(false);
         login_btn_->Show(false);
@@ -97,17 +97,17 @@ public:
     void OnCaseDone(const webdossier::CaseSyncReport& r) {
         checked_++;
         switch (r.code) {
-            case webdossier::ResultCode::NewOfficeAction:
-            case webdossier::ResultCode::DateConflict: new_oa_++; break;
+            case webdossier::ResultCode::NewOfficialEvent: new_events_++; break;
+            case webdossier::ResultCode::DateConflict:
+            case webdossier::ResultCode::ManualReviewRequired: review_++; break;
             case webdossier::ResultCode::NoChange:
             case webdossier::ResultCode::Ok: no_change_++; break;
-            case webdossier::ResultCode::ManualReviewRequired: review_++; break;
             case webdossier::ResultCode::AuthRequired:
             case webdossier::ResultCode::SessionExpired: auth_++; break;
             default: failed_++; break;
         }
 
-        if (r.code == webdossier::ResultCode::NewOfficeAction ||
+        if (r.code == webdossier::ResultCode::NewOfficialEvent ||
             r.code == webdossier::ResultCode::DateConflict ||
             r.code == webdossier::ResultCode::ManualReviewRequired) {
             long idx = findings_->InsertItem(findings_->GetItemCount(),
@@ -119,13 +119,13 @@ public:
             findings_->SetItem(idx, 2, r.latest_remote_oa_date.empty()
                                            ? "-"
                                            : wxString::FromUTF8(r.latest_remote_oa_date.c_str()));
-            findings_->SetItem(idx, 3, r.code == webdossier::ResultCode::NewOfficeAction
-                                           ? UTF8_STR("★ 新发现")
+            findings_->SetItem(idx, 3, r.code == webdossier::ResultCode::NewOfficialEvent
+                                           ? UTF8_STR("★ 新官方事件")
                                            : (r.code == webdossier::ResultCode::DateConflict
                                                   ? UTF8_STR("日期冲突待确认")
                                                   : UTF8_STR("待人工确认")));
             findings_->SetItemData(idx, r.patent_id);
-            if (r.code != webdossier::ResultCode::NewOfficeAction)
+            if (r.code != webdossier::ResultCode::NewOfficialEvent)
                 findings_->SetItemBackgroundColour(idx, wxColour(255, 242, 204));
             view_btn_->Enable(true);
         }
@@ -134,8 +134,8 @@ public:
 
     void OnBatchDone(const webdossier::BatchSummary& s) {
         current_->SetLabel(
-            wxString::Format(UTF8_STR("完成：检查 %d / %d 件，新 OA %d 件，需确认 %d 件，失败 %d 件"),
-                             s.checked, s.total, s.new_oa, s.manual_review, s.failed));
+            wxString::Format(UTF8_STR("完成：检查 %d / %d 件，新官方事件 %d 件，需确认 %d 件，失败 %d 件"),
+                             s.checked, s.total, s.new_events, s.manual_review, s.failed));
         close_btn_->SetLabel(UTF8_STR("关闭"));
         close_btn_->Enable(true);
         if (s.auth_required > 0) {
@@ -159,9 +159,9 @@ public:
 private:
     void UpdateStats() {
         stats_->SetLabel(wxString::Format(
-            UTF8_STR("已检查：%d    发现新OA：%d    无变化：%d\n"
+            UTF8_STR("已检查：%d    新官方事件：%d    无变化：%d\n"
                      "需人工确认：%d    需登录：%d    失败：%d"),
-            checked_, new_oa_, no_change_, review_, auth_, failed_));
+            checked_, new_events_, no_change_, review_, auth_, failed_));
     }
 
     void OnViewCase(wxCommandEvent&) {
@@ -184,7 +184,7 @@ private:
     wxButton* login_btn_ = nullptr;
     wxButton* close_btn_ = nullptr;
 
-    int checked_ = 0, new_oa_ = 0, no_change_ = 0, review_ = 0, auth_ = 0, failed_ = 0;
+    int checked_ = 0, new_events_ = 0, no_change_ = 0, review_ = 0, auth_ = 0, failed_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -232,34 +232,17 @@ protected:
             ev->SetPayload(report);
             wxQueueEvent(sink_, ev);
 
-            summary.checked++;
+            webdossier::AccumulateBatchSummary(summary, report);
             switch (report.code) {
-                case webdossier::ResultCode::NewOfficeAction:
-                case webdossier::ResultCode::DateConflict:
-                    summary.new_oa++;
-                    summary.findings.push_back(report);
-                    break;
-                case webdossier::ResultCode::ManualReviewRequired:
-                    summary.manual_review++;
-                    summary.findings.push_back(report);
-                    break;
                 case webdossier::ResultCode::AuthRequired:
                 case webdossier::ResultCode::SessionExpired:
-                    summary.auth_required++;
-                    summary.findings.push_back(report);
                     // stop the batch; remaining cases stay untouched, not failed
                     index = -1;
-                    break;
-                case webdossier::ResultCode::NoChange:
-                case webdossier::ResultCode::Ok:
-                    summary.no_change++;
                     break;
                 case webdossier::ResultCode::Cancelled:
                     index = -1;
                     break;
                 default:
-                    summary.failed++;
-                    summary.failures.push_back(report);
                     if (report.code == webdossier::ResultCode::RateLimited ||
                         report.code == webdossier::ResultCode::PageStructureChanged ||
                         report.code == webdossier::ResultCode::NetworkError ||

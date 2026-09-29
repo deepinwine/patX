@@ -363,7 +363,9 @@ public:
     // Targeted sync update: fills issue_date only when currently empty and
     // sets sync_flag - never touches handler/writer/deadline/notes fields.
     bool UpdateOASyncFields(int oa_id, const std::string& issue_date_if_empty,
-                            const std::string& sync_flag);
+                            const std::string& sync_flag,
+                            const std::string& source_if_empty = "",
+                            const std::string& remote_document_id_if_empty = "");
 
     // ---------- Undo ----------
     void BeginBatch();

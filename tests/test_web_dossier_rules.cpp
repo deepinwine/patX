@@ -737,6 +737,529 @@ static void TestOaMergeRules() {
     std::filesystem::remove(path);
 }
 
+static RemoteDocument OfficialEvent(const std::string& type,
+                                    const std::string& title,
+                                    const std::string& date,
+                                    const std::string& event_key,
+                                    int ordinal = 0) {
+    RemoteDocument document;
+    document.source = "epo_global_dossier";
+    document.document_type = type;
+    document.document_title = title;
+    document.raw_title = title + " (ORIGINAL)";
+    document.document_version = "ORIGINAL";
+    document.official_date = date;
+    document.direction = "official";
+    document.remote_document_id = "epo-" + event_key;
+    document.event_key = event_key;
+    document.source_trace = "epo_global_dossier,cnipa";
+    document.confidence = "HIGH";
+    document.oa_ordinal = ordinal;
+    return document;
+}
+
+static void TestOfficialEventTitleAndMergeRules() {
+    CHECK_STR_EQ(OfficialEventTitleCn(
+                     OfficialEvent("OFFICE_ACTION_FIRST", "审查意见通知书",
+                                   "2026-01-10", "oa-1", 1)),
+                 "第一次审查意见通知书");
+    CHECK_STR_EQ(OfficialEventTitleCn(
+                     OfficialEvent("OFFICE_ACTION_SECOND", "审查意见通知书",
+                                   "2026-02-10", "oa-2", 2)),
+                 "第二次审查意见通知书");
+    CHECK_STR_EQ(OfficialEventTitleCn(
+                     OfficialEvent("OFFICE_ACTION_NTH", "审查意见通知书",
+                                   "2026-03-10", "oa-6", 6)),
+                 "第六次审查意见通知书");
+    CHECK_STR_EQ(OfficialEventTitleCn(
+                     OfficialEvent("REJECTION_DECISION", "Decision of rejection",
+                                   "2026-04-10", "reject")),
+                 "驳回决定");
+    CHECK_STR_EQ(OfficialEventTitleCn(
+                     OfficialEvent("GRANT_NOTICE", "Notification to grant patent right",
+                                   "2026-05-10", "grant")),
+                 "授权通知");
+    CHECK_STR_EQ(OfficialEventTitleCn(
+                     OfficialEvent("CORRECTION_NOTICE", "Correction notice",
+                                   "2026-06-10", "correction")),
+                 "补正通知");
+    CHECK_STR_EQ(OfficialEventTitleCn(
+                     OfficialEvent("OTHER_OFFICIAL", "手续合格通知书",
+                                   "2026-07-10", "other")),
+                 "手续合格通知书");
+    CHECK(ResultCodeFromString("NEW_OFFICIAL_EVENT") == ResultCode::NewOfficialEvent);
+    CHECK(ResultCodeFromString("NEW_OFFICE_ACTION") == ResultCode::NewOfficialEvent);
+    CHECK_STR_EQ(std::string(ToString(ResultCode::NewOfficialEvent)), "NEW_OFFICIAL_EVENT");
+
+    std::string path = TempDb();
+    {
+        Database db(path);
+        Patent patent;
+        patent.geke_code = "GC-EVENTS";
+        patent.title = "官方事件合并测试";
+        patent.application_number = "202410000001.1";
+        patent.application_status = "实质审查中";
+        patent.id = db.InsertPatent(patent, false);
+        CHECK(patent.id > 0);
+
+        const std::vector<RemoteDocument> events = {
+            OfficialEvent("OFFICE_ACTION_FIRST", "审查意见通知书",
+                          "2026-01-10", "oa-1", 1),
+            OfficialEvent("OFFICE_ACTION_SECOND", "审查意见通知书",
+                          "2026-02-10", "oa-2", 2),
+            OfficialEvent("OFFICE_ACTION_NTH", "审查意见通知书",
+                          "2026-03-10", "oa-6", 6),
+            OfficialEvent("REJECTION_DECISION", "Decision of rejection",
+                          "2026-04-10", "reject"),
+            OfficialEvent("GRANT_NOTICE", "Notification to grant patent right",
+                          "2026-05-10", "grant"),
+            OfficialEvent("CORRECTION_NOTICE", "Correction notice",
+                          "2026-06-10", "correction"),
+            OfficialEvent("OTHER_OFFICIAL", "手续合格通知书",
+                          "2026-07-10", "other"),
+        };
+        for (const auto& event : events) {
+            EventMergeResult merged = MergeOfficialEvent(db, patent, event);
+            CHECK(merged.code == ResultCode::NewOfficialEvent);
+            CHECK(merged.oa_created_id > 0);
+            CHECK(!merged.canonical_title.empty());
+        }
+
+        auto records = db.GetOAsForPatentId(patent.id);
+        CHECK(records.size() == events.size());
+        CHECK_STR_EQ(records.back().oa_type, "手续合格通知书");
+        CHECK_STR_EQ(records.back().source, "epo_global_dossier");
+        CHECK_STR_EQ(records.back().remote_document_id, "epo-other");
+
+        EventMergeResult duplicate = MergeOfficialEvent(db, patent, events.front());
+        CHECK(duplicate.code == ResultCode::NoChange);
+        CHECK(db.GetOAsForPatentId(patent.id).size() == events.size());
+
+        RemoteDocument same_date_different_identity = events[5];
+        same_date_different_identity.remote_document_id = "epo-correction-same-date";
+        same_date_different_identity.event_key = "correction-same-date";
+        EventMergeResult same_date_different_identity_result =
+            MergeOfficialEvent(db, patent, same_date_different_identity);
+        CHECK(same_date_different_identity_result.code == ResultCode::NewOfficialEvent);
+        CHECK(db.GetOAsForPatentId(patent.id).size() == events.size() + 1);
+
+        RemoteDocument changed_title_same_identity = events.back();
+        changed_title_same_identity.document_title = "更名后的手续通知";
+        EventMergeResult changed_title_same_identity_result =
+            MergeOfficialEvent(db, patent, changed_title_same_identity);
+        CHECK(changed_title_same_identity_result.code == ResultCode::NoChange);
+        CHECK(db.GetOAsForPatentId(patent.id).size() == events.size() + 1);
+
+        RemoteDocument second_correction = OfficialEvent(
+            "CORRECTION_NOTICE", "补正通知", "2026-06-20", "correction-2");
+        EventMergeResult second_correction_result =
+            MergeOfficialEvent(db, patent, second_correction);
+        CHECK(second_correction_result.code == ResultCode::NewOfficialEvent);
+        CHECK(db.GetOAsForPatentId(patent.id).size() == events.size() + 2);
+
+        RemoteDocument changed_same_correction = second_correction;
+        changed_same_correction.official_date = "2026-06-21";
+        EventMergeResult changed_same_correction_result =
+            MergeOfficialEvent(db, patent, changed_same_correction);
+        CHECK(changed_same_correction_result.code == ResultCode::DateConflict);
+        CHECK_STR_EQ(db.GetOAById(second_correction_result.oa_created_id).issue_date,
+                     "2026-06-20");
+        CHECK(db.GetOAsForPatentId(patent.id).size() == events.size() + 2);
+
+        OARecord unrelated_empty;
+        unrelated_empty.patent_id = patent.id;
+        unrelated_empty.geke_code = patent.geke_code;
+        unrelated_empty.oa_type = "补正通知";
+        unrelated_empty.source = "epo_global_dossier";
+        unrelated_empty.remote_document_id = "epo-unrelated-empty";
+        unrelated_empty.sync_flag = "web_new";
+        int unrelated_empty_id = db.InsertOA(unrelated_empty, false);
+        CHECK(unrelated_empty_id > 0);
+        RemoteDocument third_correction = OfficialEvent(
+            "CORRECTION_NOTICE", "补正通知", "2026-06-30", "correction-3");
+        EventMergeResult third_correction_result =
+            MergeOfficialEvent(db, patent, third_correction);
+        CHECK(third_correction_result.code == ResultCode::NewOfficialEvent);
+        CHECK_STR_EQ(db.GetOAById(unrelated_empty_id).issue_date, "");
+
+        // Terminal official events are reminders only and never alter case status.
+        CHECK_STR_EQ(db.GetPatentById(patent.id).application_status, "实质审查中");
+
+        OARecord empty_date;
+        empty_date.patent_id = patent.id;
+        empty_date.geke_code = patent.geke_code;
+        empty_date.oa_type = "其他官方通知";
+        empty_date.handler = "人工经办人";
+        empty_date.notes = "人工备注";
+        int empty_id = db.InsertOA(empty_date, false);
+        CHECK(empty_id > 0);
+        RemoteDocument fill = OfficialEvent("OTHER_OFFICIAL", "其他官方通知",
+                                            "2026-08-10", "fill-date");
+        EventMergeResult filled = MergeOfficialEvent(db, patent, fill);
+        CHECK(filled.code == ResultCode::NewOfficialEvent);
+        OARecord filled_record = db.GetOAById(empty_id);
+        CHECK_STR_EQ(filled_record.issue_date, "");
+        CHECK_STR_EQ(filled_record.source, "");
+        CHECK_STR_EQ(filled_record.remote_document_id, "");
+        CHECK_STR_EQ(filled_record.handler, "人工经办人");
+        CHECK_STR_EQ(filled_record.notes, "人工备注");
+
+        OARecord legacy_empty;
+        legacy_empty.patent_id = patent.id;
+        legacy_empty.geke_code = patent.geke_code;
+        legacy_empty.oa_type = "复审通知";
+        legacy_empty.sync_flag = "web_new";
+        legacy_empty.handler = "旧同步记录经办人";
+        legacy_empty.writer = "旧同步记录撰写人";
+        legacy_empty.official_deadline = "2026-12-31";
+        legacy_empty.notes = "旧同步记录备注";
+        int legacy_empty_id = db.InsertOA(legacy_empty, false);
+        CHECK(legacy_empty_id > 0);
+        RemoteDocument claim_legacy = OfficialEvent(
+            "OTHER_OFFICIAL", "复审通知", "2026-08-09", "claim-legacy");
+        EventMergeResult claimed = MergeOfficialEvent(db, patent, claim_legacy);
+        CHECK(claimed.code == ResultCode::NoChange);
+        OARecord claimed_record = db.GetOAById(legacy_empty_id);
+        CHECK_STR_EQ(claimed_record.issue_date, "2026-08-09");
+        CHECK_STR_EQ(claimed_record.source, "epo_global_dossier");
+        CHECK_STR_EQ(claimed_record.remote_document_id, "epo-claim-legacy");
+        CHECK_STR_EQ(claimed_record.handler, "旧同步记录经办人");
+        CHECK_STR_EQ(claimed_record.writer, "旧同步记录撰写人");
+        CHECK_STR_EQ(claimed_record.official_deadline, "2026-12-31");
+        CHECK_STR_EQ(claimed_record.notes, "旧同步记录备注");
+
+        RemoteDocument source_preference = OfficialEvent(
+            "OTHER_OFFICIAL", "来源精确匹配后的新标题",
+            "2026-08-21", "source-preference");
+        OARecord source_less_identity;
+        source_less_identity.patent_id = patent.id;
+        source_less_identity.oa_type = "来源空的旧标题";
+        source_less_identity.issue_date = "2026-08-20";
+        source_less_identity.remote_document_id = source_preference.remote_document_id;
+        source_less_identity.sync_flag = "web_new";
+        int source_less_identity_id = db.InsertOA(source_less_identity, false);
+        CHECK(source_less_identity_id > 0);
+        OARecord exact_source_identity = source_less_identity;
+        exact_source_identity.oa_type = "精确来源的旧标题";
+        exact_source_identity.issue_date = "2026-08-21";
+        exact_source_identity.source = "epo_global_dossier";
+        int exact_source_identity_id = db.InsertOA(exact_source_identity, false);
+        CHECK(exact_source_identity_id > 0);
+        EventMergeResult source_preference_result =
+            MergeOfficialEvent(db, patent, source_preference);
+        CHECK(source_preference_result.code == ResultCode::NoChange);
+        CHECK_STR_EQ(db.GetOAById(source_less_identity_id).sync_flag, "web_new");
+        CHECK_STR_EQ(db.GetOAById(exact_source_identity_id).sync_flag, "web_new");
+
+        OARecord source_less_legacy;
+        source_less_legacy.patent_id = patent.id;
+        source_less_legacy.oa_type = "旧同步来源优先通知";
+        source_less_legacy.sync_flag = "web_new";
+        int source_less_legacy_id = db.InsertOA(source_less_legacy, false);
+        CHECK(source_less_legacy_id > 0);
+        OARecord exact_source_legacy = source_less_legacy;
+        exact_source_legacy.source = "epo_global_dossier";
+        int exact_source_legacy_id = db.InsertOA(exact_source_legacy, false);
+        CHECK(exact_source_legacy_id > 0);
+        RemoteDocument claim_exact_source_legacy = OfficialEvent(
+            "OTHER_OFFICIAL", "旧同步来源优先通知",
+            "2026-08-22", "claim-exact-source");
+        EventMergeResult exact_source_claimed =
+            MergeOfficialEvent(db, patent, claim_exact_source_legacy);
+        CHECK(exact_source_claimed.code == ResultCode::NoChange);
+        CHECK_STR_EQ(db.GetOAById(source_less_legacy_id).issue_date, "");
+        OARecord exact_source_claimed_record = db.GetOAById(exact_source_legacy_id);
+        CHECK_STR_EQ(exact_source_claimed_record.issue_date, "2026-08-22");
+        CHECK_STR_EQ(exact_source_claimed_record.remote_document_id,
+                     "epo-claim-exact-source");
+
+        OARecord conflict;
+        conflict.patent_id = patent.id;
+        conflict.geke_code = patent.geke_code;
+        conflict.oa_type = "复审决定";
+        conflict.issue_date = "2026-08-01";
+        conflict.writer = "人工撰写人";
+        int conflict_id = db.InsertOA(conflict, false);
+        CHECK(conflict_id > 0);
+        RemoteDocument conflicting = OfficialEvent("OTHER_OFFICIAL", "复审决定",
+                                                   "2026-08-11", "conflict");
+        EventMergeResult conflict_result = MergeOfficialEvent(db, patent, conflicting);
+        CHECK(conflict_result.code == ResultCode::NewOfficialEvent);
+        CHECK(!conflict_result.date_conflict);
+        CHECK_STR_EQ(db.GetOAById(conflict_id).issue_date, "2026-08-01");
+        CHECK_STR_EQ(db.GetOAById(conflict_id).writer, "人工撰写人");
+        CHECK_STR_EQ(db.GetOAById(conflict_id).sync_flag, "");
+
+        const size_t before_rejected = db.GetOAsForPatentId(patent.id).size();
+        RemoteDocument low = OfficialEvent("OTHER_OFFICIAL", "低置信度通知",
+                                           "2026-08-12", "low");
+        low.confidence = "LOW";
+        CHECK(MergeOfficialEvent(db, patent, low).code ==
+              ResultCode::ManualReviewRequired);
+        RemoteDocument translated = OfficialEvent("OTHER_OFFICIAL", "译文通知",
+                                                  "2026-08-13", "translated");
+        translated.document_version = "TRANSLATED";
+        CHECK(MergeOfficialEvent(db, patent, translated).code == ResultCode::NoChange);
+        RemoteDocument applicant = OfficialEvent("OTHER_OFFICIAL", "申请人文件",
+                                                 "2026-08-14", "applicant");
+        applicant.direction = "applicant";
+        CHECK(MergeOfficialEvent(db, patent, applicant).code == ResultCode::NoChange);
+
+        RemoteDocument invalid_date = OfficialEvent(
+            "OTHER_OFFICIAL", "无效日期通知", "2026-02-30", "invalid-date");
+        CHECK(MergeOfficialEvent(db, patent, invalid_date).code ==
+              ResultCode::DateParseFailed);
+        CHECK(db.GetOAsForPatentId(patent.id).size() == before_rejected);
+
+        sqlite3_stmt* stmt = nullptr;
+        CHECK(sqlite3_prepare_v2(db.GetHandle(),
+            "SELECT COUNT(*) FROM prosecution_documents "
+            "WHERE COALESCE(local_path,'') <> ''", -1, &stmt, nullptr) == SQLITE_OK);
+        CHECK(sqlite3_step(stmt) == SQLITE_ROW);
+        CHECK(sqlite3_column_int(stmt, 0) == 0);
+        sqlite3_finalize(stmt);
+    }
+    std::filesystem::remove(path);
+}
+
+static void TestOfficialEventPersistenceAndSchedulingRules() {
+    RemoteDocument event = OfficialEvent(
+        "GRANT_NOTICE", "授权通知", "2026-08-10", "grant-event");
+    CHECK(IsPersistableOfficialEvent(event));
+
+    RemoteDocument translated = event;
+    translated.document_version = "TRANSLATED";
+    CHECK(!IsPersistableOfficialEvent(translated));
+
+    RemoteDocument applicant = event;
+    applicant.direction = "applicant";
+    CHECK(!IsPersistableOfficialEvent(applicant));
+
+    RemoteDocument low = event;
+    low.confidence = "LOW";
+    CHECK(!IsPersistableOfficialEvent(low));
+
+    RemoteDocument unknown = event;
+    unknown.document_type = "UNKNOWN";
+    CHECK(!IsPersistableOfficialEvent(unknown));
+
+    RemoteDocument invalid_date = event;
+    invalid_date.official_date = "2026-02-30";
+    CHECK(!IsPersistableOfficialEvent(invalid_date));
+
+    CHECK(NormalizeCheckIntervalDays(1) == 1);
+    CHECK(NormalizeCheckIntervalDays(3) == 3);
+    CHECK(NormalizeCheckIntervalDays(7) == 7);
+    CHECK(NormalizeCheckIntervalDays(0) == 1);
+    CHECK(NormalizeCheckIntervalDays(365) == 1);
+
+    const long long now = 1'800'000'000LL;
+    CHECK(NextDossierCheckAt(ResultCode::Ok, now, 3) == now + 3 * 86400);
+    CHECK(NextDossierCheckAt(ResultCode::NoChange, now, 7) == now + 7 * 86400);
+    CHECK(NextDossierCheckAt(ResultCode::NewOfficialEvent, now, 1) == now + 86400);
+    CHECK(NextDossierCheckAt(ResultCode::DateConflict, now, 3) == now + 3 * 86400);
+    CHECK(NextDossierCheckAt(ResultCode::NetworkError, now, 7) == now + 1800);
+    CHECK(NextDossierCheckAt(ResultCode::RateLimited, now, 7) == now + 1800);
+    CHECK(NextDossierCheckAt(ResultCode::PageStructureChanged, now, 7) == now + 1800);
+    CHECK(NextDossierCheckAt(ResultCode::Ok, now, 365) == now + 86400);
+}
+
+static void TestBatchSummaryClassifiesConflictsAsManualReview() {
+    BatchSummary summary;
+    CaseSyncReport report;
+
+    report.code = ResultCode::NewOfficialEvent;
+    AccumulateBatchSummary(summary, report);
+    CHECK(summary.checked == 1);
+    CHECK(summary.new_events == 1);
+    CHECK(summary.manual_review == 0);
+    CHECK(summary.findings.size() == 1);
+
+    report.code = ResultCode::DateConflict;
+    AccumulateBatchSummary(summary, report);
+    CHECK(summary.checked == 2);
+    CHECK(summary.new_events == 1);
+    CHECK(summary.manual_review == 1);
+    CHECK(summary.findings.size() == 2);
+
+    report.code = ResultCode::ManualReviewRequired;
+    AccumulateBatchSummary(summary, report);
+    CHECK(summary.manual_review == 2);
+
+    report.code = ResultCode::NoChange;
+    AccumulateBatchSummary(summary, report);
+    CHECK(summary.no_change == 1);
+
+    report.code = ResultCode::NetworkError;
+    AccumulateBatchSummary(summary, report);
+    CHECK(summary.failed == 1);
+    CHECK(summary.failures.size() == 1);
+}
+
+static void TestRemoteCaseParsingAndApplicationBoundary() {
+    const std::string body = R"json({
+        "ok": true,
+        "code": "OK",
+        "message": "",
+        "resolved_application_number": "CN202410000001.1",
+        "auth_state": "AUTHENTICATED",
+        "provider_used": "epo_global_dossier",
+        "documents": [
+            {
+                "source": "",
+                "document_type": "OFFICE_ACTION_FIRST",
+                "document_title": "第一次审查意见通知书",
+                "raw_title": "First notice (ORIGINAL)",
+                "document_code": "210401-CN",
+                "document_version": "ORIGINAL",
+                "official_date": "2026-01-10",
+                "direction": "official",
+                "remote_document_id": "epo-oa-1",
+                "fingerprint": "fp-oa-1",
+                "event_key": "event-oa-1",
+                "source_trace": ["epo_global_dossier", "cnipa"],
+                "confidence": "HIGH",
+                "oa_ordinal": 1
+            },
+            {
+                "source": "epo_global_dossier",
+                "document_type": "GRANT_NOTICE",
+                "document_title": "授权通知",
+                "raw_title": "Notification to grant patent right (ORIGINAL)",
+                "document_code": "grant-code",
+                "document_version": "ORIGINAL",
+                "official_date": "2026-02-10",
+                "direction": "official",
+                "remote_document_id": "epo-grant-1",
+                "fingerprint": "fp-grant-1",
+                "event_key": "event-grant-1",
+                "source_trace": ["epo_global_dossier"],
+                "confidence": "HIGH"
+            },
+            {
+                "source": "epo_global_dossier",
+                "document_type": "GRANT_NOTICE",
+                "document_title": "授权通知",
+                "document_version": "TRANSLATED",
+                "official_date": "2026-02-10",
+                "direction": "official",
+                "remote_document_id": "epo-grant-translated",
+                "event_key": "event-grant-translated",
+                "confidence": "HIGH"
+            },
+            {
+                "source": "epo_global_dossier",
+                "document_type": "OTHER_OFFICIAL",
+                "document_title": "申请人文件",
+                "document_version": "ORIGINAL",
+                "official_date": "2026-02-11",
+                "direction": "applicant",
+                "remote_document_id": "epo-applicant",
+                "event_key": "event-applicant",
+                "confidence": "HIGH"
+            }
+        ],
+        "latest_event": {
+            "source": "epo_global_dossier",
+            "document_type": "GRANT_NOTICE",
+            "document_title": "授权通知",
+            "raw_title": "Notification to grant patent right (ORIGINAL)",
+            "document_code": "grant-code",
+            "document_version": "ORIGINAL",
+            "official_date": "2026-02-10",
+            "direction": "official",
+            "remote_document_id": "epo-grant-1",
+            "fingerprint": "fp-grant-1",
+            "event_key": "event-grant-1",
+            "source_trace": ["epo_global_dossier"],
+            "confidence": "HIGH"
+        }
+    })json";
+
+    RemoteCaseResult remote;
+    CHECK(ParseRemoteCaseResultJson(body, remote));
+    CHECK_STR_EQ(remote.provider_used, "epo_global_dossier");
+    CHECK(remote.documents.size() == 4);
+    CHECK_STR_EQ(remote.documents[0].source, "epo_global_dossier");
+    CHECK_STR_EQ(remote.documents[0].document_code, "210401-CN");
+    CHECK_STR_EQ(remote.documents[0].document_version, "ORIGINAL");
+    CHECK_STR_EQ(remote.documents[0].event_key, "event-oa-1");
+    CHECK_STR_EQ(remote.documents[0].source_trace, "epo_global_dossier,cnipa");
+    CHECK(remote.has_latest_event);
+    CHECK_STR_EQ(remote.latest_event.remote_document_id, "epo-grant-1");
+
+    std::string path = TempDb();
+    {
+        Database db(path);
+        Patent patent;
+        patent.geke_code = "GC-BOUNDARY";
+        patent.application_number = "202410000001.1";
+        patent.application_status = "实质审查中";
+        patent.title = "边界测试";
+        patent.id = db.InsertPatent(patent, false);
+
+        const long long now = 1'800'000'000LL;
+        CaseSyncReport first = ApplyRemoteCaseResult(db, patent, remote, 3, now);
+        CHECK(first.code == ResultCode::NewOfficialEvent);
+        CHECK(first.documents_total == 4);
+        CHECK(first.documents_new == 2);
+        CHECK(db.GetOAsForPatentId(patent.id).size() == 1);
+        OARecord grant = db.GetOAsForPatentId(patent.id).front();
+        CHECK_STR_EQ(grant.oa_type, "授权通知");
+        CHECK_STR_EQ(grant.source, "epo_global_dossier");
+        CHECK_STR_EQ(grant.remote_document_id, "epo-grant-1");
+
+        sqlite3_stmt* stmt = nullptr;
+        CHECK(sqlite3_prepare_v2(db.GetHandle(),
+            "SELECT id FROM prosecution_documents ORDER BY id", -1,
+            &stmt, nullptr) == SQLITE_OK);
+        std::vector<int> document_ids;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            document_ids.push_back(sqlite3_column_int(stmt, 0));
+        }
+        sqlite3_finalize(stmt);
+        CHECK(document_ids.size() == 2);
+        ProsecutionDocumentRecord first_document =
+            db.GetProsecutionDocumentById(document_ids.front());
+        CHECK_STR_EQ(first_document.source, "epo_global_dossier");
+        CHECK_STR_EQ(first_document.document_code, "210401-CN");
+        CHECK_STR_EQ(first_document.event_key, "event-oa-1");
+        CHECK_STR_EQ(first_document.source_trace, "epo_global_dossier,cnipa");
+
+        CHECK(sqlite3_prepare_v2(db.GetHandle(),
+            "SELECT last_dossier_check_at,next_dossier_check_at FROM patents WHERE id=?",
+            -1, &stmt, nullptr) == SQLITE_OK);
+        sqlite3_bind_int(stmt, 1, patent.id);
+        CHECK(sqlite3_step(stmt) == SQLITE_ROW);
+        CHECK(sqlite3_column_int64(stmt, 0) == now);
+        CHECK(sqlite3_column_int64(stmt, 1) == now + 3 * 86400);
+        sqlite3_finalize(stmt);
+
+        auto states = db.GetDossierSyncStates();
+        CHECK(states.size() == 1);
+        CHECK_STR_EQ(states.front().provider, "epo_global_dossier");
+        CHECK_STR_EQ(states.front().latest_remote_oa_type, "授权通知");
+
+        CaseSyncReport duplicate = ApplyRemoteCaseResult(db, patent, remote, 3, now + 10);
+        CHECK(duplicate.code == ResultCode::NoChange);
+        CHECK(duplicate.documents_new == 0);
+        CHECK(db.GetOAsForPatentId(patent.id).size() == 1);
+
+        RemoteCaseResult network;
+        network.code = "NETWORK_ERROR";
+        network.provider_used = "epo_global_dossier";
+        ApplyRemoteCaseResult(db, patent, network, 7, now + 20);
+        CHECK(sqlite3_prepare_v2(db.GetHandle(),
+            "SELECT next_dossier_check_at FROM patents WHERE id=?", -1,
+            &stmt, nullptr) == SQLITE_OK);
+        sqlite3_bind_int(stmt, 1, patent.id);
+        CHECK(sqlite3_step(stmt) == SQLITE_ROW);
+        CHECK(sqlite3_column_int64(stmt, 0) == now + 20 + 1800);
+        sqlite3_finalize(stmt);
+    }
+    std::filesystem::remove(path);
+}
+
 int main() {
     TestNormalizeOaType();
     TestQueueFilter();
@@ -746,6 +1269,10 @@ int main() {
     TestLegacyEventKeyPromotion();
     TestCanonicalLegacyRowsAreMergedTransactionally();
     TestOaMergeRules();
+    TestOfficialEventTitleAndMergeRules();
+    TestOfficialEventPersistenceAndSchedulingRules();
+    TestBatchSummaryClassifiesConflictsAsManualReview();
+    TestRemoteCaseParsingAndApplicationBoundary();
     if (g_failures == 0) {
         std::cout << "all web dossier rule tests passed" << std::endl;
         return 0;

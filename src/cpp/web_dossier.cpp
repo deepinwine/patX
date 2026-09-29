@@ -101,7 +101,9 @@ private:
 // ---------------------------------------------------------------------------
 
 Manager::Manager(Database& db, const std::string& script_dir)
-    : db_(db), script_dir_(script_dir) {}
+    : db_(db), script_dir_(script_dir) {
+    set_check_interval_days(atoi(db_.GetConfig("web_dossier_interval_days").c_str()));
+}
 
 Manager::~Manager() {
     delete sidecar_;
@@ -111,7 +113,7 @@ bool Manager::sidecar_running() const { return sidecar_ != nullptr; }
 
 int Manager::check_interval_days() const { return check_interval_days_; }
 void Manager::set_check_interval_days(int days) {
-    if (days >= 1 && days <= 365) check_interval_days_ = days;
+    check_interval_days_ = NormalizeCheckIntervalDays(days);
 }
 
 bool Manager::EnsureRunning(std::string& error) {
@@ -195,231 +197,12 @@ ResultCode Manager::Login(const std::string& provider, std::atomic<bool>& cancel
 }
 
 bool Manager::ParseCaseResult(const std::string& json_body, RemoteCaseResult& out) {
-    try {
-        auto parsed = json::parse(json_body);
-        out.ok = parsed.value("ok", false);
-        out.code = parsed.value("code", "SIDECAR_ERROR");
-        out.message = parsed.value("message", "");
-        out.resolved_application_number = parsed.value("resolved_application_number", "");
-        out.auth_state = parsed.value("auth_state", "");
-        if (parsed.contains("documents") && parsed["documents"].is_array()) {
-            for (const auto& d : parsed["documents"]) {
-                RemoteDocument doc;
-                doc.document_type = d.value("document_type", "UNKNOWN");
-                doc.document_title = d.value("document_title", "");
-                doc.raw_title = d.value("raw_title", "");
-                doc.official_date = d.value("official_date", "");
-                doc.direction = d.value("direction", "");
-                doc.remote_document_id = d.value("remote_document_id", "");
-                doc.source_url = d.value("source_url", "");
-                doc.download_url = d.value("download_url", "");
-                doc.download_available = d.value("download_available", false);
-                doc.fingerprint = d.value("fingerprint", "");
-                doc.confidence = d.value("confidence", "HIGH");
-                doc.oa_ordinal = d.value("oa_ordinal", 0);
-                doc.ds = d.value("ds", "");
-                doc.wenjiandm = d.value("wenjiandm", "");
-                out.documents.push_back(std::move(doc));
-            }
-        }
-        if (parsed.contains("latest_oa") && parsed["latest_oa"].is_object()) {
-            const auto& lo = parsed["latest_oa"];
-            out.has_latest_oa = true;
-            out.latest_oa.document_type = lo.value("document_type", "");
-            out.latest_oa.document_title = lo.value("document_title", "");
-            out.latest_oa.raw_title = lo.value("raw_title", "");
-            out.latest_oa.official_date = lo.value("official_date", "");
-            out.latest_oa.direction = lo.value("direction", "");
-            out.latest_oa.remote_document_id = lo.value("remote_document_id", "");
-            out.latest_oa.source_url = lo.value("source_url", "");
-            out.latest_oa.download_url = lo.value("download_url", "");
-            out.latest_oa.download_available = lo.value("download_available", false);
-            out.latest_oa.fingerprint = lo.value("fingerprint", "");
-            out.latest_oa.confidence = lo.value("confidence", "HIGH");
-            out.latest_oa.oa_ordinal = lo.value("oa_ordinal", 0);
-            out.latest_oa.ds = lo.value("ds", "");
-            out.latest_oa.wenjiandm = lo.value("wenjiandm", "");
-        }
-        return true;
-    } catch (const std::exception&) {
-        return false;
-    }
+    return ParseRemoteCaseResultJson(json_body, out);
 }
 
 CaseSyncReport Manager::ApplyRemoteResult(const Patent& patent, const RemoteCaseResult& remote) {
-    CaseSyncReport report;
-    report.patent_id = patent.id;
-    report.geke_code = patent.geke_code;
-    report.code = ResultCodeFromString(remote.code);
-
-    long long now = static_cast<long long>(time(nullptr));
-    long long next = now + static_cast<long long>(check_interval_days_) * 86400;
-    db_.UpdatePatentDossierCheck(patent.id, now, next);
-
-    DossierSyncState state;
-    state.patent_id = patent.id;
-    state.provider = "cnipa";
-    state.last_checked_at = now;
-    state.auth_state = remote.auth_state;
-
-    // Persist every discovered document (fingerprint dedup happens in SQL).
-    std::string app_no = remote.resolved_application_number.empty()
-                             ? patent.application_number
-                             : remote.resolved_application_number;
-    int latest_oa_doc_id = 0;
-    for (const auto& d : remote.documents) {
-        ProsecutionDocumentRecord rec;
-        rec.patent_id = patent.id;
-        rec.jurisdiction = "CN";
-        rec.application_number = app_no;
-        rec.publication_number = patent.publication_number;
-        rec.source = "cnipa";
-        rec.remote_document_id = d.remote_document_id;
-        rec.document_type = d.document_type;
-        rec.document_title = d.document_title;
-        rec.official_date = d.official_date;
-        rec.direction = d.direction;
-        rec.source_url = d.source_url;
-        rec.download_url = d.download_url;
-        rec.download_available = d.download_available;
-        rec.fingerprint = d.fingerprint;
-        bool created = false;
-        int doc_row = db_.UpsertProsecutionDocument(rec, &created);
-        if (created) report.documents_new++;
-        if (remote.has_latest_oa && !remote.latest_oa.fingerprint.empty() &&
-            remote.latest_oa.fingerprint == d.fingerprint) {
-            latest_oa_doc_id = doc_row;   // remember for the download step
-        }
-    }
-    report.documents_total = static_cast<int>(remote.documents.size());
-
-    // Latest true Office Action -> OARecord merge rules.
-    if (remote.has_latest_oa) {
-        const RemoteDocument& oa_doc = remote.latest_oa;
-        state.latest_remote_oa_date = oa_doc.official_date;
-        state.latest_remote_oa_type = oa_doc.document_title;
-
-        bool is_oa_family = oa_doc.document_type.rfind("OFFICE_ACTION_", 0) == 0;
-        if (!is_oa_family) {
-            // Sidecar only reports true OAs here; anything else is a bug on
-            // its side - record, don't touch OARecords.
-            report.message = "latest_oa 不是审查意见类型: " + oa_doc.document_type;
-        } else if (oa_doc.confidence != "HIGH") {
-            report.code = ResultCode::ManualReviewRequired;
-            report.message = "置信度 " + oa_doc.confidence + "，待人工确认: " +
-                             oa_doc.document_title + " @ " + oa_doc.official_date;
-        } else if (oa_doc.official_date.empty()) {
-            report.code = ResultCode::DateParseFailed;
-            report.message = "最新审查意见缺少可解析的官文日: " + oa_doc.document_title;
-        } else {
-            std::string canonical = NormalizeOaTypeCn(oa_doc.document_title);
-            auto existing = db_.GetOAsForPatentId(patent.id);
-            report.latest_remote_oa_type = canonical;
-            report.latest_remote_oa_date = oa_doc.official_date;
-
-            const OARecord* same_type = nullptr;
-            const OARecord* same_date = nullptr;
-            for (const auto& e : existing) {
-                std::string e_canonical = NormalizeOaTypeCn(e.oa_type);
-                if (e_canonical == canonical && IsOfficeActionTypeCn(e_canonical)) same_type = &e;
-                if (!e.issue_date.empty() && e.issue_date == oa_doc.official_date &&
-                    (IsOfficeActionTypeCn(e_canonical) || e.oa_type.empty())) {
-                    same_date = &e;
-                }
-            }
-
-            if (same_date) {
-                // Already recorded (matched by exact date).
-                if (same_type && same_type->issue_date.empty()) {
-                    db_.UpdateOASyncFields(same_type->id, oa_doc.official_date, "auto_filled_date");
-                    report.message = "已补入官文日 " + oa_doc.official_date;
-                } else {
-                    report.code = ResultCode::NoChange;
-                }
-            } else if (same_type) {
-                if (same_type->issue_date.empty()) {
-                    db_.UpdateOASyncFields(same_type->id, oa_doc.official_date, "auto_filled_date");
-                    report.code = ResultCode::NoChange;
-                    report.message = "已补入官文日 " + oa_doc.official_date;
-                } else {
-                    // Same OA ordinal, different local date: never overwrite.
-                    db_.UpdateOASyncFields(same_type->id, "", "date_conflict");
-                    report.code = ResultCode::DateConflict;
-                    report.date_conflict = true;
-                    report.message = "本地 " + canonical + " 官文日 " + same_type->issue_date +
-                                     "，官网 " + oa_doc.official_date + "，待人工确认";
-                }
-            } else {
-                OARecord oa;
-                oa.patent_id = patent.id;
-                oa.geke_code = patent.geke_code;
-                oa.patent_title = patent.title;
-                oa.oa_type = canonical;
-                oa.issue_date = oa_doc.official_date;
-                oa.source = "cnipa";
-                oa.remote_document_id = oa_doc.remote_document_id;
-                oa.sync_flag = "web_new";
-                int id = db_.InsertOA(oa, /*log_undo=*/true);
-                if (id > 0) {
-                    report.code = ResultCode::NewOfficeAction;
-                    report.oa_created_id = id;
-                    report.message = "发现新的审查意见: " + canonical + " @ " + oa_doc.official_date;
-
-                    // Phase 2: fetch the notice itself. Strictly optional -
-                    // the OA is already recorded; a download failure only
-                    // annotates the report.
-                    if (!oa_doc.remote_document_id.empty()) {
-                        std::string folder = db_.GetConfig("web_dossier_folder");
-                        if (folder.empty()) folder = "data/dossiers/CN";
-                        json dl_args;
-                        dl_args["provider"] = "cnipa";
-                        dl_args["application_number"] = app_no;
-                        dl_args["rid"] = oa_doc.remote_document_id;
-                        dl_args["ds"] = oa_doc.ds.empty() ? "TZS" : oa_doc.ds;
-                        dl_args["wenjiandm"] = oa_doc.wenjiandm.empty() ? "100000" : oa_doc.wenjiandm;
-                        dl_args["official_date"] = oa_doc.official_date;
-                        dl_args["title"] = canonical;
-                        dl_args["dest_dir"] = folder;
-                        std::string dl_resp;
-                        if (Rpc("download_document", dl_args.dump(), dl_resp)) {
-                            try {
-                                auto dl = json::parse(dl_resp);
-                                if (dl.value("ok", false)) {
-                                    report.downloaded_path = dl.value("saved_path", "");
-                                    if (latest_oa_doc_id > 0 && !report.downloaded_path.empty()) {
-                                        db_.UpdateProsecutionDocumentDownload(
-                                            latest_oa_doc_id, report.downloaded_path);
-                                    }
-                                    report.message += "，PDF已下载: " + report.downloaded_path;
-                                } else {
-                                    report.message += "（PDF下载失败: " +
-                                                      dl.value("code", "") + " " +
-                                                      dl.value("message", "") + "）";
-                                }
-                            } catch (...) {
-                                report.message += "（PDF下载响应解析失败）";
-                            }
-                        } else {
-                            report.message += "（PDF下载未执行：sidecar 通信失败）";
-                        }
-                    }
-                }
-            }
-        }
-    } else if (report.code == ResultCode::Ok || report.code == ResultCode::NoChange) {
-        report.code = ResultCode::NoChange;
-    }
-
-    if (report.code == ResultCode::Ok || report.code == ResultCode::NewOfficeAction ||
-        report.code == ResultCode::NoChange || report.code == ResultCode::DateConflict) {
-        state.last_success_at = now;
-    } else {
-        state.last_error_at = now;
-        state.last_error_code = ToString(report.code);
-        state.last_error_message = report.message.empty() ? remote.message : report.message;
-    }
-    db_.UpsertDossierSyncState(state);
-    return report;
+    return ApplyRemoteCaseResult(db_, patent, remote, check_interval_days_,
+                                 static_cast<long long>(time(nullptr)));
 }
 
 CaseSyncReport Manager::SyncCase(const Patent& patent, std::atomic<bool>& cancel) {
@@ -479,8 +262,7 @@ BatchSummary Manager::SyncAll(bool include_granted, int limit,
     auto patents = db_.GetPatentsForDossierCheck(include_granted, limit);
     summary.total = static_cast<int>(patents.size());
 
-    int interval = atoi(db_.GetConfig("web_dossier_interval_days").c_str());
-    if (interval >= 1 && interval <= 365) check_interval_days_ = interval;
+    set_check_interval_days(atoi(db_.GetConfig("web_dossier_interval_days").c_str()));
 
     int index = 0;
     for (const auto& p : patents) {
@@ -489,34 +271,8 @@ BatchSummary Manager::SyncAll(bool include_granted, int limit,
         index++;
 
         CaseSyncReport r = SyncCase(p, cancel);
-        summary.checked++;
-        switch (r.code) {
-            case ResultCode::NewOfficeAction:
-            case ResultCode::DateConflict:
-                summary.new_oa++;
-                summary.findings.push_back(r);
-                break;
-            case ResultCode::NoChange:
-            case ResultCode::Ok:
-                summary.no_change++;
-                break;
-            case ResultCode::ManualReviewRequired:
-                summary.manual_review++;
-                summary.findings.push_back(r);
-                break;
-            case ResultCode::AuthRequired:
-            case ResultCode::SessionExpired:
-                summary.auth_required++;
-                summary.findings.push_back(r);
-                return summary;   // stop the whole batch, don't fail the rest
-            case ResultCode::Cancelled:
-                return summary;
-            default:
-                summary.failed++;
-                summary.failures.push_back(r);
-                if (IsBatchAbortingCode(r.code)) return summary;
-                break;
-        }
+        AccumulateBatchSummary(summary, r);
+        if (r.code == ResultCode::Cancelled || IsBatchAbortingCode(r.code)) return summary;
     }
     return summary;
 }
