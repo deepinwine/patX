@@ -27,13 +27,13 @@ static bool IsBatchAbortingCode(ResultCode c) {
 // Sidecar process (stdin/stdout line JSON-RPC)
 // ---------------------------------------------------------------------------
 
-class SidecarProcess {
+class SidecarProcess : public RpcTransport {
 public:
-    ~SidecarProcess() { Shutdown(); }
+    ~SidecarProcess() override { Shutdown(); }
 
     // command must be fully resolved (absolute script path) - no shell, no
     // cwd change (that would break the GUI's relative database paths).
-    bool Start(const std::string& command, std::string& error) {
+    bool Start(const std::string& command, std::string& error) override {
         if (process_) return true;
         process_ = wxProcess::Open(wxString::FromUTF8(command.c_str()));
         if (!process_) {
@@ -46,7 +46,7 @@ public:
     }
 
     bool Call(const std::string& line_request, int timeout_ms, std::string& line_response,
-              std::atomic<bool>& cancel) {
+              std::atomic<bool>& cancel) override {
         if (!process_ || !out_ || !in_) return false;
         if (!out_->Write(line_request.c_str(), line_request.size()).IsOk()) return false;
         out_->Write("\n", 1);
@@ -75,7 +75,7 @@ public:
         }
     }
 
-    void Shutdown() {
+    void Shutdown() override {
         if (process_) {
             // best effort graceful stop, then detach
             if (out_) {
@@ -105,27 +105,37 @@ Manager::Manager(Database& db, const std::string& script_dir)
     set_check_interval_days(atoi(db_.GetConfig("web_dossier_interval_days").c_str()));
 }
 
-Manager::~Manager() {
-    delete sidecar_;
+Manager::Manager(Database& db, const std::string& script_dir,
+                 std::unique_ptr<RpcTransport> transport)
+    : db_(db), script_dir_(script_dir), sidecar_(std::move(transport)) {
+    set_check_interval_days(atoi(db_.GetConfig("web_dossier_interval_days").c_str()));
 }
 
-bool Manager::sidecar_running() const { return sidecar_ != nullptr; }
+Manager::~Manager() {
+    std::lock_guard<std::mutex> lock(rpc_mutex_);
+    sidecar_.reset();
+}
 
-int Manager::check_interval_days() const { return check_interval_days_; }
+bool Manager::sidecar_running() const {
+    std::lock_guard<std::mutex> lock(rpc_mutex_);
+    return sidecar_ != nullptr;
+}
+
+int Manager::check_interval_days() const { return check_interval_days_.load(); }
 void Manager::set_check_interval_days(int days) {
     check_interval_days_ = NormalizeCheckIntervalDays(days);
 }
 
 bool Manager::EnsureRunning(std::string& error) {
-    if (!sidecar_) sidecar_ = new SidecarProcess();
+    std::lock_guard<std::mutex> lock(rpc_mutex_);
+    if (!sidecar_) sidecar_ = std::make_unique<SidecarProcess>();
     std::string python = db_.GetConfig("web_dossier_python");
     if (python.empty()) python = "python3";
     // script_dir_ is the absolute path of tools/web_dossier (resolved by the
     // GUI next to the executable, falling back to the working directory).
     std::string command = python + " \"" + script_dir_ + "/service.py\"";
     if (!sidecar_->Start(command, error)) {
-        delete sidecar_;
-        sidecar_ = nullptr;
+        sidecar_.reset();
         return false;
     }
     std::atomic<bool> no_cancel{false};
@@ -134,8 +144,7 @@ bool Manager::EnsureRunning(std::string& error) {
         error = "sidecar 无响应（需要 Python 3.10+ 与 playwright：pip install playwright && "
                 "playwright install chromium）";
         sidecar_->Shutdown();
-        delete sidecar_;
-        sidecar_ = nullptr;
+        sidecar_.reset();
         return false;
     }
     try {
@@ -156,7 +165,9 @@ bool Manager::EnsureRunning(std::string& error) {
 }
 
 bool Manager::Rpc(const std::string& op, const std::string& json_payload,
-                  std::string& response) {
+                  std::string& response, std::atomic<bool>* cancel) {
+    std::lock_guard<std::mutex> lock(rpc_mutex_);
+    if (cancel && cancel->load()) return false;
     if (!sidecar_) return false;
     std::atomic<bool> no_cancel{false};
     json req;
@@ -170,7 +181,15 @@ bool Manager::Rpc(const std::string& op, const std::string& json_payload,
     }
     // Login waits for the user (minutes); queries are slow but bounded.
     int timeout = op == "login" ? 1200000 : 300000;
-    return sidecar_->Call(req.dump(), timeout, response, no_cancel);
+    const bool ok = sidecar_->Call(req.dump(), timeout, response,
+                                   cancel ? *cancel : no_cancel);
+    if (!ok && cancel && cancel->load()) {
+        // The cancelled response may still arrive later. Drop the sidecar so
+        // a future RPC cannot consume that stale line as its own response.
+        sidecar_->Shutdown();
+        sidecar_.reset();
+    }
+    return ok;
 }
 
 bool Manager::EpoCall(const std::string& epo_op, const std::string& publication_number,
@@ -180,12 +199,12 @@ bool Manager::EpoCall(const std::string& epo_op, const std::string& publication_
     args["publication_number"] = publication_number;
     args["consumer_key"] = db_.GetConfig("epo_consumer_key");
     args["consumer_secret"] = db_.GetConfig("epo_consumer_secret");
-    return Rpc("epo", args.dump(), response);
+    return Rpc("epo", args.dump(), response, nullptr);
 }
 
 ResultCode Manager::Login(const std::string& provider, std::atomic<bool>& cancel) {
     std::string response;
-    if (!Rpc("login", "{\"provider\":\"" + provider + "\"}", response)) {
+    if (!Rpc("login", "{\"provider\":\"" + provider + "\"}", response, &cancel)) {
         return cancel.load() ? ResultCode::Cancelled : ResultCode::SidecarError;
     }
     try {
@@ -201,7 +220,7 @@ bool Manager::ParseCaseResult(const std::string& json_body, RemoteCaseResult& ou
 }
 
 CaseSyncReport Manager::ApplyRemoteResult(const Patent& patent, const RemoteCaseResult& remote) {
-    return ApplyRemoteCaseResult(db_, patent, remote, check_interval_days_,
+    return ApplyRemoteCaseResult(db_, patent, remote, check_interval_days_.load(),
                                  static_cast<long long>(time(nullptr)));
 }
 
@@ -227,7 +246,7 @@ CaseSyncReport Manager::SyncCase(const Patent& patent, std::atomic<bool>& cancel
     args["application_number"] = patent.application_number;
     args["publication_number"] = patent.publication_number;
     std::string response;
-    if (!Rpc("sync_case", args.dump(), response)) {
+    if (!Rpc("sync_case", args.dump(), response, &cancel)) {
         report.code = cancel.load() ? ResultCode::Cancelled : ResultCode::SidecarError;
         report.message = "sidecar 通信失败";
         return report;

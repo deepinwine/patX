@@ -4,9 +4,14 @@
 #include "web_dossier.hpp"
 
 #include <cstdio>
+#include <condition_variable>
 #include <filesystem>
+#include <functional>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #include <process.h>
@@ -1096,6 +1101,244 @@ static void TestBatchSummaryClassifiesConflictsAsManualReview() {
     CHECK(summary.failures.size() == 1);
 }
 
+static void TestBackgroundSyncPolicy() {
+    CHECK(!ShouldStartBackgroundSync(true, 1));
+    CHECK(!ShouldStartBackgroundSync(false, 0));
+    CHECK(ShouldStartBackgroundSync(false, 1));
+    CHECK(!ShouldOpenBackgroundNotification(true));
+    CHECK(ShouldOpenBackgroundNotification(false));
+    CHECK(!CanChangeBackgroundSettings(true));
+    CHECK(CanChangeBackgroundSettings(false));
+
+    BatchSummary no_change;
+    no_change.checked = 3;
+    no_change.no_change = 3;
+    CHECK(!DecideBackgroundUi(no_change).refresh_oa);
+    CHECK(DecideBackgroundUi(no_change).notification == BackgroundNotificationKind::None);
+
+    BatchSummary failures;
+    failures.failed = 2;
+    CHECK(!DecideBackgroundUi(failures).refresh_oa);
+    CHECK(DecideBackgroundUi(failures).notification == BackgroundNotificationKind::None);
+
+    BatchSummary new_events;
+    new_events.new_events = 2;
+    CHECK(DecideBackgroundUi(new_events).refresh_oa);
+    CHECK(DecideBackgroundUi(new_events).notification == BackgroundNotificationKind::Findings);
+
+    BatchSummary manual_review;
+    manual_review.manual_review = 1;
+    CHECK(DecideBackgroundUi(manual_review).refresh_oa);
+    CHECK(DecideBackgroundUi(manual_review).notification ==
+          BackgroundNotificationKind::Findings);
+
+    BatchSummary auth_only;
+    auth_only.auth_required = 1;
+    CHECK(!DecideBackgroundUi(auth_only).refresh_oa);
+    CHECK(DecideBackgroundUi(auth_only).notification ==
+          BackgroundNotificationKind::LoginRequired);
+
+    BatchSummary findings_then_auth;
+    findings_then_auth.new_events = 1;
+    findings_then_auth.auth_required = 1;
+    CHECK(DecideBackgroundUi(findings_then_auth).refresh_oa);
+    CHECK(DecideBackgroundUi(findings_then_auth).notification ==
+          BackgroundNotificationKind::LoginRequired);
+
+    BatchSummary categorized_findings;
+    categorized_findings.new_events = 2;
+    categorized_findings.manual_review = 2;
+    CaseSyncReport conflict;
+    conflict.code = ResultCode::DateConflict;
+    categorized_findings.findings.push_back(conflict);
+    CaseSyncReport manual;
+    manual.code = ResultCode::ManualReviewRequired;
+    categorized_findings.findings.push_back(manual);
+    const auto categorized = DecideBackgroundUi(categorized_findings);
+    CHECK(categorized.new_events == 2);
+    CHECK(categorized.date_conflicts == 1);
+    CHECK(categorized.manual_reviews == 1);
+
+    CHECK(BackgroundTimerDelayMs(true) == 30 * 1000);
+    CHECK(BackgroundTimerDelayMs(false) == 30 * 60 * 1000);
+}
+
+static void TestBackgroundControllerIntegrationBoundaries() {
+    BackgroundControllerCore core;
+    int due_loads = 0;
+    int ensures = 0;
+    int starts = 0;
+    WorkerLaunchOptions launched;
+    auto loader = [&] {
+        due_loads++;
+        Patent p;
+        p.id = 1;
+        return std::vector<Patent>{p};
+    };
+    auto ensure = [&] {
+        ensures++;
+        return true;
+    };
+    auto start = [&](const std::vector<Patent>& queue, WorkerLaunchOptions options) {
+        starts++;
+        CHECK(queue.size() == 1);
+        launched = options;
+    };
+
+    CHECK(!core.TryStartBackground(true, loader, ensure, start));
+    CHECK(due_loads == 0);
+    CHECK(ensures == 0);
+    CHECK(starts == 0);
+
+    CHECK(!core.TryStartBackground(false, [&] {
+        due_loads++;
+        return std::vector<Patent>{};
+    }, ensure, start));
+    CHECK(due_loads == 1);
+    CHECK(ensures == 0);
+    CHECK(starts == 0);
+
+    CHECK(core.TryStartBackground(false, loader, ensure, start));
+    CHECK(due_loads == 2);
+    CHECK(ensures == 1);
+    CHECK(starts == 1);
+    CHECK(!launched.show_dialog);
+    CHECK(launched.background_run);
+
+    const auto manual = WorkerLaunchOptionsFor(SyncRunKind::ManualBatch);
+    CHECK(manual.show_dialog);
+    CHECK(!manual.background_run);
+    const auto login = WorkerLaunchOptionsFor(SyncRunKind::Login);
+    CHECK(login.show_dialog);
+    CHECK(!login.background_run);
+
+    int settings_writes = 0;
+    int saved_days = 0;
+    auto save_interval = [&](int days) {
+        settings_writes++;
+        saved_days = days;
+    };
+    CHECK(!ApplyBackgroundIntervalIfIdle(true, 3, save_interval));
+    CHECK(settings_writes == 0);
+    CHECK(ApplyBackgroundIntervalIfIdle(false, 3, save_interval));
+    CHECK(settings_writes == 1);
+    CHECK(saved_days == 3);
+}
+
+static void TestBackgroundNotificationOwnershipAndClickRouting() {
+    BackgroundControllerCore core;
+    int refreshes = 0;
+    int notifications = 0;
+    BackgroundNotificationClick routed = BackgroundNotificationClick::None;
+    std::function<void()> click;
+    std::weak_ptr<int> held;
+    auto factory = [&](const BatchSummary&, BackgroundNotificationClick action,
+                       std::function<void(BackgroundNotificationClick)> route) {
+        notifications++;
+        auto token = std::make_shared<int>(notifications);
+        held = token;
+        click = [route = std::move(route), action] { route(action); };
+        return std::shared_ptr<void>(token);
+    };
+    auto route = [&](BackgroundNotificationClick action) { routed = action; };
+
+    BatchSummary no_change;
+    no_change.no_change = 1;
+    core.CompleteBackground(no_change, [&] { refreshes++; }, factory, route);
+    CHECK(refreshes == 0);
+    CHECK(notifications == 0);
+    CHECK(!core.has_notification());
+
+    BatchSummary findings;
+    findings.new_events = 1;
+    core.CompleteBackground(findings, [&] { refreshes++; }, factory, route);
+    CHECK(refreshes == 1);
+    CHECK(notifications == 1);
+    CHECK(core.has_notification());
+    CHECK(!held.expired());
+    click();
+    CHECK(routed == BackgroundNotificationClick::ShowFindings);
+
+    BatchSummary auth;
+    auth.auth_required = 1;
+    core.CompleteBackground(auth, [&] { refreshes++; }, factory, route);
+    CHECK(refreshes == 1);
+    CHECK(notifications == 2);
+    CHECK(core.has_notification());
+    click();
+    CHECK(routed == BackgroundNotificationClick::ShowLoginRequired);
+
+    core.ClearNotification();
+    CHECK(!core.has_notification());
+    CHECK(held.expired());
+}
+
+struct BlockingWorkerState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool cancelled = false;
+    bool rpc_saw_cancel = false;
+    bool joined = false;
+};
+
+class BlockingTestWorker : public IJoinableDossierWorker {
+public:
+    explicit BlockingTestWorker(std::shared_ptr<BlockingWorkerState> state)
+        : state_(std::move(state)), thread_([state = state_] {
+              std::unique_lock<std::mutex> lock(state->mutex);
+              state->entered = true;
+              state->cv.notify_all();
+              state->cv.wait(lock, [&] { return state->cancelled; });
+              state->rpc_saw_cancel = true;
+          }) {}
+
+    void RequestCancel() override {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->cancelled = true;
+        state_->cv.notify_all();
+    }
+
+    void Join() override {
+        if (thread_.joinable()) thread_.join();
+        state_->joined = true;
+    }
+
+private:
+    std::shared_ptr<BlockingWorkerState> state_;
+    std::thread thread_;
+};
+
+static void TestWorkerOwnerCancelsAndJoinsDeterministically() {
+    auto state = std::make_shared<BlockingWorkerState>();
+    {
+        DossierWorkerOwner owner;
+        owner.Adopt(std::make_unique<BlockingTestWorker>(state));
+        std::unique_lock<std::mutex> lock(state->mutex);
+        state->cv.wait(lock, [&] { return state->entered; });
+    }
+    CHECK(state->cancelled);
+    CHECK(state->rpc_saw_cancel);
+    CHECK(state->joined);
+}
+
+class TestCompletionTarget : public DossierCompletionTarget {
+public:
+    void SetDossierCompletionCallback(std::function<void()> callback) override {
+        callback_ = std::move(callback);
+    }
+    std::function<void()> callback_;
+};
+
+static void TestCompletionCallbackBinding() {
+    TestCompletionTarget target;
+    int refreshes = 0;
+    BindDossierRefresh(target, [&] { refreshes++; });
+    CHECK(static_cast<bool>(target.callback_));
+    target.callback_();
+    CHECK(refreshes == 1);
+}
+
 static void TestRemoteCaseParsingAndApplicationBoundary() {
     const std::string body = R"json({
         "ok": true,
@@ -1272,6 +1515,11 @@ int main() {
     TestOfficialEventTitleAndMergeRules();
     TestOfficialEventPersistenceAndSchedulingRules();
     TestBatchSummaryClassifiesConflictsAsManualReview();
+    TestBackgroundSyncPolicy();
+    TestBackgroundControllerIntegrationBoundaries();
+    TestBackgroundNotificationOwnershipAndClickRouting();
+    TestWorkerOwnerCancelsAndJoinsDeterministically();
+    TestCompletionCallbackBinding();
     TestRemoteCaseParsingAndApplicationBoundary();
     if (g_failures == 0) {
         std::cout << "all web dossier rule tests passed" << std::endl;

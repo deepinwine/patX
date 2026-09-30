@@ -20,6 +20,8 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -142,7 +144,111 @@ CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
                                      int interval_days, long long now);
 void AccumulateBatchSummary(BatchSummary& summary, const CaseSyncReport& report);
 
-class SidecarProcess;   // pimpl - hides wxProcess from this header
+// Pure policy helpers used by the wxWidgets background scheduler. Keeping
+// these decisions outside the UI makes silent/no-op behaviour testable.
+enum class BackgroundNotificationKind {
+    None,
+    Findings,
+    LoginRequired,
+};
+
+struct BackgroundUiDecision {
+    bool refresh_oa = false;
+    BackgroundNotificationKind notification = BackgroundNotificationKind::None;
+    int new_events = 0;
+    int date_conflicts = 0;
+    int manual_reviews = 0;
+};
+
+bool ShouldStartBackgroundSync(bool busy, std::size_t due_count);
+bool ShouldOpenBackgroundNotification(bool busy);
+bool CanChangeBackgroundSettings(bool busy);
+bool ApplyBackgroundIntervalIfIdle(
+    bool busy, int days, const std::function<void(int)>& save_interval);
+BackgroundUiDecision DecideBackgroundUi(const BatchSummary& summary);
+int BackgroundTimerDelayMs(bool first_run);
+
+enum class SyncRunKind {
+    ManualBatch,
+    Login,
+    Background,
+};
+
+struct WorkerLaunchOptions {
+    bool show_dialog = true;
+    bool background_run = false;
+};
+
+WorkerLaunchOptions WorkerLaunchOptionsFor(SyncRunKind kind);
+
+enum class BackgroundNotificationClick {
+    None,
+    ShowFindings,
+    ShowLoginRequired,
+};
+
+class BackgroundControllerCore {
+public:
+    using DueQueueLoader = std::function<std::vector<Patent>()>;
+    using EnsureManager = std::function<bool()>;
+    using StartWorker =
+        std::function<void(const std::vector<Patent>&, WorkerLaunchOptions)>;
+    using NotificationRoute = std::function<void(BackgroundNotificationClick)>;
+    using NotificationFactory = std::function<std::shared_ptr<void>(
+        const BatchSummary&, BackgroundNotificationClick, NotificationRoute)>;
+
+    bool TryStartBackground(bool busy, const DueQueueLoader& load_due,
+                            const EnsureManager& ensure_manager,
+                            const StartWorker& start_worker);
+    void CompleteBackground(const BatchSummary& summary,
+                            const std::function<void()>& refresh,
+                            const NotificationFactory& notify,
+                            const NotificationRoute& route);
+    void ClearNotification();
+    bool has_notification() const { return static_cast<bool>(notification_handle_); }
+    const BatchSummary& last_summary() const { return last_summary_; }
+
+private:
+    BatchSummary last_summary_;
+    std::shared_ptr<void> notification_handle_;
+};
+
+class IJoinableDossierWorker {
+public:
+    virtual ~IJoinableDossierWorker() = default;
+    virtual void RequestCancel() = 0;
+    virtual void Join() = 0;
+};
+
+class DossierWorkerOwner {
+public:
+    ~DossierWorkerOwner();
+    void Adopt(std::unique_ptr<IJoinableDossierWorker> worker);
+    void Join();
+    void CancelAndJoin();
+    bool has_worker() const { return static_cast<bool>(worker_); }
+
+private:
+    std::unique_ptr<IJoinableDossierWorker> worker_;
+};
+
+class DossierCompletionTarget {
+public:
+    virtual ~DossierCompletionTarget() = default;
+    virtual void SetDossierCompletionCallback(std::function<void()> callback) = 0;
+};
+
+void BindDossierRefresh(DossierCompletionTarget& target,
+                        std::function<void()> refresh);
+
+class RpcTransport {
+public:
+    virtual ~RpcTransport() = default;
+    virtual bool Start(const std::string& command, std::string& error) = 0;
+    virtual bool Call(const std::string& request, int timeout_ms,
+                      std::string& response, std::atomic<bool>& cancel) = 0;
+    virtual void Shutdown() = 0;
+};
 
 class Manager {
 public:
@@ -150,6 +256,8 @@ public:
     // tools/web_dossier directory (the GUI resolves it next to the
     // executable or the cwd).
     Manager(Database& db, const std::string& script_dir);
+    Manager(Database& db, const std::string& script_dir,
+            std::unique_ptr<RpcTransport> transport);
     ~Manager();
 
     // Spawns the sidecar if needed and checks it answers "ping".
@@ -183,15 +291,17 @@ public:
 
 private:
     // Performs one JSON-RPC round trip. Returns false on transport trouble.
-    bool Rpc(const std::string& op, const std::string& json_payload, std::string& response);
+    bool Rpc(const std::string& op, const std::string& json_payload, std::string& response,
+             std::atomic<bool>* cancel);
 
     CaseSyncReport ApplyRemoteResult(const Patent& patent, const RemoteCaseResult& remote);
     bool ParseCaseResult(const std::string& json_body, RemoteCaseResult& out);
 
     Database& db_;
     std::string script_dir_;
-    SidecarProcess* sidecar_ = nullptr;
-    int check_interval_days_ = 1;
+    std::unique_ptr<RpcTransport> sidecar_;
+    mutable std::mutex rpc_mutex_;
+    std::atomic<int> check_interval_days_{1};
 };
 
 } // namespace webdossier

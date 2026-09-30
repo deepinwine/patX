@@ -172,13 +172,23 @@ public:
                       std::to_string(db->SchemaVersion()) + ")");
         dossier_controller = std::make_unique<WebDossierController>(
             this, *db, [this](const std::string& geke_code) { ShowPatentByCode(geke_code); });
-        dossier_controller->set_on_finished([this]() { LoadOA(); });
+        webdossier::BindDossierRefresh(*dossier_controller, [this]() { LoadOA(); });
         SetupMenu();
         SetupUI();
         LoadAllData();
 
-        // Auto-sync check timer (fires every 30 min; the panel decides
-        // whether the configured interval has elapsed)
+        auto_sync_timer_ = std::make_unique<wxTimer>(this);
+        Bind(wxEVT_TIMER, &PatXFrame::OnDossierAutoSyncTimer, this,
+             auto_sync_timer_->GetId());
+        auto_sync_timer_->StartOnce(webdossier::BackgroundTimerDelayMs(true));
+    }
+
+    ~PatXFrame() override {
+        if (auto_sync_timer_) {
+            auto_sync_timer_->Stop();
+            Unbind(wxEVT_TIMER, &PatXFrame::OnDossierAutoSyncTimer, this,
+                   auto_sync_timer_->GetId());
+        }
     }
 
 private:
@@ -186,7 +196,7 @@ private:
     std::unique_ptr<WebDossierController> dossier_controller;
     wxAuiNotebook* notebook;
     wxStatusBar* status_bar;
-    wxTimer* auto_sync_timer_ = nullptr;
+    std::unique_ptr<wxTimer> auto_sync_timer_;
 
     int current_theme = 0;
     int current_lang = 0;
@@ -244,6 +254,7 @@ private:
         ID_DOSSIER_SYNC_ALL,
         ID_DOSSIER_SYNC_GRANTED,
         ID_DOSSIER_LOGIN,
+        ID_DOSSIER_SETTINGS,
         ID_DOSSIER_HISTORY,
         ID_DOSSIER_ERRORS,
         ID_EPO_FAMILY
@@ -315,6 +326,8 @@ private:
                              LANG_STR("Update All (incl. Granted)", "更新全部（含已授权）"));
         dossier_menu->AppendSeparator();
         dossier_menu->Append(ID_DOSSIER_LOGIN, LANG_STR("CNIPA &Login...", "CNIPA 登录(&L)..."));
+        dossier_menu->Append(ID_DOSSIER_SETTINGS,
+                             LANG_STR("Reminder Settings...", "审查提醒设置"));
         dossier_menu->Append(ID_DOSSIER_HISTORY, LANG_STR("Sync &History", "同步历史(&H)"));
         dossier_menu->Append(ID_DOSSIER_ERRORS, LANG_STR("&Problem Cases", "异常案件(&P)"));
         mb->Append(dossier_menu, LANG_STR("&Dossier Sync", "审查信息同步(&D)"));
@@ -348,6 +361,7 @@ private:
         Bind(wxEVT_MENU, &PatXFrame::OnDossierSyncAll, this, ID_DOSSIER_SYNC_ALL);
         Bind(wxEVT_MENU, &PatXFrame::OnDossierSyncGranted, this, ID_DOSSIER_SYNC_GRANTED);
         Bind(wxEVT_MENU, &PatXFrame::OnDossierLogin, this, ID_DOSSIER_LOGIN);
+        Bind(wxEVT_MENU, &PatXFrame::OnDossierSettings, this, ID_DOSSIER_SETTINGS);
         Bind(wxEVT_MENU, &PatXFrame::OnDossierHistory, this, ID_DOSSIER_HISTORY);
         Bind(wxEVT_MENU, &PatXFrame::OnDossierErrors, this, ID_DOSSIER_ERRORS);
         Bind(wxEVT_MENU, &PatXFrame::OnEpoFamily, this, ID_EPO_FAMILY);
@@ -2255,7 +2269,7 @@ private:
     void AdoptDatabase(std::unique_ptr<Database> candidate) {
         auto controller = std::make_unique<WebDossierController>(
             this, *candidate, [this](const std::string& code) { ShowPatentByCode(code); });
-        controller->set_on_finished([this]() { LoadOA(); });
+        webdossier::BindDossierRefresh(*controller, [this]() { LoadOA(); });
 
         // Destroy the old controller before its Database reference, then move
         // both validated replacements into the frame.
@@ -2480,8 +2494,17 @@ private:
     void OnDossierSyncAll(wxCommandEvent&) { dossier_controller->SyncAllActive(false); }
     void OnDossierSyncGranted(wxCommandEvent&) { dossier_controller->SyncAllActive(true); }
     void OnDossierLogin(wxCommandEvent&) { dossier_controller->Login(); }
+    void OnDossierSettings(wxCommandEvent&) { dossier_controller->ShowSettings(); }
     void OnDossierHistory(wxCommandEvent&) { dossier_controller->ShowHistory(); }
     void OnDossierErrors(wxCommandEvent&) { dossier_controller->ShowErrorCases(); }
+
+    void OnDossierAutoSyncTimer(wxTimerEvent&) {
+        if (!dossier_controller) return;
+        const bool first_run = auto_sync_timer_ && auto_sync_timer_->IsOneShot();
+        dossier_controller->SyncDueInBackground();
+        if (first_run && auto_sync_timer_)
+            auto_sync_timer_->Start(webdossier::BackgroundTimerDelayMs(false));
+    }
 
     void OnEpoFamily(wxCommandEvent&) {
         // prefill from the selected patent when possible

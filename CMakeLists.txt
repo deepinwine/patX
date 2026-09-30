@@ -164,6 +164,21 @@ if(PATX_BUILD_TESTS)
         target_compile_options(patx_web_dossier_tests PRIVATE /utf-8)
     endif()
     add_test(NAME patx_web_dossier_tests COMMAND patx_web_dossier_tests)
+
+    if(wxWidgets_FOUND)
+        add_executable(patx_web_dossier_manager_tests
+            tests/test_web_dossier_manager.cpp
+            src/cpp/web_dossier.cpp
+        )
+        target_link_libraries(patx_web_dossier_manager_tests PRIVATE
+            patx_core ${wxWidgets_LIBRARIES})
+        target_include_directories(patx_web_dossier_manager_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp
+        )
+        add_test(NAME patx_web_dossier_manager_tests
+                 COMMAND patx_web_dossier_manager_tests)
+    endif()
 endif()
 
 message(STATUS "patX v${PROJECT_VERSION} - core library, optional GUI, tests")

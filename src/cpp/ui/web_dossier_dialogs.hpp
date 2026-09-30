@@ -20,7 +20,8 @@
 
 class WebDossierSyncDialog;
 
-class WebDossierController : public wxEvtHandler {
+class WebDossierController : public wxEvtHandler,
+                             public webdossier::DossierCompletionTarget {
 public:
     // on_show_case(geke_code) - jump the main window to that patent.
     WebDossierController(wxWindow* parent, Database& db,
@@ -29,7 +30,9 @@ public:
 
     void SyncPatents(const std::vector<Patent>& patents);
     void SyncAllActive(bool include_granted);
+    void SyncDueInBackground();
     void Login();
+    void ShowSettings();
     void ShowHistory();
     // EPO OPS family lookup dialog (needs the sidecar for the REST relay).
     void ShowFamily(const std::string& publication);
@@ -37,15 +40,29 @@ public:
 
     // Called on the main thread after every finished batch (new OAs may have
     // been inserted); the frame uses it to refresh the OA list.
-    void set_on_finished(std::function<void()> fn) { on_finished_ = std::move(fn); }
+    void set_on_finished(std::function<void()> fn) {
+        SetDossierCompletionCallback(std::move(fn));
+    }
+    void SetDossierCompletionCallback(std::function<void()> fn) override {
+        on_finished_ = std::move(fn);
+    }
 
     bool busy() const { return running_.load(); }
+    bool background_run() const { return background_run_; }
 
 private:
     friend class WebDossierSyncDialog;
     bool EnsureManager(std::string& error);
-    void StartWorker(const std::vector<Patent>& queue, bool is_login_only);
+    void StartWorker(const std::vector<Patent>& queue, bool is_login_only,
+                     webdossier::WorkerLaunchOptions options);
     void OnBatchDone(wxThreadEvent& event);
+    std::shared_ptr<void> ShowBatchNotification(
+        const webdossier::BatchSummary& summary,
+        webdossier::BackgroundNotificationClick action,
+        webdossier::BackgroundControllerCore::NotificationRoute route);
+    void ShowLastFindings();
+    void ShowLoginRequired();
+    void WaitForWorker();
 
     wxWindow* parent_;
     Database& db_;
@@ -53,6 +70,9 @@ private:
     std::function<void()> on_finished_;
     std::unique_ptr<webdossier::Manager> manager_;
     WebDossierSyncDialog* active_dialog_ = nullptr;
+    webdossier::BackgroundControllerCore background_core_;
+    webdossier::DossierWorkerOwner worker_owner_;
     std::atomic<bool> running_{false};
     std::atomic<bool> cancel_{false};
+    bool background_run_ = false;
 };

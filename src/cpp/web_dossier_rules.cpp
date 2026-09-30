@@ -510,4 +510,115 @@ void AccumulateBatchSummary(BatchSummary& summary, const CaseSyncReport& report)
     }
 }
 
+bool ShouldStartBackgroundSync(bool busy, std::size_t due_count) {
+    return !busy && due_count > 0;
+}
+
+bool ShouldOpenBackgroundNotification(bool busy) {
+    return !busy;
+}
+
+bool CanChangeBackgroundSettings(bool busy) {
+    return !busy;
+}
+
+bool ApplyBackgroundIntervalIfIdle(
+    bool busy, int days, const std::function<void(int)>& save_interval) {
+    if (!CanChangeBackgroundSettings(busy)) return false;
+    if (save_interval) save_interval(NormalizeCheckIntervalDays(days));
+    return true;
+}
+
+BackgroundUiDecision DecideBackgroundUi(const BatchSummary& summary) {
+    BackgroundUiDecision decision;
+    decision.new_events = summary.new_events;
+    for (const auto& finding : summary.findings) {
+        if (finding.code == ResultCode::DateConflict) {
+            decision.date_conflicts++;
+        }
+    }
+    decision.manual_reviews = summary.manual_review > decision.date_conflicts
+                                  ? summary.manual_review - decision.date_conflicts
+                                  : 0;
+    decision.refresh_oa = summary.new_events > 0 || summary.manual_review > 0;
+    if (summary.auth_required > 0) {
+        decision.notification = BackgroundNotificationKind::LoginRequired;
+    } else if (summary.new_events > 0 || summary.manual_review > 0) {
+        decision.notification = BackgroundNotificationKind::Findings;
+    }
+    return decision;
+}
+
+int BackgroundTimerDelayMs(bool first_run) {
+    return first_run ? 30 * 1000 : 30 * 60 * 1000;
+}
+
+WorkerLaunchOptions WorkerLaunchOptionsFor(SyncRunKind kind) {
+    switch (kind) {
+        case SyncRunKind::Background:
+            return {false, true};
+        case SyncRunKind::ManualBatch:
+        case SyncRunKind::Login:
+            return {true, false};
+    }
+    return {};
+}
+
+bool BackgroundControllerCore::TryStartBackground(
+    bool busy, const DueQueueLoader& load_due,
+    const EnsureManager& ensure_manager, const StartWorker& start_worker) {
+    if (busy) return false;
+    const auto queue = load_due();
+    if (queue.empty()) return false;
+    if (!ensure_manager()) return false;
+    start_worker(queue, WorkerLaunchOptionsFor(SyncRunKind::Background));
+    return true;
+}
+
+void BackgroundControllerCore::CompleteBackground(
+    const BatchSummary& summary, const std::function<void()>& refresh,
+    const NotificationFactory& notify, const NotificationRoute& route) {
+    const auto decision = DecideBackgroundUi(summary);
+    if (decision.refresh_oa && refresh) refresh();
+
+    notification_handle_.reset();
+    if (decision.notification == BackgroundNotificationKind::None) return;
+
+    last_summary_ = summary;
+    const auto action = decision.notification == BackgroundNotificationKind::LoginRequired
+                            ? BackgroundNotificationClick::ShowLoginRequired
+                            : BackgroundNotificationClick::ShowFindings;
+    if (notify) notification_handle_ = notify(summary, action, route);
+}
+
+void BackgroundControllerCore::ClearNotification() {
+    notification_handle_.reset();
+}
+
+DossierWorkerOwner::~DossierWorkerOwner() {
+    CancelAndJoin();
+}
+
+void DossierWorkerOwner::Adopt(std::unique_ptr<IJoinableDossierWorker> worker) {
+    CancelAndJoin();
+    worker_ = std::move(worker);
+}
+
+void DossierWorkerOwner::Join() {
+    if (!worker_) return;
+    worker_->Join();
+    worker_.reset();
+}
+
+void DossierWorkerOwner::CancelAndJoin() {
+    if (!worker_) return;
+    worker_->RequestCancel();
+    Join();
+}
+
+void BindDossierRefresh(DossierCompletionTarget& target,
+                        std::function<void()> refresh) {
+    target.SetDossierCompletionCallback(std::move(refresh));
+}
+
 } // namespace webdossier
