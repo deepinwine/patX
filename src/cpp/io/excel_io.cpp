@@ -831,44 +831,32 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
 
                 OAImportPlan plan = BuildOAImportPlan(incoming_rows, db);
                 OAHandlerConflictPolicy policy = OAHandlerConflictPolicy::PreserveExisting;
+                bool reviewed = false;
                 if (!plan.rows.empty() && oa_review_callback) {
                     policy = oa_review_callback(plan.preview);
+                    reviewed = true;
                 }
 
                 if (policy == OAHandlerConflictPolicy::CancelImport) {
                     result.cancelled = true;
                     sheet_skipped += static_cast<int>(plan.rows.size());
                 } else {
+                    if (reviewed) plan = BuildOAImportPlan(incoming_rows, db);
                     db.BeginBatch();
                     for (const auto& planned : plan.rows) {
-                        OAImportAction action = planned.action;
-                        int existing_id = planned.existing_id;
-                        if (action == OAImportAction::Insert ||
-                            action == OAImportAction::UpdateEmptyHandler) {
-                            PlannedOAImport refreshed = ClassifyOAImport(planned.incoming, db);
-                            if (action == OAImportAction::UpdateEmptyHandler &&
-                                refreshed.action == OAImportAction::UpdateEmptyHandler &&
-                                refreshed.existing_id != planned.existing_id) {
-                                action = OAImportAction::MatchConflict;
-                            } else {
-                                action = refreshed.action;
-                                existing_id = refreshed.existing_id;
-                            }
-                        }
-
-                        switch (action) {
+                        switch (planned.action) {
                             case OAImportAction::Insert:
                                 if (db.InsertOA(planned.incoming) > 0) sheet_added++;
                                 else result.errors++;
                                 break;
                             case OAImportAction::UpdateEmptyHandler: {
-                                OARecord existing = db.GetOAById(existing_id);
+                                OARecord existing = db.GetOAById(planned.existing_id);
                                 if (existing.id <= 0) {
                                     result.errors++;
                                     break;
                                 }
                                 existing.handler = planned.incoming.handler;
-                                if (db.UpdateOA(existing_id, existing)) sheet_updated++;
+                                if (db.UpdateOA(planned.existing_id, existing)) sheet_updated++;
                                 else result.errors++;
                                 break;
                             }

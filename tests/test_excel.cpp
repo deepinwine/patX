@@ -314,3 +314,120 @@ TEST(oa_excel_import_revalidates_database_changes_made_by_review_callback) {
 
     std::filesystem::remove(xlsx_path);
 }
+
+TEST(oa_excel_import_rebuilds_plan_after_callback_clears_or_deletes_matches) {
+    const std::string xlsx_path = TempDbPath("oa_import_callback_rebuild") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-CLEAR", "清空处理人专利", "第一次审查意见通知书",
+         "2026-09-07", "2027-01-07", "李四"},
+        {"GK-OA-DELETE", "删除匹配专利", "第二次审查意见通知书",
+         "2026-09-08", "2027-01-08", "李四"},
+    });
+
+    Database db(":memory:");
+    OARecord clear_target;
+    clear_target.geke_code = "GK-OA-CLEAR";
+    clear_target.oa_type = "一通";
+    clear_target.issue_date = "2026-09-07";
+    clear_target.handler = "王五";
+    clear_target.writer = "清空测试撰写人";
+    const int clear_id = db.InsertOA(clear_target);
+    CHECK(clear_id > 0);
+
+    OARecord delete_target;
+    delete_target.geke_code = "GK-OA-DELETE";
+    delete_target.oa_type = "二通";
+    delete_target.issue_date = "2026-09-08";
+    delete_target.handler = "李四";
+    const int delete_id = db.InsertOA(delete_target);
+    CHECK(delete_id > 0);
+
+    int review_calls = 0;
+    OAImportPreview preview;
+    ExcelIO io;
+    const ImportResult result = io.ImportPatents(
+        xlsx_path,
+        db,
+        nullptr,
+        [&](const OAImportPreview& value) {
+            review_calls++;
+            preview = value;
+
+            OARecord cleared = db.GetOAById(clear_id);
+            cleared.handler.clear();
+            CHECK(db.UpdateOA(clear_id, cleared));
+            CHECK(db.DeleteOA(delete_id));
+            return OAHandlerConflictPolicy::PreserveExisting;
+        }
+    );
+
+    CHECK_EQ(review_calls, 1);
+    CHECK_EQ(preview.handler_conflicts, 1);
+    CHECK_EQ(preview.unchanged, 1);
+    CHECK_EQ(result.added, 1);
+    CHECK_EQ(result.updated, 1);
+    CHECK_EQ(result.skipped, 0);
+    CHECK_EQ(result.handler_conflicts, 0);
+
+    const auto clear_records = db.GetOAByPatent("GK-OA-CLEAR");
+    CHECK_EQ(clear_records.size(), 1u);
+    CHECK_EQ(clear_records.front().id, clear_id);
+    CHECK_STR_EQ(clear_records.front().handler, "李四");
+    CHECK_STR_EQ(clear_records.front().writer, "清空测试撰写人");
+
+    const auto delete_records = db.GetOAByPatent("GK-OA-DELETE");
+    CHECK_EQ(delete_records.size(), 1u);
+    CHECK_STR_EQ(delete_records.front().handler, "李四");
+
+    std::filesystem::remove(xlsx_path);
+}
+
+TEST(oa_excel_import_rebuilds_duplicate_group_conflicts_after_callback) {
+    const std::string xlsx_path = TempDbPath("oa_import_callback_group_rebuild") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-GROUP-RACE", "分组竞态专利", "第三次审查意见通知书",
+         "2026-09-09", "2027-01-09", "李四"},
+        {"GK-OA-GROUP-RACE", "分组竞态专利", "三通",
+         "2026-09-09", "2027-01-09", "李四"},
+    });
+
+    Database db(":memory:");
+    int review_calls = 0;
+    OAImportPreview preview;
+    ExcelIO io;
+    const ImportResult result = io.ImportPatents(
+        xlsx_path,
+        db,
+        nullptr,
+        [&](const OAImportPreview& value) {
+            review_calls++;
+            preview = value;
+
+            OARecord concurrent;
+            concurrent.geke_code = "GK-OA-GROUP-RACE";
+            concurrent.oa_type = "三通";
+            concurrent.issue_date = "2026-09-09";
+            concurrent.handler = "王五";
+            concurrent.writer = "回调分组撰写人";
+            CHECK(db.InsertOA(concurrent) > 0);
+            return OAHandlerConflictPolicy::PreserveExisting;
+        }
+    );
+
+    CHECK_EQ(review_calls, 1);
+    CHECK_EQ(preview.added, 1);
+    CHECK_EQ(preview.unchanged, 1);
+    CHECK_EQ(result.added, 0);
+    CHECK_EQ(result.updated, 0);
+    CHECK_EQ(result.skipped, 2);
+    CHECK_EQ(result.handler_conflicts, 2);
+
+    const auto records = db.GetOAByPatent("GK-OA-GROUP-RACE");
+    CHECK_EQ(records.size(), 1u);
+    CHECK_STR_EQ(records.front().handler, "王五");
+    CHECK_STR_EQ(records.front().writer, "回调分组撰写人");
+
+    std::filesystem::remove(xlsx_path);
+}
