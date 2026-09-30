@@ -14,6 +14,8 @@
 #include <cctype>
 #include <regex>
 #include <set>
+#include <map>
+#include <tuple>
 #include <iostream>
 
 #include <OpenXLSX.hpp>
@@ -59,6 +61,43 @@ struct OAImportPlan {
     OAImportPreview preview;
 };
 
+std::vector<OARecord> FindExactOAMatches(const OARecord& incoming, Database& db) {
+    std::vector<OARecord> matches;
+    if (incoming.oa_type.empty() || incoming.issue_date.empty()) return matches;
+
+    const std::string normalized_type = webdossier::NormalizeOaTypeCn(incoming.oa_type);
+    const auto existing_rows = db.GetOAByPatent(incoming.geke_code);
+    for (const auto& existing : existing_rows) {
+        if (webdossier::NormalizeOaTypeCn(existing.oa_type) == normalized_type &&
+            existing.issue_date == incoming.issue_date) {
+            matches.push_back(existing);
+        }
+    }
+    return matches;
+}
+
+PlannedOAImport ClassifyOAImport(const OARecord& incoming, Database& db) {
+    PlannedOAImport planned;
+    planned.incoming = incoming;
+    if (incoming.oa_type.empty() || incoming.issue_date.empty()) return planned;
+
+    const auto matches = FindExactOAMatches(incoming, db);
+    if (matches.size() > 1) {
+        planned.action = OAImportAction::MatchConflict;
+    } else if (matches.size() == 1) {
+        const OARecord& existing = matches.front();
+        planned.existing_id = existing.id;
+        if (existing.handler.empty() && !incoming.handler.empty()) {
+            planned.action = OAImportAction::UpdateEmptyHandler;
+        } else if (incoming.handler.empty() || existing.handler == incoming.handler) {
+            planned.action = OAImportAction::Unchanged;
+        } else {
+            planned.action = OAImportAction::HandlerConflict;
+        }
+    }
+    return planned;
+}
+
 OAImportPlan BuildOAImportPlan(const std::vector<OARecord>& incoming_rows, Database& db) {
     OAImportPlan plan;
     plan.rows.reserve(incoming_rows.size());
@@ -66,34 +105,58 @@ OAImportPlan BuildOAImportPlan(const std::vector<OARecord>& incoming_rows, Datab
     for (const auto& incoming : incoming_rows) {
         PlannedOAImport planned;
         planned.incoming = incoming;
+        plan.rows.push_back(std::move(planned));
+    }
 
-        if (!incoming.oa_type.empty() && !incoming.issue_date.empty()) {
-            const std::string normalized_type =
-                webdossier::NormalizeOaTypeCn(incoming.oa_type);
-            std::vector<const OARecord*> matches;
-            const auto existing_rows = db.GetOAByPatent(incoming.geke_code);
-            for (const auto& existing : existing_rows) {
-                if (webdossier::NormalizeOaTypeCn(existing.oa_type) == normalized_type &&
-                    existing.issue_date == incoming.issue_date) {
-                    matches.push_back(&existing);
-                }
-            }
+    using MatchKey = std::tuple<std::string, std::string, std::string>;
+    std::map<MatchKey, std::vector<size_t>> groups;
+    for (size_t index = 0; index < plan.rows.size(); index++) {
+        const OARecord& incoming = plan.rows[index].incoming;
+        if (incoming.oa_type.empty() || incoming.issue_date.empty()) continue;
+        groups[{incoming.geke_code,
+                webdossier::NormalizeOaTypeCn(incoming.oa_type),
+                incoming.issue_date}]
+            .push_back(index);
+    }
 
-            if (matches.size() > 1) {
-                planned.action = OAImportAction::MatchConflict;
-            } else if (matches.size() == 1) {
-                const OARecord& existing = *matches.front();
-                planned.existing_id = existing.id;
-                if (existing.handler.empty() && !incoming.handler.empty()) {
-                    planned.action = OAImportAction::UpdateEmptyHandler;
-                } else if (incoming.handler.empty() || existing.handler == incoming.handler) {
-                    planned.action = OAImportAction::Unchanged;
-                } else {
-                    planned.action = OAImportAction::HandlerConflict;
-                }
+    for (const auto& group : groups) {
+        const auto& indices = group.second;
+        std::set<std::string> incoming_handlers;
+        size_t primary_index = indices.front();
+        for (size_t index : indices) {
+            const std::string& handler = plan.rows[index].incoming.handler;
+            if (!handler.empty()) {
+                incoming_handlers.insert(handler);
+                if (plan.rows[primary_index].incoming.handler.empty()) primary_index = index;
             }
         }
 
+        PlannedOAImport classified = ClassifyOAImport(plan.rows[primary_index].incoming, db);
+        if (classified.action == OAImportAction::MatchConflict) {
+            for (size_t index : indices) {
+                plan.rows[index].action = OAImportAction::MatchConflict;
+            }
+            continue;
+        }
+        if (incoming_handlers.size() > 1) {
+            for (size_t index : indices) {
+                plan.rows[index].action = OAImportAction::HandlerConflict;
+            }
+            continue;
+        }
+
+        plan.rows[primary_index] = std::move(classified);
+
+        const OAImportAction duplicate_action =
+            plan.rows[primary_index].action == OAImportAction::HandlerConflict
+                ? OAImportAction::HandlerConflict
+                : OAImportAction::Unchanged;
+        for (size_t index : indices) {
+            if (index != primary_index) plan.rows[index].action = duplicate_action;
+        }
+    }
+
+    for (const auto& planned : plan.rows) {
         switch (planned.action) {
             case OAImportAction::Insert: plan.preview.added++; break;
             case OAImportAction::UpdateEmptyHandler: plan.preview.handler_updates++; break;
@@ -101,7 +164,6 @@ OAImportPlan BuildOAImportPlan(const std::vector<OARecord>& incoming_rows, Datab
             case OAImportAction::HandlerConflict: plan.preview.handler_conflicts++; break;
             case OAImportAction::MatchConflict: plan.preview.match_conflicts++; break;
         }
-        plan.rows.push_back(std::move(planned));
     }
 
     return plan;
@@ -779,19 +841,34 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                 } else {
                     db.BeginBatch();
                     for (const auto& planned : plan.rows) {
-                        switch (planned.action) {
+                        OAImportAction action = planned.action;
+                        int existing_id = planned.existing_id;
+                        if (action == OAImportAction::Insert ||
+                            action == OAImportAction::UpdateEmptyHandler) {
+                            PlannedOAImport refreshed = ClassifyOAImport(planned.incoming, db);
+                            if (action == OAImportAction::UpdateEmptyHandler &&
+                                refreshed.action == OAImportAction::UpdateEmptyHandler &&
+                                refreshed.existing_id != planned.existing_id) {
+                                action = OAImportAction::MatchConflict;
+                            } else {
+                                action = refreshed.action;
+                                existing_id = refreshed.existing_id;
+                            }
+                        }
+
+                        switch (action) {
                             case OAImportAction::Insert:
                                 if (db.InsertOA(planned.incoming) > 0) sheet_added++;
                                 else result.errors++;
                                 break;
                             case OAImportAction::UpdateEmptyHandler: {
-                                OARecord existing = db.GetOAById(planned.existing_id);
+                                OARecord existing = db.GetOAById(existing_id);
                                 if (existing.id <= 0) {
                                     result.errors++;
                                     break;
                                 }
                                 existing.handler = planned.incoming.handler;
-                                if (db.UpdateOA(planned.existing_id, existing)) sheet_updated++;
+                                if (db.UpdateOA(existing_id, existing)) sheet_updated++;
                                 else result.errors++;
                                 break;
                             }
