@@ -178,6 +178,17 @@ OAImportPlan BuildOAImportPlan(const std::vector<OARecord>& incoming_rows, Datab
 
 } // namespace
 
+std::string FormatOAImportPreview(const OAImportPreview& preview) {
+    std::ostringstream message;
+    message << "OA 导入预检：\n"
+            << "  新增 " << preview.added << "\n"
+            << "  自动更新处理人 " << preview.handler_updates << "\n"
+            << "  不变 " << preview.unchanged << "\n"
+            << "  处理人冲突 " << preview.handler_conflicts << "\n"
+            << "  重复匹配冲突 " << preview.match_conflicts;
+    return message.str();
+}
+
 ExcelIO::ExcelIO() = default;
 ExcelIO::~ExcelIO() = default;
 

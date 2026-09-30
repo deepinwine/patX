@@ -39,6 +39,8 @@ struct OAImportPreview {
     int match_conflicts = 0;
 };
 
+std::string FormatOAImportPreview(const OAImportPreview& preview);
+
 using OAImportReviewCallback =
     std::function<OAHandlerConflictPolicy(const OAImportPreview&)>;
 

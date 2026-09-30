@@ -26,6 +26,23 @@ static void WriteOAWorkbook(
     CHECK(io.ExportXlsx(table, path));
 }
 
+TEST(oa_import_preview_message_includes_all_action_counts) {
+    OAImportPreview preview;
+    preview.added = 2;
+    preview.handler_updates = 1;
+    preview.unchanged = 4;
+    preview.handler_conflicts = 3;
+    preview.match_conflicts = 1;
+
+    const std::string message = FormatOAImportPreview(preview);
+
+    CHECK(message.find("新增 2") != std::string::npos);
+    CHECK(message.find("自动更新处理人 1") != std::string::npos);
+    CHECK(message.find("不变 4") != std::string::npos);
+    CHECK(message.find("处理人冲突 3") != std::string::npos);
+    CHECK(message.find("重复匹配冲突 1") != std::string::npos);
+}
+
 TEST(excel_export_writes_real_xlsx) {
     std::string path = TempDbPath("export.xlsx");
     {

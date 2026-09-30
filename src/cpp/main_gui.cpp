@@ -2004,10 +2004,43 @@ private:
         progress.Pulse();
 
         auto& excel = GetExcelIO();
-        auto result = excel.ImportPatents(path, *db, [&progress](int current, int total) -> bool {
-            progress.Update(std::min(current * 100 / std::max(total, 1), 99));
-            return !progress.WasCancelled();
-        });
+        auto result = excel.ImportPatents(
+            path,
+            *db,
+            [&progress](int current, int total) -> bool {
+                progress.Update(std::min(current * 100 / std::max(total, 1), 99));
+                return !progress.WasCancelled();
+            },
+            [this](const OAImportPreview& preview) {
+                const wxString message = wxString::FromUTF8(
+                    FormatOAImportPreview(preview).c_str());
+                if (preview.handler_conflicts > 0) {
+                    const int answer = wxMessageBox(
+                        message + UTF8_STR(
+                            "\n\n是：以 Excel 覆盖冲突处理人"
+                            "\n否：保留原处理人"
+                            "\n取消：不导入该 OA 工作表"),
+                        UTF8_STR("OA 导入预检"),
+                        wxYES_NO | wxCANCEL | wxICON_QUESTION,
+                        this);
+                    if (answer == wxYES) {
+                        return OAHandlerConflictPolicy::OverwriteWithExcel;
+                    }
+                    if (answer == wxNO) {
+                        return OAHandlerConflictPolicy::PreserveExisting;
+                    }
+                    return OAHandlerConflictPolicy::CancelImport;
+                }
+
+                const int answer = wxMessageBox(
+                    message + UTF8_STR("\n\n是否继续导入？"),
+                    UTF8_STR("OA 导入预检"),
+                    wxYES_NO | wxICON_QUESTION,
+                    this);
+                return answer == wxYES
+                    ? OAHandlerConflictPolicy::PreserveExisting
+                    : OAHandlerConflictPolicy::CancelImport;
+            });
         progress.Update(100);
         progress.Close();
 
@@ -2021,12 +2054,37 @@ private:
 
         LoadAllData();
         PATX_LOG_INFO("Import finished: added=" + std::to_string(result.added) +
-                      " updated=" + std::to_string(result.updated));
-        wxMessageBox(wxString::Format(
-            UTF8_STR("导入完成:\n  新增: %d\n  更新: %d\n  跳过: %d\n\n详情: %s"),
-            result.added, result.updated, result.skipped,
-            wxString::FromUTF8(result.type_summary.c_str())),
-            LANG_STR("Import", "导入"), wxOK | wxICON_INFORMATION);
+                      " updated=" + std::to_string(result.updated) +
+                      " handler_conflicts=" + std::to_string(result.handler_conflicts) +
+                      " match_conflicts=" + std::to_string(result.match_conflicts) +
+                      " cancelled=" + (result.cancelled ? "true" : "false"));
+
+        wxString summary = result.cancelled
+            ? UTF8_STR("导入结束（部分 OA 工作表已取消）：")
+            : UTF8_STR("导入完成：");
+        summary += wxString::Format(
+            UTF8_STR("\n  新增: %d"
+                     "\n  更新: %d"
+                     "\n  跳过: %d"
+                     "\n  错误: %d"
+                     "\n  处理人冲突: %d"
+                     "\n  匹配冲突: %d"),
+            result.added,
+            result.updated,
+            result.skipped,
+            result.errors,
+            result.handler_conflicts,
+            result.match_conflicts);
+        if (result.cancelled) {
+            summary += UTF8_STR("\n\nOA 工作表已取消，未写入该表数据。");
+        }
+        summary += UTF8_STR("\n\n详情: ") +
+                   wxString::FromUTF8(result.type_summary.c_str());
+        wxMessageBox(
+            summary,
+            result.cancelled ? LANG_STR("Import result", "导入结果")
+                             : LANG_STR("Import", "导入"),
+            wxOK | wxICON_INFORMATION);
     }
 
     // Export uses the module's ExportTable and writes a REAL workbook for
