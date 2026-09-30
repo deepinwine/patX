@@ -506,6 +506,13 @@ static void TestNativeUspto() {
     CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
               "The nth notice of examination opinions", "").document_type ==
           "OFFICE_ACTION_NTH");
+    // 视为撤回通知书：官方事件（不能被 withdrawal 撞进申请人模式）
+    {
+        auto cls = webdossier::uspto::ClassifyOfficialDocumentEn(
+            "Deemed withdrawal notice", "");
+        CHECK(cls.document_type == "OTHER_OFFICIAL");
+        CHECK(cls.is_official && cls.is_remindable);
+    }
     CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
               "Final rejection decision", "").document_type == "REJECTION_DECISION");
     CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(

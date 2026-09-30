@@ -24,7 +24,7 @@ import time
 from typing import Optional, Tuple
 
 from ..document_classifier import (classify_official_document, direction_for,
-                                   event_title_cn)
+                                   official_title_cn)
 from ..models import (REMINDABLE_TYPES, ProsecutionDocument, ResultCode,
                       normalize_date)
 from ..number_resolver import normalize_cn_identifier
@@ -152,7 +152,7 @@ def parse_uspto_doc_payload(body: str, application_number: str,
             source="uspto_global_dossier",
             remote_document_id=str(doc.get("docId") or ""),
             document_type=doc_type,
-            document_title=event_title_cn(doc_type, ordinal, raw_title),
+            document_title=official_title_cn(doc_type, ordinal, raw_title),
             raw_title=raw_title,
             official_date=_parse_us_date(str(doc.get("legalDateStr") or "")),
             direction="official",

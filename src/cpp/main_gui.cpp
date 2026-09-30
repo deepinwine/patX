@@ -747,7 +747,24 @@ private:
                     st.latest_type.empty() ? "-" : DB_STR(st.latest_type));
                 patent_list->SetItem(idx, 22,
                     st.latest_date.empty() ? "-" : DB_STR(st.latest_date));
-                if (!st.latest_deadline.empty()) {
+                if (st.latest_is_withdrawal && !st.latest_completed) {
+                    // 视为撤回：绝限列直接显示 2 个月恢复权利期限（规则现算）
+                    std::string restore_dl = db->CalculateDeadline(
+                        "CN", "restore_general", st.latest_date);
+                    wxDateTime dl;
+                    int days = -1;
+                    if (!restore_dl.empty() &&
+                        dl.ParseFormat(restore_dl.c_str(), "%Y-%m-%d") &&
+                        dl.IsValid()) {
+                        days = (dl - wxDateTime::Now()).GetDays();
+                    }
+                    patent_list->SetItem(idx, 23,
+                        restore_dl.empty() ? "-" : DB_STR(restore_dl));
+                    patent_list->SetItem(idx, 24,
+                        days > 0
+                            ? wxString::Format(UTF8_STR("恢复期%d天"), days)
+                            : UTF8_STR("恢复期"));
+                } else if (!st.latest_deadline.empty()) {
                     patent_list->SetItem(idx, 23, DB_STR(st.latest_deadline));
                     if (st.latest_completed) {
                         patent_list->SetItem(idx, 24, UTF8_STR("已完成"));
@@ -1342,6 +1359,7 @@ private:
         bool latest_is_grant = false;     // 最新事件是授权通知（终局证据）
         bool latest_is_rejection = false; // 最新事件是驳回决定（复审窗口）
         bool latest_answered = false;     // 该 OA 已有答复日期（GD 证据或人工）
+        bool latest_is_withdrawal = false; // 最新事件是视为撤回（恢复窗口）
     };
 
     // 以编号聚合 OA 状态：绝限日取“最新发文那条 OA”的期限，
@@ -1365,6 +1383,9 @@ private:
                 st.latest_is_rejection =
                     oa.oa_type.find("驳回") != std::string::npos;
                 st.latest_answered = !oa.response_date.empty();
+                st.latest_is_withdrawal =
+                    oa.oa_type.find("视为撤回") != std::string::npos ||
+                    oa.oa_type.find("视撤") != std::string::npos;
             }
         }
         for (auto& [code, st] : states) {
@@ -1456,6 +1477,9 @@ private:
                     days_str = UTF8_STR("已结案");
                 } else if (oa.oa_type.find("驳回") != std::string::npos) {
                     days_str = UTF8_STR("复审期");
+                } else if (oa.oa_type.find("视撤") != std::string::npos ||
+                           oa.oa_type.find("视为撤回") != std::string::npos) {
+                    days_str = UTF8_STR("恢复期");
                 } else if (PhaseOf(p) == CasePhase::Closed) {
                     days_str = UTF8_STR("已结案");
                 } else if (PhaseOf(p) == CasePhase::Reexamination) {

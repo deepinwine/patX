@@ -325,6 +325,8 @@ const SeedRuleRow kDeadlineSeeds[] = {
      "专利法41条；错过后2个月内可恢复"},
     {"CN", "grant_registration", "办理登记手续期限（授权通知日起2个月）", 2, 0, false, 0,
      "细则：同时缴纳当年年费，逾期视为放弃"},
+    {"CN", "restore_general", "恢复权利期限（收到丧失权利通知日起2个月）", 2, 0, false, 0,
+     "细则6条：不可抗力另有2年外限；视撤案件的关键窗口"},
     {"PCT", "national_phase_entry", "PCT进入国家阶段期限（优先权日起）", 30, 0, false, 0,
      "PCT细则：自优先权日起30个月；32个月为绝对迟延界限"},
     {"US", "oa_response", "US OA response statutory period (from mail date)", 3, 0, true, 3,

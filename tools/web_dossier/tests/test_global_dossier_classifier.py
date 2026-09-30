@@ -72,3 +72,11 @@ def test_nth_notice_is_office_action():
     assert classify_official_document(
         "The nth notice of examination opinions (ORIGINAL)", "") == (
         DocumentType.OFFICE_ACTION_NTH, 0, Confidence.HIGH)
+
+
+def test_deemed_withdrawal_is_official():
+    from web_dossier.document_classifier import classify_cn_title
+    from web_dossier.models import Confidence, DocumentType
+    assert classify_official_document(
+        "Deemed withdrawal notice", "") == (DocumentType.OTHER_OFFICIAL, 0, Confidence.HIGH)
+    assert classify_cn_title("视为撤回通知书") == (DocumentType.OTHER_OFFICIAL, 0, Confidence.HIGH)

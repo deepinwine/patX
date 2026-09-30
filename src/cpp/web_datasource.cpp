@@ -213,6 +213,10 @@ EnClassification ClassifyOfficialDocumentEn(const std::string& raw_title,
         return EnClassification{type, ordinal, conf, official, remindable};
     };
 
+    // 视为撤回通知书是官方发文（有2个月恢复窗口），先于申请人正则判断
+    // ——"withdrawal" 单词会撞申请人模式
+    if (low.find("deemed withdrawal") != std::string::npos)
+        return make("OTHER_OFFICIAL", 0, "HIGH", true, true);
     if (!low.empty() && std::regex_search(low, applicant_re))
         return make("RESPONSE_TO_OFFICE_ACTION", 0, "HIGH", false, false);
     if (std::regex_search(low, final_re))
@@ -332,6 +336,7 @@ ParseResult ParseFamilyJson(const std::string& body,
         rd.document_version = "ORIGINAL";
         rd.confidence = cls.confidence;
         rd.direction = "official";
+        std::string low_raw = ToLower(raw_title);
         // 规范中文标题：OA 家族按次数直接生成（与 Python event_title_cn 一致），
         // 其他类型走既有映射
         if (cls.document_type.rfind("OFFICE_ACTION_", 0) == 0) {
@@ -344,6 +349,8 @@ ParseResult ParseFamilyJson(const std::string& body,
             } else {
                 rd.document_title = "审查意见通知书";
             }
+        } else if (low_raw.find("deemed withdrawal") != std::string::npos) {
+            rd.document_title = "视为撤回通知书";
         } else {
             rd.document_title = OfficialEventTitleCn(rd);
         }

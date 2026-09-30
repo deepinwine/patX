@@ -62,6 +62,8 @@ def classify_cn_title(raw_title: str) -> Tuple[DocumentType, int, Confidence]:
 
     if "驳回决定" in title:
         return DocumentType.REJECTION_DECISION, 0, Confidence.HIGH
+    if "视撤" in title or "视为撤回" in title:
+        return DocumentType.OTHER_OFFICIAL, 0, Confidence.HIGH
     # 复审程序文书：通知书需按指定期限答复，决定书关系起诉期——
     # 都按可提醒官方事件保留原标题入库
     if "复审" in title:
@@ -136,6 +138,9 @@ def _classify_en(raw_title: str):
     compact = re.sub(r"\s+", " ", (raw_title or "").strip()).lower()
     if not compact:
         return None
+    # 视为撤回通知书是官方发文（2个月恢复窗口），先于申请人正则判断
+    if re.search(r"deemed withdrawal", compact):
+        return DocumentType.OTHER_OFFICIAL, 0
     if _EN_APPLICANT_RE.search(compact):
         return DocumentType.RESPONSE_TO_OFFICE_ACTION, 0
     if _EN_FINAL_RE.search(compact):
@@ -190,3 +195,12 @@ def event_title_cn(document_type: DocumentType, ordinal: int,
         DocumentType.GRANT_NOTICE: "授权通知",
         DocumentType.CORRECTION_NOTICE: "补正通知",
     }.get(document_type, fallback_title or "其他官方通知")
+
+
+def official_title_cn(document_type, ordinal, raw_title):
+    """英文官方文书的规范中文名（补充 event_title_cn 的映射）。"""
+    if document_type == DocumentType.OTHER_OFFICIAL and raw_title:
+        low = raw_title.lower()
+        if "deemed withdrawal" in low:
+            return "视为撤回通知书"
+    return event_title_cn(document_type, ordinal, raw_title)
