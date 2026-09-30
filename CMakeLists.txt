@@ -129,6 +129,10 @@ else()
     target_compile_options(patx_core PRIVATE -Wall -Wextra)
 endif()
 
+# 命令行巡检工具（无 GUI 环境/定时任务用；纯核心库）
+add_executable(patx_sync src/cpp/patx_sync.cpp)
+target_link_libraries(patx_sync PRIVATE patx_core)
+
 # ---------------------------------------------------------------------------
 # GUI executable (wxWidgets). Skipped gracefully when wx is unavailable,
 # e.g. on headless CI macOS/Linux core-only builds.

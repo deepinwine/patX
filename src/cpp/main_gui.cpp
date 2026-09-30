@@ -751,8 +751,30 @@ private:
                     patent_list->SetItem(idx, 23, DB_STR(st.latest_deadline));
                     if (st.latest_completed) {
                         patent_list->SetItem(idx, 24, UTF8_STR("已完成"));
+                    } else if (st.latest_answered) {
+                        // 官方发文后已有申请人提交（修改/意见陈述）：
+                        // 答复已递交，不按逾期展示
+                        patent_list->SetItem(idx, 24, UTF8_STR("已答复"));
+                    } else if (st.latest_is_grant) {
+                        // 最新官方事件是授权通知：终局证据（优先于滞后状态文本）
+                        patent_list->SetItem(idx, 24, UTF8_STR("已结案"));
+                    } else if (st.latest_is_rejection) {
+                        // 最新官方事件是驳回决定：3 个月复审请求期
+                        std::string reex_dl = db->CalculateDeadline(
+                            "CN", "reexamination_request", st.latest_date);
+                        wxDateTime dl;
+                        int days = -1;
+                        if (!reex_dl.empty() &&
+                            dl.ParseFormat(reex_dl.c_str(), "%Y-%m-%d") &&
+                            dl.IsValid()) {
+                            days = (dl - wxDateTime::Now()).GetDays();
+                        }
+                        patent_list->SetItem(idx, 24,
+                            days > 0
+                                ? wxString::Format(UTF8_STR("复审期%d天"), days)
+                                : UTF8_STR("复审期"));
                     } else {
-                        switch (PhaseOf(p.application_status)) {
+                        switch (PhaseOf(p)) {
                             case CasePhase::Closed:
                                 // 终局案件的未完成 OA 不展示逾期（与状态矛盾）
                                 patent_list->SetItem(idx, 24, UTF8_STR("已结案"));
@@ -770,6 +792,14 @@ private:
                                 break;
                         }
                     }
+                } else if (st.latest_is_rejection || st.latest_is_grant ||
+                           st.latest_completed) {
+                    // 没有期限字段但事件本身有阶段含义
+                    patent_list->SetItem(idx, 23, "-");
+                    patent_list->SetItem(idx, 24,
+                        st.latest_completed ? UTF8_STR("已完成")
+                        : st.latest_is_grant ? UTF8_STR("已结案")
+                                             : UTF8_STR("复审期"));
                 } else {
                     patent_list->SetItem(idx, 23, "-");
                     patent_list->SetItem(idx, 24, "-");
@@ -1249,6 +1279,13 @@ private:
     // 不按 OA 逾期展示）/ 终局结案。
     enum class CasePhase { Active, Reexamination, Closed };
 
+    // 证据优先版：授权日已填即终局——库里 500+ 件“授权日已填但状态仍是
+    // 审查中”的滞后数据靠这条在展示层修正（不改库）
+    static CasePhase PhaseOf(const Patent& p) {
+        if (!p.authorization_date.empty()) return CasePhase::Closed;
+        return PhaseOf(p.application_status);
+    }
+
     static CasePhase PhaseOf(const std::string& status) {
         auto has = [&](const char* m) { return status.find(m) != std::string::npos; };
         // 终局关键词优先：复审放弃/复审撤案/驳回失效/驳回（放弃）等
@@ -1302,6 +1339,9 @@ private:
         bool latest_completed = false;
         std::string latest_deadline; // 该条发文的答复期限（关联最新发文日）
         bool latest_is_first = true; // 一通（4个月）还是后续OA（2个月）
+        bool latest_is_grant = false;     // 最新事件是授权通知（终局证据）
+        bool latest_is_rejection = false; // 最新事件是驳回决定（复审窗口）
+        bool latest_answered = false;     // 该 OA 已有答复日期（GD 证据或人工）
     };
 
     // 以编号聚合 OA 状态：绝限日取“最新发文那条 OA”的期限，
@@ -1320,6 +1360,11 @@ private:
                 st.latest_deadline = oa.official_deadline;
                 st.latest_is_first =
                     webdossier::OaTypeOrdinalCn(oa.oa_type) <= 1;
+                st.latest_is_grant =
+                    oa.oa_type.find("授权") != std::string::npos;
+                st.latest_is_rejection =
+                    oa.oa_type.find("驳回") != std::string::npos;
+                st.latest_answered = !oa.response_date.empty();
             }
         }
         for (auto& [code, st] : states) {
@@ -1405,10 +1450,15 @@ private:
                 if (oa.is_completed) {
                     days_str = UTF8_STR("已完成");
                     list->SetItemBackgroundColour(idx, wxColour(200, 255, 200));
-                } else if (PhaseOf(p.application_status) == CasePhase::Closed) {
+                } else if (!oa.response_date.empty()) {
+                    days_str = UTF8_STR("已答复");
+                } else if (oa.oa_type.find("授权") != std::string::npos) {
                     days_str = UTF8_STR("已结案");
-                } else if (PhaseOf(p.application_status) ==
-                           CasePhase::Reexamination) {
+                } else if (oa.oa_type.find("驳回") != std::string::npos) {
+                    days_str = UTF8_STR("复审期");
+                } else if (PhaseOf(p) == CasePhase::Closed) {
+                    days_str = UTF8_STR("已结案");
+                } else if (PhaseOf(p) == CasePhase::Reexamination) {
                     days_str = ReexamPhaseLabel(p.application_status);
                 } else if (!oa.official_deadline.empty()) {
                     wxDateTime dl;

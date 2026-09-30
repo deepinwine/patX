@@ -496,11 +496,16 @@ static void TestNativeUspto() {
     // 与 Python 侧 event_key 完全一致（跨来源去重的根基）
     CHECK_STR_EQ(d.event_key,
                  "88d196900d299d74540dfe3d73efe840f3c29c40bd522feec925fbb67c8ec7b8");
+    // 申请人提交文件的日期被保留为“已答复”证据（07/01/2026 的 Response）
+    CHECK_STR_EQ(parsed.latest_applicant_activity, "2026-07-01");
 
     // 英文分类边界
     CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
               "Second notice of examination opinions", "").document_type ==
           "OFFICE_ACTION_SECOND");
+    CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
+              "The nth notice of examination opinions", "").document_type ==
+          "OFFICE_ACTION_NTH");
     CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(
               "Final rejection decision", "").document_type == "REJECTION_DECISION");
     CHECK(webdossier::uspto::ClassifyOfficialDocumentEn(

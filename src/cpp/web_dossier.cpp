@@ -441,6 +441,31 @@ CaseSyncReport Manager::ApplyRemoteResult(const Patent& patent, const RemoteCase
         report.date_conflict = merged.date_conflict;
         report.latest_remote_oa_type = merged.canonical_title;
         report.latest_remote_oa_date = remote.latest_event.official_date;
+
+        // 答复证据：官方发文之后有申请人提交（修改/意见陈述），
+        // 且晚于发文日 -> 该 OA 已答复。只填空的 response_date，
+        // 人工录入的答复日期永不被覆盖。
+        if (!remote.latest_applicant_activity.empty() &&
+            remote.latest_applicant_activity > remote.latest_event.official_date) {
+            int target = merged.oa_created_id;
+            if (target == 0) {
+                for (const auto& e : db_.GetOAsForPatentId(patent.id)) {
+                    if (e.issue_date == remote.latest_event.official_date) {
+                        target = e.id;
+                        break;
+                    }
+                }
+            }
+            if (target > 0) {
+                if (db_.FillOAResponseDateIfEmpty(
+                        target, remote.latest_applicant_activity)) {
+                    if (report.code == ResultCode::NoChange) {
+                        report.message = "OA 已答复（申请人 "
+                            + remote.latest_applicant_activity + " 提交）";
+                    }
+                }
+            }
+        }
     } else if (report.code == ResultCode::Ok || report.code == ResultCode::NoChange) {
         report.code = ResultCode::NoChange;
     }
@@ -506,6 +531,7 @@ CaseSyncReport Manager::SyncCase(const Patent& patent, std::atomic<bool>& cancel
                 remote.attempts.emplace_back("uspto_global_dossier", "OK");
                 remote.resolved_application_number = patent.application_number;
                 remote.documents = std::move(parsed.documents);
+                remote.latest_applicant_activity = parsed.latest_applicant_activity;
                 PickLatestOfficialEvent(remote);
                 return ApplyRemoteResult(patent, remote);
             }

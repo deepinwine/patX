@@ -659,6 +659,31 @@ Patent Database::GetPatentById(int id) {
     return results.empty() ? Patent() : results[0];
 }
 
+Patent Database::GetPatentByApplicationNumber(const std::string& application_number) {
+    Patent result;
+    if (application_number.empty()) return result;
+    // 规整：去 CN 前缀、去校验位（.X），用 12 位主体做前缀匹配
+    std::string digits;
+    for (char c : application_number) {
+        if (c == '.') break;
+        if (c >= '0' && c <= '9') digits += c;
+    }
+    if (digits.size() == 13) digits = digits.substr(0, 12);
+    if (digits.size() != 12) return result;
+    sqlite3_stmt* stmt;
+    std::string sql = "SELECT id FROM patents WHERE REPLACE(application_number, '.', '') LIKE ?";
+    std::vector<int> ids;
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, (digits + "%").c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            ids.push_back(sqlite3_column_int(stmt, 0));
+        }
+        sqlite3_finalize(stmt);
+    }
+    if (ids.size() == 1) return GetPatentById(ids[0]);
+    return result;   // 0 个或多个命中：不猜
+}
+
 Patent Database::GetPatentByCode(const std::string& geke_code) {
     auto results = QueryPatents(db_,
         " WHERE geke_code = '" + EscapeString(geke_code) + "'");
@@ -1837,6 +1862,24 @@ bool Database::FillOADeadlineIfEmpty(int oa_id, const std::string& deadline) {
         "AND (deadline_source IS NULL OR deadline_source != 'manual')";
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
         sqlite3_bind_text(stmt, 1, deadline.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, oa_id);
+        bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db_) > 0;
+        sqlite3_finalize(stmt);
+        return ok;
+    }
+    return false;
+}
+
+bool Database::FillOAResponseDateIfEmpty(int oa_id, const std::string& response_date) {
+    if (oa_id <= 0 || response_date.empty()) return false;
+    sqlite3_stmt* stmt;
+    std::string sql =
+        "UPDATE oa_records SET response_date = ?, "
+        "sync_flag = CASE WHEN sync_flag = '' THEN 'auto_filled_response' "
+        "ELSE sync_flag END "
+        "WHERE id = ? AND (response_date IS NULL OR response_date = '')";
+    if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, response_date.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(stmt, 2, oa_id);
         bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(db_) > 0;
         sqlite3_finalize(stmt);

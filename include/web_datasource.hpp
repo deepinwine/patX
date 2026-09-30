@@ -50,6 +50,9 @@ struct ParseResult {
     std::string code;            // "OK" 或错误码
     std::string message;
     std::vector<RemoteDocument> documents;
+    // 最新申请人活动日（修改/意见陈述等提交日期）——晚于最新官方发文
+    // 即为“该 OA 已答复”的证据
+    std::string latest_applicant_activity;
 };
 
 ParseResult ParseFamilyJson(const std::string& body,

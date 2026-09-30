@@ -65,3 +65,10 @@ def test_document_dict_carries_new_fields():
     assert d["document_code"] == "210401-CN"
     assert d["source_trace"] == []
     assert len(d["event_key"]) == 64
+
+
+def test_nth_notice_is_office_action():
+    from web_dossier.models import Confidence, DocumentType
+    assert classify_official_document(
+        "The nth notice of examination opinions (ORIGINAL)", "") == (
+        DocumentType.OFFICE_ACTION_NTH, 0, Confidence.HIGH)

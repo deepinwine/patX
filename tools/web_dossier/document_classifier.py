@@ -148,6 +148,9 @@ def _classify_en(raw_title: str):
                         DocumentType.OFFICE_ACTION_SECOND if ordinal == 2 else
                         DocumentType.OFFICE_ACTION_NTH)
             return doc_type, ordinal
+    # GD 对第三次及以后的审查意见统一写 "The nth notice of ..."
+    if re.search(rf"\bnth\b.*{_EN_OA_RE.pattern}", compact):
+        return DocumentType.OFFICE_ACTION_NTH, 0
     if _EN_GRANT_RE.search(compact):
         return DocumentType.GRANT_NOTICE, 0
     if _EN_CORRECTION_RE.search(compact):

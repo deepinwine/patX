@@ -225,6 +225,12 @@ EnClassification ClassifyOfficialDocumentEn(const std::string& raw_title,
             return make("OFFICE_ACTION_NTH", i + 1, "HIGH", true, true);
         }
     }
+    // GD 对第三次及以后的审查意见统一写 "The nth notice of ..."
+    {
+        static const std::regex nth_re("\\bnth\\b.*" + oa_pattern);
+        if (std::regex_search(low, nth_re))
+            return make("OFFICE_ACTION_NTH", 0, "HIGH", true, true);
+    }
     if (std::regex_search(low, search_re))
         return make("SEARCH_REPORT", 0, "HIGH", true, false);
     if (std::regex_search(low, grant_re))
@@ -303,7 +309,18 @@ ParseResult ParseFamilyJson(const std::string& body,
         if (translated) continue;                       // 机翻副本丢弃
         std::string code = doc.value("docCode", "");
         EnClassification cls = ClassifyOfficialDocumentEn(raw_title, code);
-        if (!cls.is_official || !cls.is_remindable) continue;
+        if (!cls.is_official || !cls.is_remindable) {
+            // 申请人提交文件：不是事件，但其日期是“已答复”的证据
+            if (!cls.is_official) {
+                std::string d = NormalizeUsDate(doc.value("legalDateStr", ""));
+                if (!d.empty() &&
+                    (result.latest_applicant_activity.empty() ||
+                     d > result.latest_applicant_activity)) {
+                    result.latest_applicant_activity = d;
+                }
+            }
+            continue;
+        }
 
         RemoteDocument rd;
         rd.document_type = cls.document_type;
@@ -333,6 +350,12 @@ ParseResult ParseFamilyJson(const std::string& body,
         rd.event_key = ComputeEventKey("CN", application_number,
                                        rd.document_type, rd.oa_ordinal,
                                        rd.official_date, rd.document_title);
+        // fingerprint 与 Python fingerprint() 同公式（sha256 五元组），
+        // 避免多条文档在旧唯一索引 (source, app, fingerprint) 上撞车
+        rd.fingerprint = Sha256Hex(
+            "CN|" + application_number + "|" +
+            NormalizeTitleForEventKey(rd.document_title) + "|" +
+            rd.official_date + "|" + rd.remote_document_id);
         rd.source = "uspto_global_dossier";
         rd.source_trace = "uspto_global_dossier";
         result.documents.push_back(std::move(rd));

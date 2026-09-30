@@ -268,6 +268,8 @@ public:
     std::vector<Patent> GetPatents(const QueryFilter& filter = {});
     Patent GetPatentById(int id);
     Patent GetPatentByCode(const std::string& geke_code);
+    // 按申请号查找（含 CN 前缀/校验位变体；多义命中返回 id=0）
+    Patent GetPatentByApplicationNumber(const std::string& application_number);
     int InsertPatent(const Patent& p, bool log_undo = true);
     bool UpdatePatent(int id, const Patent& p, bool log_undo = true);
     bool DeletePatent(int id, bool log_undo = true);
@@ -367,6 +369,9 @@ public:
     // record has no deadline yet and none was set manually. Returns false
     // when a deadline already exists or the row is missing.
     bool FillOADeadlineIfEmpty(int oa_id, const std::string& deadline);
+    // Fills response_date (sync_flag='auto_filled_response') only when empty;
+    // human-entered response dates are never touched.
+    bool FillOAResponseDateIfEmpty(int oa_id, const std::string& response_date);
 
     // ---------- Undo ----------
     void BeginBatch();

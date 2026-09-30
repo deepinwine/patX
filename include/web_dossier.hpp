@@ -186,6 +186,8 @@ private:
         // correction / other); falls back to a legacy sidecar's latest_oa.
         bool has_latest_event = false;
         RemoteDocument latest_event;
+        // 最新申请人提交日（答复证据）：晚于 latest_event 官文日即视为已答复
+        std::string latest_applicant_activity;
     };
 
     // Performs one JSON-RPC round trip. Returns false on transport trouble.
