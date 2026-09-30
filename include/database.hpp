@@ -272,6 +272,12 @@ public:
     Database(const Database&) = delete;
     Database& operator=(const Database&) = delete;
 
+    using ConnectionWriteLock = std::unique_lock<std::recursive_mutex>;
+    // Serializes multi-statement transactions and write decisions on this
+    // SQLite connection. The recursive lock lets those scopes call normal
+    // Database write methods without self-deadlocking.
+    ConnectionWriteLock AcquireConnectionWriteLock();
+
     bool IsOpen() const { return db_ != nullptr; }
     sqlite3* GetHandle() { return db_; }
     const std::string& path() const { return db_path_; }
@@ -404,7 +410,7 @@ private:
     int schema_version_ = 0;
     std::string last_error_;
     std::unique_ptr<UndoManager> undo_manager_;
-    std::mutex oa_exact_merge_mutex_;
+    mutable std::recursive_mutex connection_write_mutex_;
 
     void InitTables();
     void MigrateTables();

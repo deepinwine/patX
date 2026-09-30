@@ -1004,6 +1004,47 @@ TEST(database_oa_exact_merge_fills_handler_with_compare_and_set) {
     std::filesystem::remove(path + "-shm");
 }
 
+TEST(database_connection_write_lock_serializes_same_instance_transactions) {
+    const std::string path = TempDbPath("connection_write_lock");
+    std::filesystem::remove(path);
+    {
+        Database db(path);
+        OARecord oa;
+        oa.geke_code = "GK-OA-SAME-CONNECTION";
+        oa.oa_type = "一通";
+        oa.issue_date = "2026-09-13";
+
+        ProsecutionDocumentRecord document;
+        document.patent_id = 1;
+        document.source = "cnipa";
+        document.application_number = "202610000001.1";
+        document.fingerprint = "same-connection-fingerprint";
+        document.event_key = "same-connection-event";
+
+        auto connection_lock = db.AcquireConnectionWriteLock();
+        std::promise<void> worker_started;
+        auto worker = std::async(std::launch::async, [&] {
+            worker_started.set_value();
+            bool created = false;
+            return db.UpsertProsecutionDocument(document, &created);
+        });
+        worker_started.get_future().wait();
+        CHECK(worker.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout);
+
+        const OAExactMergeResult merged = db.MergeOAExact(oa, true);
+        CHECK(merged.status == OAExactMergeStatus::Inserted);
+        connection_lock.unlock();
+
+        CHECK(worker.get() > 0);
+        const auto records = db.GetOAByPatent(oa.geke_code);
+        CHECK_EQ(records.size(), 1u);
+        CHECK(db.GetProsecutionDocumentById(document.id).id > 0);
+    }
+    std::filesystem::remove(path);
+    std::filesystem::remove(path + "-wal");
+    std::filesystem::remove(path + "-shm");
+}
+
 TEST(database_deadline_rules) {
     std::string path = TempDbPath("rules");
     std::filesystem::remove(path);

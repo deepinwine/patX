@@ -232,6 +232,14 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
         return result;
     }
 
+    auto write_lock = db.AcquireConnectionWriteLock();
+    auto database_failure = [&](const std::string& operation) {
+        result.code = ResultCode::TemporaryError;
+        result.message = operation + "失败: " +
+                         (db.LastError().empty() ? "未知数据库错误" : db.LastError());
+        return result;
+    };
+
     auto existing = db.GetOAsForPatentId(patent.id);
     const OARecord* same_identity = nullptr;
     int same_identity_source_rank = -1;
@@ -255,21 +263,27 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
 
     if (same_identity) {
         if (same_identity->issue_date.empty()) {
-            db.UpdateOASyncFields(same_identity->id, document.official_date,
-                                  "auto_filled_date", document.source,
-                                  document.remote_document_id);
+            if (!db.UpdateOASyncFields(same_identity->id, document.official_date,
+                                       "auto_filled_date", document.source,
+                                       document.remote_document_id)) {
+                return database_failure("补入官方发文日");
+            }
             result.message = "已补入官方发文日 " + document.official_date;
         } else if (same_identity->issue_date != document.official_date) {
-            db.UpdateOASyncFields(same_identity->id, "", "date_conflict",
-                                  document.source, document.remote_document_id);
+            if (!db.UpdateOASyncFields(same_identity->id, "", "date_conflict",
+                                       document.source, document.remote_document_id)) {
+                return database_failure("标记发文日冲突");
+            }
             result.code = ResultCode::DateConflict;
             result.date_conflict = true;
             result.message = "本地 " + result.canonical_title + " 官方发文日 " +
                              same_identity->issue_date + "，官网 " + document.official_date +
                              "，待人工确认";
         } else if (same_identity->source.empty()) {
-            db.UpdateOASyncFields(same_identity->id, "", same_identity->sync_flag,
-                                  document.source, document.remote_document_id);
+            if (!db.UpdateOASyncFields(same_identity->id, "", same_identity->sync_flag,
+                                       document.source, document.remote_document_id)) {
+                return database_failure("补充审查意见来源");
+            }
         }
         return result;
     }
@@ -303,9 +317,11 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
     }
 
     if (adoptable_legacy) {
-        db.UpdateOASyncFields(adoptable_legacy->id, document.official_date,
-                              "auto_filled_date", document.source,
-                              document.remote_document_id);
+        if (!db.UpdateOASyncFields(adoptable_legacy->id, document.official_date,
+                                   "auto_filled_date", document.source,
+                                   document.remote_document_id)) {
+            return database_failure("合并既有审查意见");
+        }
         result.message = "已补入官方发文日 " + document.official_date;
         return result;
     }
@@ -326,11 +342,18 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
             db.MergeOAExact(record, /*fill_empty_handler=*/false, /*log_undo=*/true);
         if (merged.status == OAExactMergeStatus::Inserted) {
             result.oa_created_id = merged.record_id;
+        } else if (merged.status == OAExactMergeStatus::MatchConflict) {
+            result.code = ResultCode::ManualReviewRequired;
+            result.message = "发现多条相同编号、类型和发文日的审查意见，需人工确认";
+            return result;
+        } else if (merged.status == OAExactMergeStatus::Error) {
+            return database_failure("保存审查意见");
         }
     } else {
         // Non-OA events may legitimately share title/date while carrying a
         // distinct official identity, so preserve their existing semantics.
         result.oa_created_id = db.InsertOA(record, /*log_undo=*/true);
+        if (result.oa_created_id <= 0) return database_failure("保存官方事件");
     }
     if (result.oa_created_id > 0) {
         result.code = ResultCode::NewOfficialEvent;
@@ -346,7 +369,7 @@ int NormalizeCheckIntervalDays(int days) {
 
 long long NextDossierCheckAt(ResultCode code, long long now, int interval_days) {
     if (code == ResultCode::NetworkError || code == ResultCode::RateLimited ||
-        code == ResultCode::PageStructureChanged) {
+        code == ResultCode::PageStructureChanged || code == ResultCode::TemporaryError) {
         return now + 1800;
     }
     return now + static_cast<long long>(NormalizeCheckIntervalDays(interval_days)) * 86400;
@@ -416,6 +439,7 @@ bool ParseRemoteCaseResultJson(const std::string& json_body, RemoteCaseResult& o
 CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
                                      const RemoteCaseResult& remote,
                                      int interval_days, long long now) {
+    auto write_lock = db.AcquireConnectionWriteLock();
     CaseSyncReport report;
     report.patent_id = patent.id;
     report.geke_code = patent.geke_code;
@@ -431,6 +455,7 @@ CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
     const std::string app_no = remote.resolved_application_number.empty()
                                    ? patent.application_number
                                    : remote.resolved_application_number;
+    bool database_failed = false;
     for (const auto& document : remote.documents) {
         if (!IsPersistableOfficialEvent(document)) continue;
         ProsecutionDocumentRecord record;
@@ -455,12 +480,18 @@ CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
         record.source_trace = document.source_trace;
         record.raw_metadata = document.raw_metadata;
         bool created = false;
-        db.UpsertProsecutionDocument(record, &created);
+        if (db.UpsertProsecutionDocument(record, &created) <= 0) {
+            report.code = ResultCode::TemporaryError;
+            report.message = "保存官方案卷记录失败: " +
+                             (db.LastError().empty() ? "未知数据库错误" : db.LastError());
+            database_failed = true;
+            break;
+        }
         if (created) report.documents_new++;
     }
     report.documents_total = static_cast<int>(remote.documents.size());
 
-    if (remote.has_latest_event) {
+    if (!database_failed && remote.has_latest_event) {
         RemoteDocument latest = remote.latest_event;
         if (latest.source.empty()) latest.source = state.provider;
         EventMergeResult merged = MergeOfficialEvent(db, patent, latest);
@@ -472,7 +503,8 @@ CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
         report.message = merged.message;
         state.latest_remote_oa_date = latest.official_date;
         state.latest_remote_oa_type = merged.canonical_title;
-    } else if (report.code == ResultCode::Ok || report.code == ResultCode::NoChange) {
+    } else if (!database_failed &&
+               (report.code == ResultCode::Ok || report.code == ResultCode::NoChange)) {
         report.code = ResultCode::NoChange;
     }
 
@@ -484,9 +516,23 @@ CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
         state.last_error_code = ToString(report.code);
         state.last_error_message = report.message;
     }
-    db.UpsertDossierSyncState(state);
-    db.UpdatePatentDossierCheck(
-        patent.id, now, NextDossierCheckAt(report.code, now, interval_days));
+    if (!db.UpdatePatentDossierCheck(
+            patent.id, now, NextDossierCheckAt(report.code, now, interval_days))) {
+        report.code = ResultCode::TemporaryError;
+        report.message = "更新案卷检查时间失败: " +
+                         (db.LastError().empty() ? "未知数据库错误" : db.LastError());
+        state.last_success_at = 0;
+        state.last_error_at = now;
+        state.last_error_code = ToString(report.code);
+        state.last_error_message = report.message;
+    }
+    if (!db.UpsertDossierSyncState(state)) {
+        report.code = ResultCode::TemporaryError;
+        report.message = "保存案卷同步状态失败: " +
+                         (db.LastError().empty() ? "未知数据库错误" : db.LastError());
+        db.UpdatePatentDossierCheck(
+            patent.id, now, NextDossierCheckAt(report.code, now, interval_days));
+    }
     return report;
 }
 

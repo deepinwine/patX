@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -1027,6 +1028,144 @@ static void TestOfficialEventTitleAndMergeRules() {
     std::filesystem::remove(path);
 }
 
+static void TestDatabaseMergeFailuresAreVisibleAndNotSuccessful() {
+    const std::string conflict_path = TempDb();
+    {
+        Database db(conflict_path);
+        Patent patent;
+        patent.geke_code = "GC-MERGE-CONFLICT";
+        patent.title = "多重匹配测试";
+        patent.id = db.InsertPatent(patent, false);
+
+        OARecord first;
+        first.patent_id = patent.id;
+        first.geke_code = patent.geke_code;
+        first.oa_type = "一通";
+        first.issue_date = "2026-09-14";
+        first.source = "cnipa";
+        first.remote_document_id = "existing-1";
+        first.sync_flag = "web_new";
+        CHECK(db.InsertOA(first, false) > 0);
+        OARecord second = first;
+        second.oa_type = "第一次审查意见通知书";
+        second.remote_document_id = "existing-2";
+        CHECK(db.InsertOA(second, false) > 0);
+
+        RemoteDocument incoming = OfficialEvent(
+            "OFFICE_ACTION_FIRST", "审查意见通知书", "2026-09-14", "incoming", 1);
+        EventMergeResult conflict = MergeOfficialEvent(db, patent, incoming);
+        CHECK(conflict.code == ResultCode::ManualReviewRequired);
+        CHECK(conflict.message.find("多条") != std::string::npos);
+        CHECK(db.GetOAsForPatentId(patent.id).size() == 2);
+    }
+    std::filesystem::remove(conflict_path);
+
+    const std::string merge_error_path = TempDb();
+    {
+        Database db(merge_error_path);
+        Patent patent;
+        patent.geke_code = "GC-MERGE-ERROR";
+        patent.title = "数据库失败测试";
+        patent.id = db.InsertPatent(patent, false);
+        CHECK(db.Execute(
+            "CREATE TRIGGER fail_oa_insert BEFORE INSERT ON oa_records "
+            "BEGIN SELECT RAISE(ABORT,'forced oa failure'); END"));
+
+        RemoteDocument incoming = OfficialEvent(
+            "OFFICE_ACTION_FIRST", "审查意见通知书", "2026-09-15", "failure", 1);
+        EventMergeResult failed = MergeOfficialEvent(db, patent, incoming);
+        CHECK(failed.code == ResultCode::TemporaryError);
+        CHECK(failed.message.find("forced oa failure") != std::string::npos);
+        CHECK(db.GetOAsForPatentId(patent.id).empty());
+    }
+    std::filesystem::remove(merge_error_path);
+
+    const std::string document_error_path = TempDb();
+    {
+        Database db(document_error_path);
+        Patent patent;
+        patent.geke_code = "GC-DOCUMENT-ERROR";
+        patent.title = "文档落库失败测试";
+        patent.application_number = "202610000002.2";
+        patent.id = db.InsertPatent(patent, false);
+        CHECK(db.Execute(
+            "CREATE TRIGGER fail_document_insert BEFORE INSERT ON prosecution_documents "
+            "BEGIN SELECT RAISE(ABORT,'forced document failure'); END"));
+
+        RemoteCaseResult remote;
+        remote.code = "OK";
+        remote.provider_used = "cnipa";
+        remote.documents.push_back(OfficialEvent(
+            "OFFICE_ACTION_FIRST", "审查意见通知书", "2026-09-16", "document-failure", 1));
+        remote.documents.front().fingerprint = "document-failure-fingerprint";
+
+        const long long now = 1'900'000'000LL;
+        CaseSyncReport report = ApplyRemoteCaseResult(db, patent, remote, 7, now);
+        CHECK(report.code == ResultCode::TemporaryError);
+        CHECK(report.message.find("forced document failure") != std::string::npos);
+        CHECK(report.documents_new == 0);
+
+        const auto states = db.GetDossierSyncStates();
+        CHECK(states.size() == 1);
+        CHECK(states.front().last_success_at == 0);
+        CHECK(states.front().last_error_at == now);
+        CHECK_STR_EQ(states.front().last_error_code, "TEMPORARY_ERROR");
+        CHECK(NextDossierCheckAt(report.code, now, 7) == now + 1800);
+    }
+    std::filesystem::remove(document_error_path);
+}
+
+static void TestSharedConnectionSerializesDateFillAndExactMerge() {
+    std::string path = TempDb();
+    {
+        Database db(path);
+        Patent patent;
+        patent.geke_code = "GC-SHARED-DATE-FILL";
+        patent.title = "共享连接补日期测试";
+        patent.id = db.InsertPatent(patent, false);
+
+        OARecord legacy;
+        legacy.patent_id = patent.id;
+        legacy.geke_code = patent.geke_code;
+        legacy.oa_type = "第一次审查意见通知书";
+        legacy.sync_flag = "web_new";
+        legacy.writer = "人工撰写人";
+        const int legacy_id = db.InsertOA(legacy, false);
+        CHECK(legacy_id > 0);
+
+        OARecord excel_row = legacy;
+        excel_row.oa_type = "第一次审查意见通知书";
+        excel_row.issue_date = "2026-09-17";
+        excel_row.handler = "李四";
+
+        auto connection_lock = db.AcquireConnectionWriteLock();
+        std::promise<void> excel_started;
+        auto excel_merge = std::async(std::launch::async, [&] {
+            excel_started.set_value();
+            return db.MergeOAExact(excel_row, true);
+        });
+        excel_started.get_future().wait();
+        CHECK(excel_merge.wait_for(std::chrono::milliseconds(20)) ==
+              std::future_status::timeout);
+
+        RemoteDocument official = OfficialEvent(
+            "OFFICE_ACTION_FIRST", "审查意见通知书", "2026-09-17", "shared-fill", 1);
+        EventMergeResult filled = MergeOfficialEvent(db, patent, official);
+        CHECK(filled.code == ResultCode::NoChange);
+        connection_lock.unlock();
+
+        OAExactMergeResult merged = excel_merge.get();
+        CHECK(merged.status == OAExactMergeStatus::HandlerUpdated);
+        const auto records = db.GetOAByPatent(patent.geke_code);
+        CHECK(records.size() == 1);
+        CHECK(records.front().id == legacy_id);
+        CHECK_STR_EQ(records.front().issue_date, "2026-09-17");
+        CHECK_STR_EQ(records.front().handler, "李四");
+        CHECK_STR_EQ(records.front().writer, "人工撰写人");
+    }
+    std::filesystem::remove(path);
+}
+
 static void TestOfficialEventPersistenceAndSchedulingRules() {
     RemoteDocument event = OfficialEvent(
         "GRANT_NOTICE", "授权通知", "2026-08-10", "grant-event");
@@ -1513,6 +1652,8 @@ int main() {
     TestCanonicalLegacyRowsAreMergedTransactionally();
     TestOaMergeRules();
     TestOfficialEventTitleAndMergeRules();
+    TestDatabaseMergeFailuresAreVisibleAndNotSuccessful();
+    TestSharedConnectionSerializesDateFillAndExactMerge();
     TestOfficialEventPersistenceAndSchedulingRules();
     TestBatchSummaryClassifiesConflictsAsManualReview();
     TestBackgroundSyncPolicy();

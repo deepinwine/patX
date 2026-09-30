@@ -23,6 +23,41 @@ static std::vector<UndoManager*> g_live_undo_managers;
 
 namespace {
 
+class SqliteTransaction {
+public:
+    SqliteTransaction(sqlite3* db, std::string& error) : db_(db), error_(error) {}
+
+    bool BeginImmediate() {
+        if (!Exec("BEGIN IMMEDIATE TRANSACTION")) return false;
+        active_ = true;
+        return true;
+    }
+
+    bool Commit() {
+        if (!active_ || !Exec("COMMIT")) return false;
+        active_ = false;
+        return true;
+    }
+
+    ~SqliteTransaction() {
+        if (active_) sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+
+private:
+    bool Exec(const char* sql) {
+        char* message = nullptr;
+        const int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &message);
+        if (rc == SQLITE_OK) return true;
+        error_ = message ? message : sqlite3_errmsg(db_);
+        sqlite3_free(message);
+        return false;
+    }
+
+    sqlite3* db_ = nullptr;
+    std::string& error_;
+    bool active_ = false;
+};
+
 void RegisterUndoManager(UndoManager* manager) {
     if (!manager) return;
     g_live_undo_managers.push_back(manager);
@@ -38,6 +73,10 @@ void UnregisterUndoManager(UndoManager* manager) {
 }
 
 } // namespace
+
+Database::ConnectionWriteLock Database::AcquireConnectionWriteLock() {
+    return ConnectionWriteLock(connection_write_mutex_);
+}
 
 UndoManager& GetUndoManager() {
     if (!g_undo_manager) throw std::logic_error("no live database undo manager");
@@ -464,6 +503,7 @@ void Database::MigrateTables() {
 }
 
 bool Database::Execute(const std::string& sql) {
+    auto lock = AcquireConnectionWriteLock();
     char* err_msg = nullptr;
     int rc = sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &err_msg);
     if (rc != SQLITE_OK) {
@@ -1060,6 +1100,7 @@ std::vector<OARecord> Database::GetOAByPatent(const std::string& geke_code) {
 }
 
 int Database::InsertOA(const OARecord& oa, bool log_undo) {
+    auto lock = AcquireConnectionWriteLock();
     std::string sql =
         "INSERT INTO oa_records (patent_id, geke_code, patent_title, oa_type, official_deadline, "
         "issue_date, response_date, handler, writer, progress, agency, oa_summary, is_completed, "
@@ -1093,6 +1134,7 @@ int Database::InsertOA(const OARecord& oa, bool log_undo) {
 }
 
 bool Database::UpdateOA(int id, const OARecord& oa, bool log_undo) {
+    auto lock = AcquireConnectionWriteLock();
     if (log_undo && undo_manager_) {
         OARecord old = GetOAById(id);
         undo_manager_->LogOperation("update", "oa_records", id, OAToJson(old), OAToJson(oa));
@@ -1127,24 +1169,21 @@ bool Database::UpdateOA(int id, const OARecord& oa, bool log_undo) {
 OAExactMergeResult Database::MergeOAExact(const OARecord& incoming,
                                           bool fill_empty_handler,
                                           bool log_undo) {
+    auto lock = AcquireConnectionWriteLock();
     OAExactMergeResult result;
     if (incoming.geke_code.empty() || incoming.oa_type.empty() || incoming.issue_date.empty()) {
         last_error_ = "OA exact merge requires code, type and issue date";
         return result;
     }
 
-    // One connection may be shared by the GUI importer and dossier worker.
-    // BEGIN IMMEDIATE additionally serializes this read/modify/write sequence
-    // against other Database connections pointing at the same file.
-    std::lock_guard<std::mutex> lock(oa_exact_merge_mutex_);
-    if (!Execute("BEGIN IMMEDIATE TRANSACTION")) return result;
+    // The connection lock serializes writers sharing this Database instance;
+    // BEGIN IMMEDIATE additionally serializes other connections to the file.
+    last_error_.clear();
+    SqliteTransaction transaction(db_, last_error_);
+    if (!transaction.BeginImmediate()) return result;
 
-    auto rollback = [&]() {
-        Execute("ROLLBACK");
-        return OAExactMergeResult{};
-    };
     auto commit = [&](OAExactMergeResult value) {
-        if (!Execute("COMMIT")) return rollback();
+        if (!transaction.Commit()) return OAExactMergeResult{};
         return value;
     };
 
@@ -1172,15 +1211,15 @@ OAExactMergeResult Database::MergeOAExact(const OARecord& incoming,
                 "WHERE id = ? AND (handler IS NULL OR handler = '')";
             if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
                 last_error_ = sqlite3_errmsg(db_);
-                return rollback();
+                return result;
             }
             sqlite3_bind_text(stmt, 1, incoming.handler.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int(stmt, 2, existing.id);
             const int rc = sqlite3_step(stmt);
+            if (rc != SQLITE_DONE) last_error_ = sqlite3_errmsg(db_);
             sqlite3_finalize(stmt);
             if (rc != SQLITE_DONE) {
-                last_error_ = sqlite3_errmsg(db_);
-                return rollback();
+                return result;
             }
             if (sqlite3_changes(db_) != 1) {
                 result.status = OAExactMergeStatus::HandlerConflict;
@@ -1207,12 +1246,13 @@ OAExactMergeResult Database::MergeOAExact(const OARecord& incoming,
     }
 
     result.record_id = InsertOA(incoming, log_undo);
-    if (result.record_id <= 0) return rollback();
+    if (result.record_id <= 0) return OAExactMergeResult{};
     result.status = OAExactMergeStatus::Inserted;
     return commit(result);
 }
 
 bool Database::DeleteOA(int id, bool log_undo) {
+    auto lock = AcquireConnectionWriteLock();
     if (log_undo && undo_manager_) {
         OARecord old = GetOAById(id);
         undo_manager_->LogOperation("delete", "oa_records", id, OAToJson(old), "");
@@ -1908,15 +1948,18 @@ std::string Database::OAToJson(const OARecord& oa) {
 }
 
 void Database::BeginBatch() {
+    auto lock = AcquireConnectionWriteLock();
     if (undo_manager_) undo_manager_->BeginBatch();
 }
 
 int Database::Undo() {
+    auto lock = AcquireConnectionWriteLock();
     if (undo_manager_) return undo_manager_->Undo();
     return 0;
 }
 
 bool Database::CanUndo() const {
+    ConnectionWriteLock lock(connection_write_mutex_);
     if (undo_manager_) return undo_manager_->CanUndo();
     return false;
 }
@@ -2004,12 +2047,20 @@ std::vector<Patent> Database::GetPatentsDueForDossierCheck(bool include_granted,
 }
 
 int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* created) {
+    auto lock = AcquireConnectionWriteLock();
     if (created) *created = false;
     const long long now = static_cast<long long>(time(nullptr));
+    last_error_.clear();
     if (!Execute("BEGIN IMMEDIATE TRANSACTION")) return 0;
 
     auto rollback = [&]() {
+        std::string cause = last_error_;
+        if (cause.empty()) cause = sqlite3_errmsg(db_);
+        if (cause.empty() || cause == "not an error") {
+            cause = "prosecution document upsert failed";
+        }
         Execute("ROLLBACK");
+        last_error_ = std::move(cause);
         return 0;
     };
 
@@ -2101,6 +2152,7 @@ int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* cr
         sqlite3_bind_text(update, 3, merged_trace.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(update, 4, existing.id);
         const int rc = sqlite3_step(update);
+        if (rc != SQLITE_DONE) last_error_ = sqlite3_errmsg(db_);
         sqlite3_finalize(update);
         if (rc != SQLITE_DONE || sqlite3_changes(db_) != 1 || !Execute("COMMIT")) {
             return rollback();
@@ -2163,6 +2215,7 @@ int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* cr
         sqlite3_bind_text(update, parameter++, raw_metadata.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(update, parameter++, canonical.id);
         const int update_rc = sqlite3_step(update);
+        if (update_rc != SQLITE_DONE) last_error_ = sqlite3_errmsg(db_);
         const int updated = sqlite3_changes(db_);
         sqlite3_finalize(update);
         if (update_rc != SQLITE_DONE || updated != 1) return rollback();
@@ -2176,6 +2229,7 @@ int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* cr
         }
         sqlite3_bind_int(remove, 1, legacy.id);
         const int delete_rc = sqlite3_step(remove);
+        if (delete_rc != SQLITE_DONE) last_error_ = sqlite3_errmsg(db_);
         const int deleted = sqlite3_changes(db_);
         sqlite3_finalize(remove);
         if (delete_rc != SQLITE_DONE || deleted != 1 || !Execute("COMMIT")) return rollback();
@@ -2203,6 +2257,7 @@ int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* cr
         sqlite3_bind_text(promote, 4, merged_trace.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int(promote, 5, legacy.id);
         const int rc = sqlite3_step(promote);
+        if (rc != SQLITE_DONE) last_error_ = sqlite3_errmsg(db_);
         const int changed = sqlite3_changes(db_);
         sqlite3_finalize(promote);
         if (rc == SQLITE_DONE && changed == 1) {
@@ -2279,6 +2334,7 @@ int Database::UpsertProsecutionDocument(ProsecutionDocumentRecord& doc, bool* cr
     sqlite3_bind_int64(insert, bind++, doc.last_seen_at);
     bind_text(doc.raw_metadata);
     const int insert_rc = sqlite3_step(insert);
+    if (insert_rc != SQLITE_DONE) last_error_ = sqlite3_errmsg(db_);
     sqlite3_finalize(insert);
     if (insert_rc == SQLITE_DONE && sqlite3_changes(db_) == 1) {
         doc.id = static_cast<int>(sqlite3_last_insert_rowid(db_));
@@ -2451,6 +2507,7 @@ bool Database::UpdateOASyncFields(int oa_id, const std::string& issue_date_if_em
                                   const std::string& sync_flag,
                                   const std::string& source_if_empty,
                                   const std::string& remote_document_id_if_empty) {
+    auto lock = AcquireConnectionWriteLock();
     std::string sql = "UPDATE oa_records SET sync_flag = '" + EscapeString(sync_flag) + "'";
     if (!issue_date_if_empty.empty()) {
         sql += ", issue_date = CASE WHEN issue_date IS NULL OR issue_date = '' THEN '" +
