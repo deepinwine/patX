@@ -8,7 +8,9 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <sqlite3.h>
+#include <thread>
 
 using namespace testutil;
 
@@ -905,6 +907,101 @@ TEST(database_oa_crud_and_external_link) {
         CHECK_EQ(db.GetOARecords(f).size(), 1u);
     }
     std::filesystem::remove(path);
+}
+
+TEST(database_oa_exact_merge_serializes_alias_inserts) {
+    const std::string path = TempDbPath("oa_exact_merge_insert_race");
+    std::filesystem::remove(path);
+    {
+        Database first(path);
+        Database second(path);
+
+        OARecord canonical;
+        canonical.geke_code = "GK-OA-ATOMIC-INSERT";
+        canonical.oa_type = "第一次审查意见通知书";
+        canonical.issue_date = "2026-09-10";
+        canonical.handler = "李四";
+
+        OARecord alias = canonical;
+        alias.oa_type = "一通";
+        alias.handler = "王五";
+
+        std::promise<void> start_promise;
+        std::shared_future<void> start = start_promise.get_future().share();
+        OAExactMergeResult first_result;
+        OAExactMergeResult second_result;
+        std::thread first_thread([&] {
+            start.wait();
+            first_result = first.MergeOAExact(canonical, true);
+        });
+        std::thread second_thread([&] {
+            start.wait();
+            second_result = second.MergeOAExact(alias, true);
+        });
+        start_promise.set_value();
+        first_thread.join();
+        second_thread.join();
+
+        const auto records = first.GetOAByPatent(canonical.geke_code);
+        CHECK_EQ(records.size(), 1u);
+        CHECK((first_result.status == OAExactMergeStatus::Inserted &&
+               second_result.status == OAExactMergeStatus::HandlerConflict) ||
+              (second_result.status == OAExactMergeStatus::Inserted &&
+               first_result.status == OAExactMergeStatus::HandlerConflict));
+    }
+    std::filesystem::remove(path);
+    std::filesystem::remove(path + "-wal");
+    std::filesystem::remove(path + "-shm");
+}
+
+TEST(database_oa_exact_merge_fills_handler_with_compare_and_set) {
+    const std::string path = TempDbPath("oa_exact_merge_handler_race");
+    std::filesystem::remove(path);
+    {
+        Database seed(path);
+        OARecord existing;
+        existing.geke_code = "GK-OA-ATOMIC-HANDLER";
+        existing.oa_type = "一通";
+        existing.issue_date = "2026-09-11";
+        existing.writer = "人工撰写人";
+        CHECK(seed.InsertOA(existing) > 0);
+
+        Database first(path);
+        Database second(path);
+        OARecord first_incoming = existing;
+        first_incoming.oa_type = "第一次审查意见通知书";
+        first_incoming.handler = "李四";
+        OARecord second_incoming = first_incoming;
+        second_incoming.handler = "王五";
+
+        std::promise<void> start_promise;
+        std::shared_future<void> start = start_promise.get_future().share();
+        OAExactMergeResult first_result;
+        OAExactMergeResult second_result;
+        std::thread first_thread([&] {
+            start.wait();
+            first_result = first.MergeOAExact(first_incoming, true);
+        });
+        std::thread second_thread([&] {
+            start.wait();
+            second_result = second.MergeOAExact(second_incoming, true);
+        });
+        start_promise.set_value();
+        first_thread.join();
+        second_thread.join();
+
+        const auto records = seed.GetOAByPatent(existing.geke_code);
+        CHECK_EQ(records.size(), 1u);
+        CHECK_STR_EQ(records.front().writer, "人工撰写人");
+        CHECK(records.front().handler == "李四" || records.front().handler == "王五");
+        CHECK((first_result.status == OAExactMergeStatus::HandlerUpdated &&
+               second_result.status == OAExactMergeStatus::HandlerConflict) ||
+              (second_result.status == OAExactMergeStatus::HandlerUpdated &&
+               first_result.status == OAExactMergeStatus::HandlerConflict));
+    }
+    std::filesystem::remove(path);
+    std::filesystem::remove(path + "-wal");
+    std::filesystem::remove(path + "-shm");
 }
 
 TEST(database_deadline_rules) {

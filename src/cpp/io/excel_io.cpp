@@ -53,7 +53,7 @@ enum class OAImportAction {
 struct PlannedOAImport {
     OARecord incoming;
     OAImportAction action = OAImportAction::Insert;
-    int existing_id = 0;
+    bool sheet_handler_conflict = false;
 };
 
 struct OAImportPlan {
@@ -86,7 +86,6 @@ PlannedOAImport ClassifyOAImport(const OARecord& incoming, Database& db) {
         planned.action = OAImportAction::MatchConflict;
     } else if (matches.size() == 1) {
         const OARecord& existing = matches.front();
-        planned.existing_id = existing.id;
         if (existing.handler.empty() && !incoming.handler.empty()) {
             planned.action = OAImportAction::UpdateEmptyHandler;
         } else if (incoming.handler.empty() || existing.handler == incoming.handler) {
@@ -141,6 +140,7 @@ OAImportPlan BuildOAImportPlan(const std::vector<OARecord>& incoming_rows, Datab
         if (incoming_handlers.size() > 1) {
             for (size_t index : indices) {
                 plan.rows[index].action = OAImportAction::HandlerConflict;
+                plan.rows[index].sheet_handler_conflict = true;
             }
             continue;
         }
@@ -844,32 +844,40 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                     if (reviewed) plan = BuildOAImportPlan(incoming_rows, db);
                     db.BeginBatch();
                     for (const auto& planned : plan.rows) {
-                        switch (planned.action) {
-                            case OAImportAction::Insert:
-                                if (db.InsertOA(planned.incoming) > 0) sheet_added++;
-                                else result.errors++;
+                        if (planned.sheet_handler_conflict) {
+                            result.handler_conflicts++;
+                            sheet_skipped++;
+                            continue;
+                        }
+                        if (planned.incoming.oa_type.empty() ||
+                            planned.incoming.issue_date.empty()) {
+                            if (db.InsertOA(planned.incoming) > 0) sheet_added++;
+                            else result.errors++;
+                            continue;
+                        }
+
+                        const OAExactMergeResult applied =
+                            db.MergeOAExact(planned.incoming, true);
+                        switch (applied.status) {
+                            case OAExactMergeStatus::Inserted:
+                                sheet_added++;
                                 break;
-                            case OAImportAction::UpdateEmptyHandler: {
-                                OARecord existing = db.GetOAById(planned.existing_id);
-                                if (existing.id <= 0) {
-                                    result.errors++;
-                                    break;
-                                }
-                                existing.handler = planned.incoming.handler;
-                                if (db.UpdateOA(planned.existing_id, existing)) sheet_updated++;
-                                else result.errors++;
+                            case OAExactMergeStatus::HandlerUpdated:
+                                sheet_updated++;
                                 break;
-                            }
-                            case OAImportAction::Unchanged:
+                            case OAExactMergeStatus::Unchanged:
                                 sheet_skipped++;
                                 break;
-                            case OAImportAction::HandlerConflict:
+                            case OAExactMergeStatus::HandlerConflict:
                                 result.handler_conflicts++;
                                 sheet_skipped++;
                                 break;
-                            case OAImportAction::MatchConflict:
+                            case OAExactMergeStatus::MatchConflict:
                                 result.match_conflicts++;
                                 sheet_skipped++;
+                                break;
+                            case OAExactMergeStatus::Error:
+                                result.errors++;
                                 break;
                         }
                     }

@@ -9,6 +9,7 @@
 #include <vector>
 #include <memory>
 #include <map>
+#include <mutex>
 #include <ctime>
 #include <sqlite3.h>
 
@@ -249,6 +250,20 @@ struct DossierSyncState {
     std::string auth_state;           // NOT_INITIALIZED / AUTHENTICATED / ...
 };
 
+enum class OAExactMergeStatus {
+    Inserted,
+    HandlerUpdated,
+    Unchanged,
+    HandlerConflict,
+    MatchConflict,
+    Error
+};
+
+struct OAExactMergeResult {
+    OAExactMergeStatus status = OAExactMergeStatus::Error;
+    int record_id = 0;
+};
+
 class Database {
 public:
     explicit Database(const std::string& db_path);
@@ -278,6 +293,11 @@ public:
     std::vector<OARecord> GetOAByPatent(const std::string& geke_code);
     int InsertOA(const OARecord& oa, bool log_undo = true);
     bool UpdateOA(int id, const OARecord& oa, bool log_undo = true);
+    // Atomically merges a complete OA identity (code + canonical type + issue date).
+    // Handler is filled only while the stored value is still empty.
+    OAExactMergeResult MergeOAExact(const OARecord& incoming,
+                                    bool fill_empty_handler,
+                                    bool log_undo = true);
     bool DeleteOA(int id, bool log_undo = true);
     bool MarkOACompleted(int id);
     // Finds a synced OA record by its USPTO document identifier (0 if absent).
@@ -384,6 +404,7 @@ private:
     int schema_version_ = 0;
     std::string last_error_;
     std::unique_ptr<UndoManager> undo_manager_;
+    std::mutex oa_exact_merge_mutex_;
 
     void InitTables();
     void MigrateTables();

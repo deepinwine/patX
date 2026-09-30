@@ -4,10 +4,13 @@
 
 #include "database.hpp"
 #include "excel_io.hpp"
+#include "web_dossier.hpp"
 
 #include <OpenXLSX.hpp>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <thread>
 
 using namespace testutil;
 
@@ -430,4 +433,66 @@ TEST(oa_excel_import_rebuilds_duplicate_group_conflicts_after_callback) {
     CHECK_STR_EQ(records.front().writer, "回调分组撰写人");
 
     std::filesystem::remove(xlsx_path);
+}
+
+TEST(oa_excel_import_and_background_sync_share_atomic_exact_merge) {
+    const std::string xlsx_path = TempDbPath("oa_import_background_race") + ".xlsx";
+    const std::string db_path = TempDbPath("oa_import_background_race");
+    std::filesystem::remove(xlsx_path);
+    std::filesystem::remove(db_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-BACKGROUND-RACE", "并发同步专利", "一通",
+         "2026-09-12", "2027-01-12", "李四"},
+    });
+
+    {
+        Database background_db(db_path);
+        Patent patent;
+        patent.geke_code = "GK-OA-BACKGROUND-RACE";
+        patent.title = "并发同步专利";
+        patent.id = background_db.InsertPatent(patent, false);
+        CHECK(patent.id > 0);
+
+        Database excel_db(db_path);
+        webdossier::RemoteDocument document;
+        document.document_type = "OFFICE_ACTION_FIRST";
+        document.document_title = "第一次审查意见通知书";
+        document.official_date = "2026-09-12";
+        document.direction = "official";
+        document.document_version = "ORIGINAL";
+        document.confidence = "HIGH";
+        document.source = "cnipa";
+        document.remote_document_id = "cnipa-race-1";
+
+        std::promise<void> start_promise;
+        std::shared_future<void> start = start_promise.get_future().share();
+        webdossier::EventMergeResult background_result;
+        ImportResult excel_result;
+        std::thread background_thread([&] {
+            start.wait();
+            background_result =
+                webdossier::MergeOfficialEvent(background_db, patent, document);
+        });
+        std::thread excel_thread([&] {
+            start.wait();
+            ExcelIO io;
+            excel_result = io.ImportPatents(xlsx_path, excel_db);
+        });
+        start_promise.set_value();
+        background_thread.join();
+        excel_thread.join();
+
+        const auto records = background_db.GetOAByPatent(patent.geke_code);
+        CHECK_EQ(records.size(), 1u);
+        CHECK_STR_EQ(records.front().handler, "李四");
+        CHECK_STR_EQ(records.front().issue_date, "2026-09-12");
+        CHECK(excel_result.added + excel_result.updated == 1);
+        CHECK(background_result.code == webdossier::ResultCode::NoChange ||
+              background_result.code == webdossier::ResultCode::NewOfficialEvent);
+    }
+
+    std::filesystem::remove(xlsx_path);
+    std::filesystem::remove(db_path);
+    std::filesystem::remove(db_path + "-wal");
+    std::filesystem::remove(db_path + "-shm");
 }

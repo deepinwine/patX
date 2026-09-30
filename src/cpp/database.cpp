@@ -7,6 +7,7 @@
 #include "undo_manager.hpp"
 #include "patx/schema_migrations.hpp"
 #include "patx/log.hpp"
+#include "web_dossier.hpp"
 
 #include <sstream>
 #include <iostream>
@@ -1121,6 +1122,94 @@ bool Database::UpdateOA(int id, const OARecord& oa, bool log_undo) {
         "sync_flag = '" + EscapeString(oa.sync_flag) + "'" +
         " WHERE id = " + std::to_string(id);
     return Execute(sql);
+}
+
+OAExactMergeResult Database::MergeOAExact(const OARecord& incoming,
+                                          bool fill_empty_handler,
+                                          bool log_undo) {
+    OAExactMergeResult result;
+    if (incoming.geke_code.empty() || incoming.oa_type.empty() || incoming.issue_date.empty()) {
+        last_error_ = "OA exact merge requires code, type and issue date";
+        return result;
+    }
+
+    // One connection may be shared by the GUI importer and dossier worker.
+    // BEGIN IMMEDIATE additionally serializes this read/modify/write sequence
+    // against other Database connections pointing at the same file.
+    std::lock_guard<std::mutex> lock(oa_exact_merge_mutex_);
+    if (!Execute("BEGIN IMMEDIATE TRANSACTION")) return result;
+
+    auto rollback = [&]() {
+        Execute("ROLLBACK");
+        return OAExactMergeResult{};
+    };
+    auto commit = [&](OAExactMergeResult value) {
+        if (!Execute("COMMIT")) return rollback();
+        return value;
+    };
+
+    const std::string canonical_type = webdossier::NormalizeOaTypeCn(incoming.oa_type);
+    std::vector<OARecord> matches;
+    for (const auto& existing : GetOAByPatent(incoming.geke_code)) {
+        if (existing.issue_date == incoming.issue_date &&
+            webdossier::NormalizeOaTypeCn(existing.oa_type) == canonical_type) {
+            matches.push_back(existing);
+        }
+    }
+
+    if (matches.size() > 1) {
+        result.status = OAExactMergeStatus::MatchConflict;
+        return commit(result);
+    }
+
+    if (matches.size() == 1) {
+        const OARecord& existing = matches.front();
+        result.record_id = existing.id;
+        if (fill_empty_handler && existing.handler.empty() && !incoming.handler.empty()) {
+            sqlite3_stmt* stmt = nullptr;
+            const char* sql =
+                "UPDATE oa_records SET handler = ? "
+                "WHERE id = ? AND (handler IS NULL OR handler = '')";
+            if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+                last_error_ = sqlite3_errmsg(db_);
+                return rollback();
+            }
+            sqlite3_bind_text(stmt, 1, incoming.handler.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 2, existing.id);
+            const int rc = sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+            if (rc != SQLITE_DONE) {
+                last_error_ = sqlite3_errmsg(db_);
+                return rollback();
+            }
+            if (sqlite3_changes(db_) != 1) {
+                result.status = OAExactMergeStatus::HandlerConflict;
+                return commit(result);
+            }
+            if (log_undo && undo_manager_) {
+                OARecord updated = existing;
+                updated.handler = incoming.handler;
+                undo_manager_->LogOperation(
+                    "update", "oa_records", existing.id,
+                    OAToJson(existing), OAToJson(updated));
+            }
+            result.status = OAExactMergeStatus::HandlerUpdated;
+            return commit(result);
+        }
+
+        if (incoming.handler.empty() || existing.handler == incoming.handler ||
+            !fill_empty_handler) {
+            result.status = OAExactMergeStatus::Unchanged;
+        } else {
+            result.status = OAExactMergeStatus::HandlerConflict;
+        }
+        return commit(result);
+    }
+
+    result.record_id = InsertOA(incoming, log_undo);
+    if (result.record_id <= 0) return rollback();
+    result.status = OAExactMergeStatus::Inserted;
+    return commit(result);
 }
 
 bool Database::DeleteOA(int id, bool log_undo) {

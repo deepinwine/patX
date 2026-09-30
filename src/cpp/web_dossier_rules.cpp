@@ -321,7 +321,17 @@ EventMergeResult MergeOfficialEvent(Database& db, const Patent& patent,
     record.source = document.source;
     record.remote_document_id = document.remote_document_id;
     record.sync_flag = "web_new";
-    result.oa_created_id = db.InsertOA(record, /*log_undo=*/true);
+    if (IsOfficeActionTypeCn(record.oa_type)) {
+        const OAExactMergeResult merged =
+            db.MergeOAExact(record, /*fill_empty_handler=*/false, /*log_undo=*/true);
+        if (merged.status == OAExactMergeStatus::Inserted) {
+            result.oa_created_id = merged.record_id;
+        }
+    } else {
+        // Non-OA events may legitimately share title/date while carrying a
+        // distinct official identity, so preserve their existing semantics.
+        result.oa_created_id = db.InsertOA(record, /*log_undo=*/true);
+    }
     if (result.oa_created_id > 0) {
         result.code = ResultCode::NewOfficialEvent;
         result.message = "发现新官方事件: " + result.canonical_title + " @ " +
