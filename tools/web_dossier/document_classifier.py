@@ -62,6 +62,10 @@ def classify_cn_title(raw_title: str) -> Tuple[DocumentType, int, Confidence]:
 
     if "驳回决定" in title:
         return DocumentType.REJECTION_DECISION, 0, Confidence.HIGH
+    # 复审程序文书：通知书需按指定期限答复，决定书关系起诉期——
+    # 都按可提醒官方事件保留原标题入库
+    if "复审" in title:
+        return DocumentType.OTHER_OFFICIAL, 0, Confidence.HIGH
     if re.search(r"授予.*专利权|授权.*(?:通知|决定|公告)|办理登记.*通知", title):
         return DocumentType.GRANT_NOTICE, 0, Confidence.HIGH
     if "补正" in title and "通知" in title:

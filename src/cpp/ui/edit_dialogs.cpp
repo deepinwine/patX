@@ -278,7 +278,11 @@ void OAEditDialog::SetupUI() {
         oa_type_combo_ = new wxComboBox(panel, wxID_ANY, "1-OA");
         for (const char* t : {"1-OA", "2-OA", "3-OA", "4-OA", "Rejection", "Admission",
                               "Non-Final Office Action", "Final Office Action",
-                              "Restriction Requirement", "Advisory Action"}) {
+                              "Restriction Requirement", "Advisory Action",
+                              "第一次审查意见通知书", "第二次审查意见通知书",
+                              "驳回决定", "授权通知", "补正通知",
+                              "复审通知书", "复审决定-维持驳回",
+                              "复审决定-撤回驳回", "复审撤案"}) {
             oa_type_combo_->Append(t);
         }
         row->Add(oa_type_combo_, 1);

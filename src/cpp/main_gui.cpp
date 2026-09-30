@@ -751,25 +751,23 @@ private:
                     patent_list->SetItem(idx, 23, DB_STR(st.latest_deadline));
                     if (st.latest_completed) {
                         patent_list->SetItem(idx, 24, UTF8_STR("已完成"));
-                    } else if (IsClosedStatus(p.application_status)) {
-                        // 结案案件的未完成 OA 不展示逾期（与状态矛盾）
-                        patent_list->SetItem(idx, 24, UTF8_STR("已结案"));
                     } else {
-                        wxDateTime dl;
-                        if (dl.ParseFormat(st.latest_deadline.c_str(), "%Y-%m-%d") &&
-                            dl.IsValid()) {
-                            int days = (dl - wxDateTime::Now()).GetDays();
-                            if (days < 0) {
+                        switch (PhaseOf(p.application_status)) {
+                            case CasePhase::Closed:
+                                // 终局案件的未完成 OA 不展示逾期（与状态矛盾）
+                                patent_list->SetItem(idx, 24, UTF8_STR("已结案"));
+                                break;
+                            case CasePhase::Reexamination:
+                                // 复审程序中：行动期限是复审答复/复审请求/
+                                // 起诉期，不按旧 OA 逾期展示
                                 patent_list->SetItem(idx, 24,
-                                    wxString::Format(UTF8_STR("逾期%d天"), -days));
-                                urgent_overdue++;
-                            } else {
-                                patent_list->SetItem(idx, 24,
-                                    wxString::Format(UTF8_STR("%d天"), days));
-                                if (days <= 5) urgent_soon++;
-                            }
-                        } else {
-                            patent_list->SetItem(idx, 24, "-");
+                                    ReexamPhaseLabel(p.application_status));
+                                break;
+                            default:
+                                ComputeOaDaysDisplay(patent_list, idx, 24,
+                                                     st.latest_deadline,
+                                                     urgent_overdue, urgent_soon);
+                                break;
                         }
                     }
                 } else {
@@ -1237,21 +1235,65 @@ private:
         if (t.find("驳回") != std::string::npos) return "驳回";
         if (t.find("授权") != std::string::npos) return "授权";
         if (t.find("补正") != std::string::npos) return "补正";
+        if (t.find("复审") != std::string::npos) {
+            if (t.find("维持") != std::string::npos) return "复审维持";
+            if (t.find("撤") != std::string::npos) return "复审撤案";
+            if (t.find("决定") != std::string::npos) return "复审决定";
+            return "复审通知";
+        }
         if (t.size() > 12) return t.substr(0, 12);
         return t;
     }
 
-    // 结案/终局状态：授权、已获证书、驳回、放弃、失效、撤回、视撤、终止。
-    // 这些案件的未完成 OA 不再按逾期展示（与结案状态矛盾），也不计入
-    // 临期统计——需要行动的期限（如驳回后复审）另有专门规则。
-    static bool IsClosedStatus(const std::string& status) {
-        static const char* markers[] = {"授权", "已获证书", "Granted", "驳回",
-                                        "放弃", "失效", "撤回", "视撤", "终止",
-                                        "结案"};
-        for (const char* m : markers) {
-            if (status.find(m) != std::string::npos) return true;
+    // 案件阶段模型：审查中（正常逾期统计）/ 复审程序（有专门行动期限，
+    // 不按 OA 逾期展示）/ 终局结案。
+    enum class CasePhase { Active, Reexamination, Closed };
+
+    static CasePhase PhaseOf(const std::string& status) {
+        auto has = [&](const char* m) { return status.find(m) != std::string::npos; };
+        // 终局关键词优先：复审放弃/复审撤案/驳回失效/驳回（放弃）等
+        // 复合状态都表示程序已终结
+        static const char* closed_markers[] = {"授权", "已获证书", "Granted",
+                                               "放弃", "失效", "撤回", "视撤",
+                                               "撤案", "终结", "终止", "结案"};
+        bool closed = false;
+        for (const char* m : closed_markers) {
+            if (has(m)) { closed = true; break; }
         }
-        return false;
+        if (closed) return CasePhase::Closed;
+        // 复审程序存续：复审中/复审通知书/复审维持驳回（后续有3个月起诉期）
+        if (has("复审")) return CasePhase::Reexamination;
+        // 裸驳回：处于3个月复审请求期
+        if (has("驳回")) return CasePhase::Reexamination;
+        return CasePhase::Active;
+    }
+
+    // 复审阶段的展示文案：复审维持 / 复审中 / 复审期（裸驳回）
+    static wxString ReexamPhaseLabel(const std::string& status) {
+        if (status.find("复审") == std::string::npos) return UTF8_STR("复审期");
+        if (status.find("维持") != std::string::npos) return UTF8_STR("复审维持");
+        return UTF8_STR("复审中");
+    }
+
+    // 活跃案件的剩余天数展示与临期统计（复审/终局案件不走这里）
+    static void ComputeOaDaysDisplay(wxListCtrl* list, long idx, int col,
+                                     const std::string& deadline,
+                                     int& urgent_overdue, int& urgent_soon) {
+        wxDateTime dl;
+        if (dl.ParseFormat(deadline.c_str(), "%Y-%m-%d") && dl.IsValid()) {
+            int days = (dl - wxDateTime::Now()).GetDays();
+            if (days < 0) {
+                list->SetItem(idx, col,
+                              wxString::Format(UTF8_STR("逾期%d天"), -days));
+                urgent_overdue++;
+            } else {
+                list->SetItem(idx, col,
+                              wxString::Format(UTF8_STR("%d天"), days));
+                if (days <= 5) urgent_soon++;
+            }
+        } else {
+            list->SetItem(idx, col, "-");
+        }
     }
 
     struct PatentOAState {
@@ -1363,8 +1405,11 @@ private:
                 if (oa.is_completed) {
                     days_str = UTF8_STR("已完成");
                     list->SetItemBackgroundColour(idx, wxColour(200, 255, 200));
-                } else if (IsClosedStatus(p.application_status)) {
+                } else if (PhaseOf(p.application_status) == CasePhase::Closed) {
                     days_str = UTF8_STR("已结案");
+                } else if (PhaseOf(p.application_status) ==
+                           CasePhase::Reexamination) {
+                    days_str = ReexamPhaseLabel(p.application_status);
                 } else if (!oa.official_deadline.empty()) {
                     wxDateTime dl;
                     if (dl.ParseFormat(oa.official_deadline.c_str(), "%Y-%m-%d") && dl.IsValid()) {

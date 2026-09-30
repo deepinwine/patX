@@ -82,3 +82,9 @@ def test_fingerprint_dedup():
                             application_number="CN202410123457.5")
     assert a.fingerprint_value() == b.fingerprint_value()
     assert a.fingerprint_value() != c.fingerprint_value()
+
+
+def test_reexamination_documents_are_official_events():
+    from web_dossier.models import Confidence, DocumentType
+    assert classify_cn_title("复审通知书") == (DocumentType.OTHER_OFFICIAL, 0, Confidence.HIGH)
+    assert classify_cn_title("复审决定书") == (DocumentType.OTHER_OFFICIAL, 0, Confidence.HIGH)
