@@ -155,3 +155,39 @@ TEST(oa_excel_import_previews_and_adds_new_handler) {
     CHECK_EQ(records.size(), 1u);
     CHECK_STR_EQ(records.front().handler, "新处理人");
 }
+
+TEST(oa_excel_import_matches_without_duplicate_and_fills_empty_handler) {
+    const std::string xlsx_path = TempDbPath("oa_import_exact_match") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {{"GK-OA-2", "测试专利", "第一次审查意见通知书",
+                                 "2026-09-02", "2027-01-02", "李四"}});
+
+    Database db(":memory:");
+    OARecord existing;
+    existing.geke_code = "GK-OA-2";
+    existing.oa_type = "一通";
+    existing.issue_date = "2026-09-02";
+    existing.writer = "人工撰写人";
+    const int existing_id = db.InsertOA(existing);
+    CHECK(existing_id > 0);
+
+    ExcelIO io;
+    const ImportResult first = io.ImportPatents(xlsx_path, db);
+    CHECK_EQ(first.added, 0);
+    CHECK_EQ(first.updated, 1);
+
+    auto records = db.GetOAByPatent("GK-OA-2");
+    CHECK_EQ(records.size(), 1u);
+    CHECK_EQ(records.front().id, existing_id);
+    CHECK_STR_EQ(records.front().handler, "李四");
+    CHECK_STR_EQ(records.front().writer, "人工撰写人");
+
+    const ImportResult second = io.ImportPatents(xlsx_path, db);
+    CHECK_EQ(second.added, 0);
+    CHECK_EQ(second.updated, 0);
+    CHECK_EQ(second.skipped, 1);
+    records = db.GetOAByPatent("GK-OA-2");
+    CHECK_EQ(records.size(), 1u);
+
+    std::filesystem::remove(xlsx_path);
+}
