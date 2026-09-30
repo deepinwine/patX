@@ -1168,7 +1168,8 @@ bool Database::UpdateOA(int id, const OARecord& oa, bool log_undo) {
 
 OAExactMergeResult Database::MergeOAExact(const OARecord& incoming,
                                           bool fill_empty_handler,
-                                          bool log_undo) {
+                                          bool log_undo,
+                                          bool overwrite_handler_conflict) {
     auto lock = AcquireConnectionWriteLock();
     OAExactMergeResult result;
     if (incoming.geke_code.empty() || incoming.oa_type.empty() || incoming.issue_date.empty()) {
@@ -1204,11 +1205,17 @@ OAExactMergeResult Database::MergeOAExact(const OARecord& incoming,
     if (matches.size() == 1) {
         const OARecord& existing = matches.front();
         result.record_id = existing.id;
-        if (fill_empty_handler && existing.handler.empty() && !incoming.handler.empty()) {
+        const bool fills_empty_handler =
+            fill_empty_handler && existing.handler.empty() && !incoming.handler.empty();
+        const bool overwrites_handler_conflict =
+            overwrite_handler_conflict && !existing.handler.empty() &&
+            !incoming.handler.empty() && existing.handler != incoming.handler;
+        if (fills_empty_handler || overwrites_handler_conflict) {
             sqlite3_stmt* stmt = nullptr;
-            const char* sql =
-                "UPDATE oa_records SET handler = ? "
-                "WHERE id = ? AND (handler IS NULL OR handler = '')";
+            const char* sql = fills_empty_handler
+                ? "UPDATE oa_records SET handler = ? "
+                  "WHERE id = ? AND (handler IS NULL OR handler = '')"
+                : "UPDATE oa_records SET handler = ? WHERE id = ?";
             if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
                 last_error_ = sqlite3_errmsg(db_);
                 return result;
@@ -1233,6 +1240,7 @@ OAExactMergeResult Database::MergeOAExact(const OARecord& incoming,
                     OAToJson(existing), OAToJson(updated));
             }
             result.status = OAExactMergeStatus::HandlerUpdated;
+            result.overwrote_handler_conflict = overwrites_handler_conflict;
             return commit(result);
         }
 

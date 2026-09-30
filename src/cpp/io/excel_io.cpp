@@ -857,13 +857,20 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                         }
 
                         const OAExactMergeResult applied =
-                            db.MergeOAExact(planned.incoming, true);
+                            db.MergeOAExact(
+                                planned.incoming,
+                                true,
+                                true,
+                                policy == OAHandlerConflictPolicy::OverwriteWithExcel);
                         switch (applied.status) {
                             case OAExactMergeStatus::Inserted:
                                 sheet_added++;
                                 break;
                             case OAExactMergeStatus::HandlerUpdated:
                                 sheet_updated++;
+                                if (applied.overwrote_handler_conflict) {
+                                    result.handler_conflicts++;
+                                }
                                 break;
                             case OAExactMergeStatus::Unchanged:
                                 sheet_skipped++;

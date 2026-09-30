@@ -496,3 +496,226 @@ TEST(oa_excel_import_and_background_sync_share_atomic_exact_merge) {
     std::filesystem::remove(db_path + "-wal");
     std::filesystem::remove(db_path + "-shm");
 }
+
+TEST(oa_excel_import_preserves_conflicting_handler_when_requested) {
+    const std::string xlsx_path = TempDbPath("oa_handler_preserve") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-PRESERVE", "保留处理人专利", "第一次审查意见通知书",
+         "2026-09-13", "2027-01-13", "新处理人"},
+    });
+
+    Database db(":memory:");
+    OARecord existing;
+    existing.geke_code = "GK-OA-PRESERVE";
+    existing.oa_type = "一通";
+    existing.issue_date = "2026-09-13";
+    existing.handler = "旧处理人";
+    existing.writer = "人工撰写人";
+    const int existing_id = db.InsertOA(existing);
+    CHECK(existing_id > 0);
+
+    OAImportPreview preview;
+    ExcelIO io;
+    const ImportResult result = io.ImportPatents(
+        xlsx_path,
+        db,
+        nullptr,
+        [&](const OAImportPreview& value) {
+            preview = value;
+            return OAHandlerConflictPolicy::PreserveExisting;
+        }
+    );
+
+    CHECK_EQ(preview.handler_conflicts, 1);
+    CHECK_EQ(result.handler_conflicts, 1);
+    CHECK_EQ(result.added, 0);
+    CHECK_EQ(result.updated, 0);
+    CHECK_EQ(result.skipped, 1);
+    const OARecord stored = db.GetOAById(existing_id);
+    CHECK_STR_EQ(stored.handler, "旧处理人");
+    CHECK_STR_EQ(stored.writer, "人工撰写人");
+
+    std::filesystem::remove(xlsx_path);
+}
+
+TEST(oa_excel_import_overwrites_only_conflicting_handler_when_requested) {
+    const std::string xlsx_path = TempDbPath("oa_handler_overwrite") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-OVERWRITE", "覆盖处理人专利", "第一次审查意见通知书",
+         "2026-09-14", "2027-01-14", "新处理人"},
+    });
+
+    Database db(":memory:");
+    OARecord existing;
+    existing.geke_code = "GK-OA-OVERWRITE";
+    existing.oa_type = "一通";
+    existing.issue_date = "2026-09-14";
+    existing.official_deadline = "2027-01-20";
+    existing.handler = "旧处理人";
+    existing.writer = "人工撰写人";
+    existing.notes = "人工备注";
+    const int existing_id = db.InsertOA(existing);
+    CHECK(existing_id > 0);
+
+    OAImportPreview preview;
+    ExcelIO io;
+    const ImportResult result = io.ImportPatents(
+        xlsx_path,
+        db,
+        nullptr,
+        [&](const OAImportPreview& value) {
+            preview = value;
+            return OAHandlerConflictPolicy::OverwriteWithExcel;
+        }
+    );
+
+    CHECK_EQ(preview.handler_conflicts, 1);
+    CHECK_EQ(result.handler_conflicts, 1);
+    CHECK_EQ(result.added, 0);
+    CHECK_EQ(result.updated, 1);
+    CHECK_EQ(result.skipped, 0);
+    const OARecord stored = db.GetOAById(existing_id);
+    CHECK_STR_EQ(stored.handler, "新处理人");
+    CHECK_STR_EQ(stored.writer, "人工撰写人");
+    CHECK_STR_EQ(stored.notes, "人工备注");
+    CHECK_STR_EQ(stored.official_deadline, "2027-01-20");
+
+    std::filesystem::remove(xlsx_path);
+}
+
+TEST(oa_excel_import_never_clears_handler_from_blank_excel_cell) {
+    const std::string xlsx_path = TempDbPath("oa_handler_blank") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-BLANK", "空处理人专利", "第一次审查意见通知书",
+         "2026-09-15", "2027-01-15", ""},
+    });
+
+    Database db(":memory:");
+    OARecord existing;
+    existing.geke_code = "GK-OA-BLANK";
+    existing.oa_type = "一通";
+    existing.issue_date = "2026-09-15";
+    existing.handler = "旧处理人";
+    existing.writer = "人工撰写人";
+    const int existing_id = db.InsertOA(existing);
+    CHECK(existing_id > 0);
+
+    ExcelIO io;
+    const ImportResult result = io.ImportPatents(
+        xlsx_path,
+        db,
+        nullptr,
+        [](const OAImportPreview& preview) {
+            CHECK_EQ(preview.unchanged, 1);
+            return OAHandlerConflictPolicy::OverwriteWithExcel;
+        }
+    );
+
+    CHECK_EQ(result.handler_conflicts, 0);
+    CHECK_EQ(result.updated, 0);
+    CHECK_EQ(result.skipped, 1);
+    const OARecord stored = db.GetOAById(existing_id);
+    CHECK_STR_EQ(stored.handler, "旧处理人");
+    CHECK_STR_EQ(stored.writer, "人工撰写人");
+
+    std::filesystem::remove(xlsx_path);
+}
+
+TEST(oa_excel_import_cancel_writes_nothing_from_oa_sheet) {
+    const std::string xlsx_path = TempDbPath("oa_handler_cancel") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-CANCEL-UPDATE", "取消更新专利", "第一次审查意见通知书",
+         "2026-09-16", "2027-01-16", "新处理人"},
+        {"GK-OA-CANCEL-INSERT", "取消新增专利", "第二次审查意见通知书",
+         "2026-09-17", "2027-01-17", "另一处理人"},
+    });
+
+    Database db(":memory:");
+    OARecord existing;
+    existing.geke_code = "GK-OA-CANCEL-UPDATE";
+    existing.oa_type = "一通";
+    existing.issue_date = "2026-09-16";
+    existing.handler = "旧处理人";
+    existing.writer = "人工撰写人";
+    const int existing_id = db.InsertOA(existing);
+    CHECK(existing_id > 0);
+
+    ExcelIO io;
+    const ImportResult result = io.ImportPatents(
+        xlsx_path,
+        db,
+        nullptr,
+        [](const OAImportPreview& preview) {
+            CHECK_EQ(preview.added, 1);
+            CHECK_EQ(preview.handler_conflicts, 1);
+            return OAHandlerConflictPolicy::CancelImport;
+        }
+    );
+
+    CHECK(result.cancelled);
+    CHECK_EQ(result.added, 0);
+    CHECK_EQ(result.updated, 0);
+    CHECK_EQ(result.skipped, 2);
+    CHECK_EQ(db.GetOARecords().size(), 1u);
+    const OARecord stored = db.GetOAById(existing_id);
+    CHECK_STR_EQ(stored.handler, "旧处理人");
+    CHECK_STR_EQ(stored.writer, "人工撰写人");
+    CHECK(db.GetOAByPatent("GK-OA-CANCEL-INSERT").empty());
+
+    std::filesystem::remove(xlsx_path);
+}
+
+TEST(oa_excel_import_never_overwrites_ambiguous_exact_matches) {
+    const std::string xlsx_path = TempDbPath("oa_handler_match_conflict") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-MULTI", "重复匹配专利", "第一次审查意见通知书",
+         "2026-09-18", "2027-01-18", "新处理人"},
+    });
+
+    Database db(":memory:");
+    OARecord first;
+    first.geke_code = "GK-OA-MULTI";
+    first.oa_type = "一通";
+    first.issue_date = "2026-09-18";
+    first.handler = "旧处理人甲";
+    first.writer = "撰写人甲";
+    const int first_id = db.InsertOA(first);
+    CHECK(first_id > 0);
+
+    OARecord second = first;
+    second.oa_type = "第一次审查意见通知书";
+    second.handler = "旧处理人乙";
+    second.writer = "撰写人乙";
+    const int second_id = db.InsertOA(second);
+    CHECK(second_id > 0);
+
+    OAImportPreview preview;
+    ExcelIO io;
+    const ImportResult result = io.ImportPatents(
+        xlsx_path,
+        db,
+        nullptr,
+        [&](const OAImportPreview& value) {
+            preview = value;
+            return OAHandlerConflictPolicy::OverwriteWithExcel;
+        }
+    );
+
+    CHECK_EQ(preview.match_conflicts, 1);
+    CHECK_EQ(result.match_conflicts, 1);
+    CHECK_EQ(result.handler_conflicts, 0);
+    CHECK_EQ(result.added, 0);
+    CHECK_EQ(result.updated, 0);
+    CHECK_EQ(result.skipped, 1);
+    CHECK_STR_EQ(db.GetOAById(first_id).handler, "旧处理人甲");
+    CHECK_STR_EQ(db.GetOAById(first_id).writer, "撰写人甲");
+    CHECK_STR_EQ(db.GetOAById(second_id).handler, "旧处理人乙");
+    CHECK_STR_EQ(db.GetOAById(second_id).writer, "撰写人乙");
+
+    std::filesystem::remove(xlsx_path);
+}

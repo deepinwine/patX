@@ -262,6 +262,7 @@ enum class OAExactMergeStatus {
 struct OAExactMergeResult {
     OAExactMergeStatus status = OAExactMergeStatus::Error;
     int record_id = 0;
+    bool overwrote_handler_conflict = false;
 };
 
 class Database {
@@ -300,10 +301,12 @@ public:
     int InsertOA(const OARecord& oa, bool log_undo = true);
     bool UpdateOA(int id, const OARecord& oa, bool log_undo = true);
     // Atomically merges a complete OA identity (code + canonical type + issue date).
-    // Handler is filled only while the stored value is still empty.
+    // Handler normally fills only an empty stored value; an explicitly authorized
+    // conflict overwrite still changes only that one field.
     OAExactMergeResult MergeOAExact(const OARecord& incoming,
                                     bool fill_empty_handler,
-                                    bool log_undo = true);
+                                    bool log_undo = true,
+                                    bool overwrite_handler_conflict = false);
     bool DeleteOA(int id, bool log_undo = true);
     bool MarkOACompleted(int id);
     // Finds a synced OA record by its USPTO document identifier (0 if absent).
