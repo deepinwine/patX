@@ -751,6 +751,9 @@ private:
                     patent_list->SetItem(idx, 23, DB_STR(st.latest_deadline));
                     if (st.latest_completed) {
                         patent_list->SetItem(idx, 24, UTF8_STR("已完成"));
+                    } else if (IsClosedStatus(p.application_status)) {
+                        // 结案案件的未完成 OA 不展示逾期（与状态矛盾）
+                        patent_list->SetItem(idx, 24, UTF8_STR("已结案"));
                     } else {
                         wxDateTime dl;
                         if (dl.ParseFormat(st.latest_deadline.c_str(), "%Y-%m-%d") &&
@@ -1238,6 +1241,19 @@ private:
         return t;
     }
 
+    // 结案/终局状态：授权、已获证书、驳回、放弃、失效、撤回、视撤、终止。
+    // 这些案件的未完成 OA 不再按逾期展示（与结案状态矛盾），也不计入
+    // 临期统计——需要行动的期限（如驳回后复审）另有专门规则。
+    static bool IsClosedStatus(const std::string& status) {
+        static const char* markers[] = {"授权", "已获证书", "Granted", "驳回",
+                                        "放弃", "失效", "撤回", "视撤", "终止",
+                                        "结案"};
+        for (const char* m : markers) {
+            if (status.find(m) != std::string::npos) return true;
+        }
+        return false;
+    }
+
     struct PatentOAState {
         std::string latest_type;     // 最新官方发文（按发文日）
         std::string latest_date;
@@ -1347,6 +1363,8 @@ private:
                 if (oa.is_completed) {
                     days_str = UTF8_STR("已完成");
                     list->SetItemBackgroundColour(idx, wxColour(200, 255, 200));
+                } else if (IsClosedStatus(p.application_status)) {
+                    days_str = UTF8_STR("已结案");
                 } else if (!oa.official_deadline.empty()) {
                     wxDateTime dl;
                     if (dl.ParseFormat(oa.official_deadline.c_str(), "%Y-%m-%d") && dl.IsValid()) {
