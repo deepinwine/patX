@@ -54,6 +54,7 @@ struct PlannedOAImport {
     OARecord incoming;
     OAImportAction action = OAImportAction::Insert;
     bool sheet_handler_conflict = false;
+    size_t represented_rows = 1;
 };
 
 struct OAImportPlan {
@@ -134,7 +135,9 @@ OAImportPlan BuildOAImportPlan(const std::vector<OARecord>& incoming_rows, Datab
         if (classified.action == OAImportAction::MatchConflict) {
             for (size_t index : indices) {
                 plan.rows[index].action = OAImportAction::MatchConflict;
+                plan.rows[index].represented_rows = 0;
             }
+            plan.rows[primary_index].represented_rows = indices.size();
             continue;
         }
         if (incoming_handlers.size() > 1) {
@@ -146,13 +149,17 @@ OAImportPlan BuildOAImportPlan(const std::vector<OARecord>& incoming_rows, Datab
         }
 
         plan.rows[primary_index] = std::move(classified);
+        plan.rows[primary_index].represented_rows = indices.size();
 
         const OAImportAction duplicate_action =
             plan.rows[primary_index].action == OAImportAction::HandlerConflict
                 ? OAImportAction::HandlerConflict
                 : OAImportAction::Unchanged;
         for (size_t index : indices) {
-            if (index != primary_index) plan.rows[index].action = duplicate_action;
+            if (index != primary_index) {
+                plan.rows[index].action = duplicate_action;
+                plan.rows[index].represented_rows = 0;
+            }
         }
     }
 
@@ -844,6 +851,9 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                     if (reviewed) plan = BuildOAImportPlan(incoming_rows, db);
                     db.BeginBatch();
                     for (const auto& planned : plan.rows) {
+                        if (planned.represented_rows == 0) continue;
+                        const int represented_rows =
+                            static_cast<int>(planned.represented_rows);
                         if (planned.sheet_handler_conflict) {
                             result.handler_conflicts++;
                             sheet_skipped++;
@@ -865,26 +875,28 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                         switch (applied.status) {
                             case OAExactMergeStatus::Inserted:
                                 sheet_added++;
+                                sheet_skipped += represented_rows - 1;
                                 break;
                             case OAExactMergeStatus::HandlerUpdated:
                                 sheet_updated++;
+                                sheet_skipped += represented_rows - 1;
                                 if (applied.overwrote_handler_conflict) {
-                                    result.handler_conflicts++;
+                                    result.handler_conflicts += represented_rows;
                                 }
                                 break;
                             case OAExactMergeStatus::Unchanged:
-                                sheet_skipped++;
+                                sheet_skipped += represented_rows;
                                 break;
                             case OAExactMergeStatus::HandlerConflict:
-                                result.handler_conflicts++;
-                                sheet_skipped++;
+                                result.handler_conflicts += represented_rows;
+                                sheet_skipped += represented_rows;
                                 break;
                             case OAExactMergeStatus::MatchConflict:
-                                result.match_conflicts++;
-                                sheet_skipped++;
+                                result.match_conflicts += represented_rows;
+                                sheet_skipped += represented_rows;
                                 break;
                             case OAExactMergeStatus::Error:
-                                result.errors++;
+                                result.errors += represented_rows;
                                 break;
                         }
                     }

@@ -719,3 +719,49 @@ TEST(oa_excel_import_never_overwrites_ambiguous_exact_matches) {
 
     std::filesystem::remove(xlsx_path);
 }
+
+TEST(oa_excel_import_counts_duplicate_overwrite_conflicts_per_excel_row) {
+    const std::string xlsx_path = TempDbPath("oa_handler_duplicate_overwrite") + ".xlsx";
+    std::filesystem::remove(xlsx_path);
+    WriteOAWorkbook(xlsx_path, {
+        {"GK-OA-DUP-OVERWRITE", "重复覆盖专利", "第一次审查意见通知书",
+         "2026-09-19", "2027-01-19", "新处理人"},
+        {"GK-OA-DUP-OVERWRITE", "重复覆盖专利", "一通",
+         "2026-09-19", "2027-01-19", "新处理人"},
+    });
+
+    Database db(":memory:");
+    OARecord existing;
+    existing.geke_code = "GK-OA-DUP-OVERWRITE";
+    existing.oa_type = "一通";
+    existing.issue_date = "2026-09-19";
+    existing.handler = "旧处理人";
+    existing.writer = "人工撰写人";
+    const int existing_id = db.InsertOA(existing);
+    CHECK(existing_id > 0);
+
+    OAImportPreview preview;
+    ExcelIO io;
+    const ImportResult result = io.ImportPatents(
+        xlsx_path,
+        db,
+        nullptr,
+        [&](const OAImportPreview& value) {
+            preview = value;
+            return OAHandlerConflictPolicy::OverwriteWithExcel;
+        }
+    );
+
+    CHECK_EQ(preview.handler_conflicts, 2);
+    CHECK_EQ(result.handler_conflicts, 2);
+    CHECK_EQ(result.added, 0);
+    CHECK_EQ(result.updated, 1);
+    CHECK_EQ(result.skipped, 1);
+    const auto records = db.GetOAByPatent("GK-OA-DUP-OVERWRITE");
+    CHECK_EQ(records.size(), 1u);
+    CHECK_EQ(records.front().id, existing_id);
+    CHECK_STR_EQ(records.front().handler, "新处理人");
+    CHECK_STR_EQ(records.front().writer, "人工撰写人");
+
+    std::filesystem::remove(xlsx_path);
+}
