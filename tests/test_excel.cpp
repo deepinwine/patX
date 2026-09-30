@@ -11,6 +11,18 @@
 
 using namespace testutil;
 
+static void WriteOAWorkbook(
+    const std::string& path,
+    const std::vector<std::vector<std::string>>& rows
+) {
+    ExcelIO io;
+    ExportTable table;
+    table.sheet_name = "OA";
+    table.headers = {"编号", "专利名称", "OA类型", "发文日", "官方期限", "处理人"};
+    table.rows = rows;
+    CHECK(io.ExportXlsx(table, path));
+}
+
 TEST(excel_export_writes_real_xlsx) {
     std::string path = TempDbPath("export.xlsx");
     {
@@ -104,3 +116,42 @@ TEST(excel_import_csv_into_structured_fields) {
     std::filesystem::remove(db_path);
 }
 
+TEST(oa_excel_import_previews_and_adds_new_handler) {
+    const std::string xlsx_path = TempDbPath("oa_import_preview") + ".xlsx";
+    const std::string db_path = TempDbPath("oa_import_preview");
+    std::filesystem::remove(xlsx_path);
+    std::filesystem::remove(db_path);
+    WriteOAWorkbook(xlsx_path, {{"GK-OA-1", "OA 导入专利", "第一次审查意见通知书",
+                                 "2026-09-01", "2027-01-01", "新处理人"}});
+
+    int review_calls = 0;
+    OAImportPreview preview;
+    ImportResult result;
+    std::vector<OARecord> records;
+    {
+        Database db(db_path);
+        ExcelIO io;
+        result = io.ImportPatents(
+            xlsx_path,
+            db,
+            nullptr,
+            [&](const OAImportPreview& value) {
+                review_calls++;
+                preview = value;
+                return OAHandlerConflictPolicy::PreserveExisting;
+            }
+        );
+        records = db.GetOARecords();
+    }
+
+    std::filesystem::remove(xlsx_path);
+    std::filesystem::remove(db_path);
+    std::filesystem::remove(db_path + "-wal");
+    std::filesystem::remove(db_path + "-shm");
+
+    CHECK_EQ(review_calls, 1);
+    CHECK_EQ(preview.added, 1);
+    CHECK_EQ(result.added, 1);
+    CHECK_EQ(records.size(), 1u);
+    CHECK_STR_EQ(records.front().handler, "新处理人");
+}

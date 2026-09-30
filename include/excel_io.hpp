@@ -25,11 +25,31 @@ struct SheetInfo {
     int cols;
 };
 
+enum class OAHandlerConflictPolicy {
+    PreserveExisting,
+    OverwriteWithExcel,
+    CancelImport
+};
+
+struct OAImportPreview {
+    int added = 0;
+    int handler_updates = 0;
+    int unchanged = 0;
+    int handler_conflicts = 0;
+    int match_conflicts = 0;
+};
+
+using OAImportReviewCallback =
+    std::function<OAHandlerConflictPolicy(const OAImportPreview&)>;
+
 struct ImportResult {
     int added = 0;
     int updated = 0;
     int skipped = 0;
     int errors = 0;
+    int handler_conflicts = 0;
+    int match_conflicts = 0;
+    bool cancelled = false;
     std::string type_summary; // summary of what was imported per sheet type
     std::vector<std::string> error_messages;
 };
@@ -59,7 +79,8 @@ public:
     ImportResult ImportPatents(
         const std::string& file_path,
         Database& db,
-        std::function<bool(int, int)> progress_callback = nullptr
+        std::function<bool(int, int)> progress_callback = nullptr,
+        OAImportReviewCallback oa_review_callback = nullptr
     );
 
     // Module-agnostic exports. The extension of file_path selects the format.
@@ -97,7 +118,8 @@ public:
     ImportResult ImportPatentsFromXlsx(
         const std::string& file_path,
         Database& db,
-        std::function<bool(int, int)> progress_callback
+        std::function<bool(int, int)> progress_callback,
+        OAImportReviewCallback oa_review_callback = nullptr
     );
 
     static std::vector<std::string> ParseCsvLine(const std::string& line);

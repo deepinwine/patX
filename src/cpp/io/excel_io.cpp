@@ -458,14 +458,16 @@ int ExcelIO::MapForeignColumnToField(const std::string& column_name) {
 ImportResult ExcelIO::ImportPatents(
     const std::string& file_path,
     Database& db,
-    std::function<bool(int, int)> progress_callback
+    std::function<bool(int, int)> progress_callback,
+    OAImportReviewCallback oa_review_callback
 ) {
     ImportResult result;
     try {
         if (IsCsvFile(file_path)) {
             result = ImportPatentsFromCsv(file_path, db, progress_callback);
         } else if (IsExcelFile(file_path)) {
-            result = ImportPatentsFromXlsx(file_path, db, progress_callback);
+            result = ImportPatentsFromXlsx(
+                file_path, db, progress_callback, oa_review_callback);
         } else {
             last_error_ = "Unsupported file format";
         }
@@ -578,8 +580,10 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
 ImportResult ExcelIO::ImportPatentsFromXlsx(
     const std::string& file_path,
     Database& db,
-    std::function<bool(int, int)> progress_callback
+    std::function<bool(int, int)> progress_callback,
+    OAImportReviewCallback oa_review_callback
 ) {
+    (void)oa_review_callback;
     ImportResult result;
 
     try {
@@ -1339,4 +1343,3 @@ ExcelIO& GetExcelIO() {
     static ExcelIO instance;
     return instance;
 }
-
