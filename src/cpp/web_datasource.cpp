@@ -22,7 +22,7 @@ namespace uspto {
 
 namespace {
 
-// ---- SHA-256（公有域写法，避免引入 OpenSSL 依赖）----
+// ---- SHA-256（公有域写法，避免引入 OpenSSL 依赖；供 USPTO 层复用）----
 struct Sha256Ctx {
     uint32_t state[8];
     uint64_t bitlen;
@@ -456,6 +456,9 @@ ParseResult NativeUsptoClient::FetchDocuments(
     }
     return ParseFamilyJson(body, application_number, publication_number);
 }
+
+// 供 USPTO ODP 层复用的导出口径（实现在上方匿名命名空间）
+std::string ExportSha256Hex(const std::string& input) { return Sha256Hex(input); }
 
 } // namespace uspto
 } // namespace webdossier

@@ -97,6 +97,7 @@ add_library(patx_core STATIC
     src/cpp/database/schema_migrations.cpp
     src/cpp/deadline_engine.cpp
     src/cpp/web_datasource.cpp
+    src/cpp/web_datasource_uspto.cpp
     src/cpp/io/excel_io.cpp
     src/cpp/web_dossier_rules.cpp
 )

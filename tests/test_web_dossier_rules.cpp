@@ -564,9 +564,101 @@ static void TestLiveNativeFetch() {
     CHECK(!parsed.documents.empty());
 }
 
+
+// ---------------------------------------------------------------------------
+// USPTO ODP 原生层：事件分类 / 解析 / fixture 对拍
+// ---------------------------------------------------------------------------
+#include "web_datasource_uspto.hpp"
+
+static std::string ReadFileOrEmpty(const std::string& path) {
+    std::ifstream in(path);
+    if (!in.is_open()) return "";
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+}
+
+static void TestUsptoOdp() {
+    using namespace webdossier::uspto_odp;
+    const std::string fixture_dir = TOOLS_FIXTURE_DIR "/uspto_odp/";
+
+    // —— 事件分类 ——
+    auto nf = ClassifyUsEvent("MCTNF", "Mail Non-Final Rejection (PTOL - 326)");
+    CHECK(nf.is_official && nf.is_remindable && nf.is_mail_variant);
+    CHECK_STR_EQ(nf.title, "Non-Final Office Action");
+    auto fr = ClassifyUsEvent("CTFR", "Final Rejection");
+    CHECK_STR_EQ(fr.title, "Final Office Action");
+    CHECK(!fr.is_mail_variant);
+    auto res = ClassifyUsEvent("MCTRS", "Mail Restriction Requirement");
+    CHECK_STR_EQ(res.title, "Restriction Requirement");
+    auto noa = ClassifyUsEvent("MN/=.", "Mail Notice of Allowance");
+    CHECK_STR_EQ(noa.document_type, "GRANT_NOTICE");
+    auto rsp = ClassifyUsEvent("A...", "Response after Non-Final Action");
+    CHECK(!rsp.is_official);          // 申请人事件（答复证据）
+    auto rce = ClassifyUsEvent("RCEX", "Request for Continued Examination (RCE)");
+    CHECK(!rce.is_official);
+    auto dock = ClassifyUsEvent("DOCK", "Case Docketed to Examiner in GAU");
+    CHECK(dock.is_official && !dock.is_remindable);   // 流程事件不建提醒
+
+    // —— 申请号规范 ——
+    CHECK_STR_EQ(NormalizeUsAppNumber("US 17/469,033"), "17469033");
+    CHECK(NormalizeUsAppNumber("12345").empty());
+
+    // —— OA 案件 fixture：完整审查轨迹 ——
+    {
+        std::string body = ReadFileOrEmpty(fixture_dir + "application_18012345.json");
+        CHECK(!body.empty());
+        auto parsed = ParseApplicationJson(body, "18012345");
+        CHECK_STR_EQ(parsed.code, "OK");
+        CHECK(parsed.documents.size() == 3);   // 限制要求 + Non-Final + Final
+        CHECK_STR_EQ(parsed.documents[0].document_title, "Restriction Requirement");
+        CHECK_STR_EQ(parsed.documents[1].document_title, "Non-Final Office Action");
+        CHECK_STR_EQ(parsed.documents[1].official_date, "2025-08-28");
+        CHECK_STR_EQ(parsed.documents[2].document_title, "Final Office Action");
+        CHECK_STR_EQ(parsed.documents[2].official_date, "2026-05-04");
+        // Mail 变体日期优先；record 变体（08-26 CTNF）被去重
+        // RCE 2026-08-04 晚于 Final OA → 已答复证据
+        CHECK_STR_EQ(parsed.latest_applicant_activity, "2026-08-04");
+        CHECK_STR_EQ(parsed.status_description.substr(0, 8), "Docketed");
+    }
+
+    // —— 授权案件 fixture ——
+    {
+        std::string body = ReadFileOrEmpty(
+            fixture_dir + "application_17248024_allowance.json");
+        CHECK(!body.empty());
+        auto parsed = ParseApplicationJson(body, "17248024");
+        CHECK_STR_EQ(parsed.code, "OK");
+        // 原始 NOA(01-03) 与 Corrected NOA(01-13) 是两次独立发文，各留一条
+        CHECK(parsed.documents.size() == 2);
+        CHECK_STR_EQ(parsed.documents[0].document_title, "Notice of Allowance");
+        CHECK_STR_EQ(parsed.documents[0].official_date, "2023-01-03");
+        CHECK_STR_EQ(parsed.documents[1].official_date, "2023-01-13");
+        CHECK_STR_EQ(parsed.status_description, "Patented Case");
+    }
+
+    // —— 错误形态 ——
+    CHECK_STR_EQ(ParseApplicationJson(
+        "{\"message\":\"Missing Authentication Token\"}", "1").code, "AUTH_ERROR");
+    CHECK_STR_EQ(ParseApplicationJson("{\"count\":0}", "1").code, "CASE_NOT_FOUND");
+
+    // —— 真联网自检（PATX_LIVE_USPTO_ODP=1 + PATX_USPTO_KEY）——
+    if (getenv("PATX_LIVE_USPTO_ODP") && getenv("PATX_USPTO_KEY")) {
+        NativeUsptoOdpClient client(getenv("PATX_USPTO_KEY"));
+        auto parsed = client.FetchCase("17/469,033");
+        std::cout << "[live-odp] code=" << parsed.code
+                  << " events=" << parsed.documents.size()
+                  << " status=" << parsed.status_description.substr(0, 20)
+                  << std::endl;
+        CHECK(parsed.code == "OK");
+        CHECK(parsed.code == "OK" && !parsed.documents.empty());
+    }
+}
+
 int main() {
     TestNormalizeOaType();
     TestNativeUspto();
+    TestUsptoOdp();
     TestLiveNativeFetch();
     TestQueueFilter();
     TestFingerprintDedup();

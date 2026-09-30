@@ -77,5 +77,8 @@ private:
     FetchJson fetch_;
 };
 
+// SHA-256 十六进制（USPTO ODP 层复用；跨文件共享口径）
+std::string ExportSha256Hex(const std::string& input);
+
 } // namespace uspto
 } // namespace webdossier

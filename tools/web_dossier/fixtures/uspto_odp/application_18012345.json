@@ -1,0 +1,248 @@
+{
+ "patentFileWrapperDataBag": [
+  {
+   "applicationNumberText": "18012345",
+   "applicationMetaData": {
+    "filingDate": "2022-12-22",
+    "grantDate": null,
+    "applicationStatusDescriptionText": "Docketed New Case - Ready for Examination",
+    "inventionTitle": "PROCESS FOR TREATING KERATIN FIBRES, COMPRISING THE APPLICATION OF A MAKEUP-REMOVING COMPOSITION, THE KERATIN FIBRES HAVING BEEN DYED BEFOREHAND",
+    "earliestPublicationNumber": "US20230263721A1",
+    "patentNumber": null
+   },
+   "eventDataBag": [
+    {
+     "eventCode": "FWDX",
+     "eventDescriptionText": "Date Forwarded to Examiner",
+     "eventDate": "2026-08-05"
+    },
+    {
+     "eventCode": "RCEX",
+     "eventDescriptionText": "Request for Continued Examination (RCE)",
+     "eventDate": "2026-08-04"
+    },
+    {
+     "eventCode": "ABN9",
+     "eventDescriptionText": "Disposal for a RCE / CPA / R129",
+     "eventDate": "2026-08-05"
+    },
+    {
+     "eventCode": "BRCE",
+     "eventDescriptionText": "Workflow - Request for RCE - Begin",
+     "eventDate": "2026-08-04"
+    },
+    {
+     "eventCode": "ELC_RVW",
+     "eventDescriptionText": "Electronic Review",
+     "eventDate": "2026-05-04"
+    },
+    {
+     "eventCode": "EML_NTF",
+     "eventDescriptionText": "Email Notification",
+     "eventDate": "2026-05-04"
+    },
+    {
+     "eventCode": "MCTFR",
+     "eventDescriptionText": "Mail Final Rejection (PTOL - 326)",
+     "eventDate": "2026-05-04"
+    },
+    {
+     "eventCode": "CTFR",
+     "eventDescriptionText": "Final Rejection",
+     "eventDate": "2026-04-30"
+    },
+    {
+     "eventCode": "FWDX",
+     "eventDescriptionText": "Date Forwarded to Examiner",
+     "eventDate": "2026-01-12"
+    },
+    {
+     "eventCode": "A...",
+     "eventDescriptionText": "Response after Non-Final Action",
+     "eventDate": "2025-12-29"
+    },
+    {
+     "eventCode": "XT/G",
+     "eventDescriptionText": "Request for Extension of Time - Granted",
+     "eventDate": "2025-12-29"
+    },
+    {
+     "eventCode": "ELC_RVW",
+     "eventDescriptionText": "Electronic Review",
+     "eventDate": "2025-08-28"
+    },
+    {
+     "eventCode": "EML_NTF",
+     "eventDescriptionText": "Email Notification",
+     "eventDate": "2025-08-28"
+    },
+    {
+     "eventCode": "MCTNF",
+     "eventDescriptionText": "Mail Non-Final Rejection",
+     "eventDate": "2025-08-28"
+    },
+    {
+     "eventCode": "CTNF",
+     "eventDescriptionText": "Non-Final Rejection",
+     "eventDate": "2025-08-26"
+    },
+    {
+     "eventCode": "IDSC",
+     "eventDescriptionText": "Information Disclosure Statement considered",
+     "eventDate": "2025-08-26"
+    },
+    {
+     "eventCode": "FWDX",
+     "eventDescriptionText": "Date Forwarded to Examiner",
+     "eventDate": "2025-07-28"
+    },
+    {
+     "eventCode": "ELC.",
+     "eventDescriptionText": "Response to Election / Restriction Filed",
+     "eventDate": "2025-07-23"
+    },
+    {
+     "eventCode": "ELC_RVW",
+     "eventDescriptionText": "Electronic Review",
+     "eventDate": "2025-06-06"
+    },
+    {
+     "eventCode": "EML_NTF",
+     "eventDescriptionText": "Email Notification",
+     "eventDate": "2025-06-06"
+    },
+    {
+     "eventCode": "MCTRS",
+     "eventDescriptionText": "Mail Restriction Requirement",
+     "eventDate": "2025-06-06"
+    },
+    {
+     "eventCode": "CTRS",
+     "eventDescriptionText": "Restriction/Election Requirement",
+     "eventDate": "2025-06-04"
+    },
+    {
+     "eventCode": "DOCK",
+     "eventDescriptionText": "Case Docketed to Examiner in GAU",
+     "eventDate": "2025-03-30"
+    },
+    {
+     "eventCode": "M844",
+     "eventDescriptionText": "Information Disclosure Statement (IDS) Filed",
+     "eventDate": "2023-03-01"
+    },
+    {
+     "eventCode": "EML_NTR",
+     "eventDescriptionText": "Email Notification",
+     "eventDate": "2023-08-24"
+    },
+    {
+     "eventCode": "CCRDY",
+     "eventDescriptionText": "Application ready for PDX access by participating foreign offices",
+     "eventDate": "2023-08-24"
+    },
+    {
+     "eventCode": "PG-ISSUE",
+     "eventDescriptionText": "PG-Pub Issue Notification",
+     "eventDate": "2023-08-24"
+    },
+    {
+     "eventCode": "RQPR",
+     "eventDescriptionText": "Request for Foreign Priority (Priority Papers May Be Included)",
+     "eventDate": "2022-12-22"
+    },
+    {
+     "eventCode": "RQPR",
+     "eventDescriptionText": "Request for Foreign Priority (Priority Papers May Be Included)",
+     "eventDate": "2022-12-22"
+    },
+    {
+     "eventCode": "DOCK",
+     "eventDescriptionText": "Case Docketed to Examiner in GAU",
+     "eventDate": "2023-05-22"
+    },
+    {
+     "eventCode": "COMP",
+     "eventDescriptionText": "Application Is Now Complete",
+     "eventDate": "2023-05-22"
+    },
+    {
+     "eventCode": "OIPE",
+     "eventDescriptionText": "Application Dispatched from OIPE",
+     "eventDate": "2023-05-22"
+    },
+    {
+     "eventCode": "FTFS",
+     "eventDescriptionText": "FITF set to YES - revise initial setting",
+     "eventDate": "2023-05-19"
+    },
+    {
+     "eventCode": "ELC_RVW",
+     "eventDescriptionText": "Electronic Review",
+     "eventDate": "2023-05-16"
+    },
+    {
+     "eventCode": "ELC_RVW",
+     "eventDescriptionText": "Electronic Review",
+     "eventDate": "2023-05-16"
+    },
+    {
+     "eventCode": "EML_NTR",
+     "eventDescriptionText": "Email Notification",
+     "eventDate": "2023-05-16"
+    },
+    {
+     "eventCode": "371COMP",
+     "eventDescriptionText": "371 Completion Date",
+     "eventDate": "2022-12-22"
+    },
+    {
+     "eventCode": "PGPC",
+     "eventDescriptionText": "Sent to Classification Contractor",
+     "eventDate": "2023-05-15"
+    },
+    {
+     "eventCode": "PTA.RFE",
+     "eventDescriptionText": "Patent Term Adjustment - Ready for Examination",
+     "eventDate": "2022-12-22"
+    },
+    {
+     "eventCode": "M903",
+     "eventDescriptionText": "Notice of DO/EO Acceptance Mailed",
+     "eventDate": "2023-05-16"
+    },
+    {
+     "eventCode": "FLRCPT.O",
+     "eventDescriptionText": "Filing Receipt",
+     "eventDate": "2023-05-16"
+    },
+    {
+     "eventCode": "SREXR141",
+     "eventDescriptionText": "PTO/SB/69-Authorize EPO Access to Search Results",
+     "eventDate": "2022-12-22"
+    },
+    {
+     "eventCode": "APPERMS",
+     "eventDescriptionText": "Applicants have given acceptable permission for participating foreign",
+     "eventDate": "2022-12-22"
+    },
+    {
+     "eventCode": "WIDS",
+     "eventDescriptionText": "Information Disclosure Statement (IDS) Filed",
+     "eventDate": "2023-03-01"
+    },
+    {
+     "eventCode": "BIG.",
+     "eventDescriptionText": "Entity Status Set To Undiscounted (Initial Default Setting or Status Change)",
+     "eventDate": "2022-12-22"
+    },
+    {
+     "eventCode": "IEXX",
+     "eventDescriptionText": "Initial Exam Team nn",
+     "eventDate": "2022-12-22"
+    }
+   ]
+  }
+ ],
+ "count": 1
+}
