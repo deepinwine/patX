@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <set>
 #include <tuple>
 
@@ -33,20 +34,36 @@ static bool IsBatchAbortingCode(ResultCode c) {
 
 class SidecarProcess {
 public:
-    ~SidecarProcess() { Shutdown(); }
+    ~SidecarProcess() {
+        if (state_) state_->owner_gone = true;
+        Shutdown();
+    }
 
     // command must be fully resolved (absolute script path) - no shell, no
     // cwd change (that would break the GUI's relative database paths).
     bool Start(const std::string& command, std::string& error) {
         if (process_) return true;
-        process_ = wxProcess::Open(wxString::FromUTF8(command.c_str()));
-        if (!process_) {
+        state_ = std::make_shared<State>();
+        auto* proc = new PatxProcess(this, state_);
+        long pid = wxExecute(wxString::FromUTF8(command.c_str()),
+                             wxEXEC_ASYNC, proc);
+        if (pid == 0) {
+            delete proc;   // 未启动成功，wx 不会接管
             error = "无法启动 sidecar 进程: " + command;
             return false;
         }
+        process_ = proc;
         in_ = process_->GetInputStream();     // sidecar stdout
         out_ = process_->GetOutputStream();   // sidecar stdin
         return true;
+    }
+
+    // 子进程退出回调（wx 在主事件循环里调用；随后 wx 会自行 delete
+    // PatxProcess——所以这里绝不能 delete，只清指针）
+    void OnChildExited() {
+        process_ = nullptr;
+        in_ = nullptr;
+        out_ = nullptr;
     }
 
     bool Call(const std::string& line_request, int timeout_ms, std::string& line_response,
@@ -80,24 +97,50 @@ public:
     }
 
     void Shutdown() {
-        if (process_) {
-            // best effort graceful stop, then detach
-            if (out_) {
-                out_->Write("{\"op\":\"shutdown\"}\n", 19);
-                wxMilliSleep(300);
-            }
-            delete process_;   // closes pipes; child gets EOF
-            process_ = nullptr;
-            in_ = nullptr;
-            out_ = nullptr;
+        if (!process_) return;
+        // 优雅关闭：让子进程自己退出。绝不 delete process_——
+        // wx 会在 OnTerminate 之后自行回收，手动删会造成双释放
+        // （Refresh 后事件循环处理子进程退出通知时 SIGSEGV 的根因）
+        if (out_) {
+            out_->Write("{\"op\":\"shutdown\"}\n", 19);
+            for (int i = 0; i < 10 && process_; ++i) wxMilliSleep(100);
         }
+        if (process_) {
+            // 没在 1 秒内退出：发信号终止，对象仍交给 wx 回收
+            long pid = process_->GetPid();
+            if (pid > 0) wxProcess::Kill(pid, wxSIGTERM);
+        }
+        process_ = nullptr;   // 只清本侧指针；OnTerminate 里不会再碰
+        in_ = nullptr;
+        out_ = nullptr;
     }
 
 private:
+    struct State {
+        std::atomic<bool> owner_gone{false};
+    };
+
+    // wxProcess 子类：接收子进程退出通知。OnTerminate 返回后 wx 会
+    // delete 本对象——所有字段生命周期由 wx 管理，我们只持有指针。
+    class PatxProcess : public wxProcess {
+    public:
+        PatxProcess(SidecarProcess* owner, std::shared_ptr<State> state)
+            : owner_(owner), state_(std::move(state)) {}
+
+        void OnTerminate(int, int) override {
+            if (!state_->owner_gone.load()) owner_->OnChildExited();
+        }
+
+    private:
+        SidecarProcess* owner_;
+        std::shared_ptr<State> state_;
+    };
+
     wxProcess* process_ = nullptr;
     wxInputStream* in_ = nullptr;
     wxOutputStream* out_ = nullptr;
     std::string buffer_;
+    std::shared_ptr<State> state_;
 };
 
 // ---------------------------------------------------------------------------
