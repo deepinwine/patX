@@ -125,7 +125,8 @@ private:
     class PatxProcess : public wxProcess {
     public:
         PatxProcess(SidecarProcess* owner, std::shared_ptr<State> state)
-            : owner_(owner), state_(std::move(state)) {}
+            : wxProcess(wxPROCESS_REDIRECT), owner_(owner),
+              state_(std::move(state)) {}
 
         void OnTerminate(int, int) override {
             if (!state_->owner_gone.load()) owner_->OnChildExited();

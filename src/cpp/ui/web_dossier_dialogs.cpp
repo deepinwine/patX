@@ -1,4 +1,6 @@
 #include "ui/web_dossier_dialogs.hpp"
+
+#include "patx/log.hpp"
 #include "ui/epo_family_dialog.hpp"
 
 #include <wx/filename.h>
@@ -348,11 +350,11 @@ WebDossierController::~WebDossierController() {
 
 bool WebDossierController::EnsureManager(std::string& error) {
     if (!manager_) manager_ = std::make_unique<webdossier::Manager>(db_, ResolveScriptDir());
-    // Python 侧车缺失不再阻断：原生 C++ USPTO 层照常工作；
-    // 只有需要 CNIPA/EPO 降级时该错误才会在单件结果里体现。
+    // Python 侧车缺失不再阻断也不弹窗（便携主包本就没有 Python）：
+    // 原生 C++ USPTO 层照常工作；只有用户真正触发 CNIPA/EPO 相关操作时，
+    // 单件结果里才会出现相应提示。这里只记日志。
     if (!manager_->EnsureRunning(error)) {
-        wxLogWarning("dossier sidecar unavailable (native USPTO only): %s",
-                     error.c_str());
+        PATX_LOG_INFO("dossier sidecar unavailable, native USPTO only: " + error);
     }
     return true;
 }
