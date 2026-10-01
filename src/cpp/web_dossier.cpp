@@ -139,17 +139,20 @@ bool Manager::EnsureRunning(std::string& error) {
     std::lock_guard<std::mutex> lock(rpc_mutex_);
     if (!sidecar_ && transport_factory_) sidecar_ = transport_factory_();
     if (!sidecar_) {
-        error = "无法创建 sidecar transport";
+        error = "无法创建 sidecar transport，请重启 patX 后重试";
         return false;
     }
+    const auto discard_transport = [this] {
+        sidecar_->Shutdown();
+        sidecar_.reset();
+    };
     std::string python = db_.GetConfig("web_dossier_python");
     if (python.empty()) python = "python3";
     // script_dir_ is the absolute path of tools/web_dossier (resolved by the
     // GUI next to the executable, falling back to the working directory).
     std::string command = python + " \"" + script_dir_ + "/service.py\"";
     if (!sidecar_->Start(command, error)) {
-        sidecar_->Shutdown();
-        sidecar_.reset();
+        discard_transport();
         return false;
     }
     std::atomic<bool> no_cancel{false};
@@ -157,22 +160,24 @@ bool Manager::EnsureRunning(std::string& error) {
     if (!sidecar_->Call("{\"op\":\"ping\"}", 15000, response, no_cancel)) {
         error = "sidecar 无响应（需要 Python 3.10+ 与 playwright：pip install playwright && "
                 "playwright install chromium）";
-        sidecar_->Shutdown();
-        sidecar_.reset();
+        discard_transport();
         return false;
     }
     try {
         auto parsed = json::parse(response);
         if (parsed.value("op", "") != "pong") {
             error = "sidecar 响应异常: " + response.substr(0, 200);
+            discard_transport();
             return false;
         }
         if (parsed.value("python_ok", false) == false) {
             error = "Python 环境缺少依赖: " + parsed.value("missing", "");
+            discard_transport();
             return false;
         }
     } catch (const std::exception&) {
         error = "sidecar 响应不是 JSON: " + response.substr(0, 200);
+        discard_transport();
         return false;
     }
     return true;

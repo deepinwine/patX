@@ -26,8 +26,10 @@ struct ScriptedTransportState {
 
 class ScriptedTransport : public RpcTransport {
 public:
-    ScriptedTransport(std::shared_ptr<ScriptedTransportState> state, bool fail_sync)
-        : state_(std::move(state)), fail_sync_(fail_sync) {
+    ScriptedTransport(std::shared_ptr<ScriptedTransportState> state, bool fail_sync,
+                      std::string ping_response = R"({"op":"pong","python_ok":true})")
+        : state_(std::move(state)), fail_sync_(fail_sync),
+          ping_response_(std::move(ping_response)) {
         ++state_->created;
     }
 
@@ -38,7 +40,7 @@ public:
     bool Call(const std::string& request, int, std::string& response,
               std::atomic<bool>&) override {
         if (request.find("\"op\":\"ping\"") != std::string::npos) {
-            response = R"({"op":"pong","python_ok":true})";
+            response = ping_response_;
             return true;
         }
         if (fail_sync_) return false;
@@ -51,6 +53,7 @@ public:
 private:
     std::shared_ptr<ScriptedTransportState> state_;
     bool fail_sync_;
+    std::string ping_response_;
 };
 
 struct BlockingRpcState {
@@ -150,6 +153,45 @@ static bool TestCommunicationFailureRebuildsTransport() {
     CHECK(manager.sidecar_running());
     CHECK_EQ(state->created, 2);
     CHECK_EQ(manager.SyncCase(patent, cancel).code, ResultCode::NoChange);
+    return true;
+}
+
+static bool TestInvalidPingResponseDropsTransport(const std::string& response) {
+    Database db(":memory:");
+    CHECK(db.IsOpen());
+    auto state = std::make_shared<ScriptedTransportState>();
+    Manager manager(db, ".", [state, response] {
+        return std::make_unique<ScriptedTransport>(state, false, response);
+    });
+    std::string error;
+    CHECK(!manager.EnsureRunning(error));
+    if (manager.sidecar_running() || state->shutdown != 1 || state->destroyed != 1) {
+        std::cerr << "invalid ping transport was retained: " << response
+                  << "; shutdown=" << state->shutdown
+                  << "; destroyed=" << state->destroyed << std::endl;
+        return false;
+    }
+    return true;
+}
+
+static bool TestInvalidPingResponsesDropTransport() {
+    bool ok = true;
+    for (const auto& response : {R"({"op":"unexpected","python_ok":true})",
+                                 R"({"op":"pong","python_ok":false})",
+                                 "not JSON"}) {
+        ok = TestInvalidPingResponseDropsTransport(response) && ok;
+    }
+    return ok;
+}
+
+static bool TestNullTransportFactoryGivesRecoveryAdvice() {
+    Database db(":memory:");
+    CHECK(db.IsOpen());
+    Manager manager(db, ".", [] { return std::unique_ptr<RpcTransport>{}; });
+    std::string error;
+    CHECK(!manager.EnsureRunning(error));
+    CHECK(!manager.sidecar_running());
+    CHECK(error.find("重启") != std::string::npos);
     return true;
 }
 
@@ -290,6 +332,9 @@ static bool TestDetachOwnerWaitsForExitCallback() {
 }
 
 int main() {
+    bool startup_ok = TestInvalidPingResponsesDropTransport();
+    startup_ok = TestNullTransportFactoryGivesRecoveryAdvice() && startup_ok;
+    if (!startup_ok) return 1;
     if (!TestCommunicationFailureRebuildsTransport()) return 1;
     if (!TestCancellationDropsTransport()) return 1;
     if (!TestSidecarProcessLifecycleState()) return 1;
