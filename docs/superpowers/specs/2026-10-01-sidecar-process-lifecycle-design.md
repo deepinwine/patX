@@ -50,11 +50,12 @@ wxExecute(command, wxEXEC_ASYNC, process)
 
 启动成功后：
 
-- wxWidgets 负责在子进程退出通知完成后回收 `PatxSidecarProcess`；
-- `SidecarProcess` 只保存非拥有的 `wxProcess*`；
+- `SidecarProcess` 只保存非拥有的 `wxProcess*`；`PatxSidecarProcess::OnTerminate()` 完成宿主通知后执行 `delete this` 自回收；
 - `Shutdown()`、析构函数和取消路径均不得直接 `delete process_`。
 
 启动失败时，wxWidgets 尚未接管对象，由启动函数删除刚创建的进程对象。
+
+这里不能原样采用 GLM 提交中的“wxWidgets 会自动删除自定义 `PatxProcess`”注释。wxWidgets 的默认 `wxProcess::OnTerminate()` 会在无人处理事件时自删除，但一旦子类覆盖 `OnTerminate()`，覆盖函数就必须显式完成回收；[官方 `samples/exec/exec.cpp`](https://github.com/wxWidgets/wxWidgets/blob/master/samples/exec/exec.cpp) 也在退出回调路径删除自定义 process handler。因此本实现明确在覆盖函数末尾自删除，同时保证删除前不再被宿主持有。
 
 ### 宿主与退出回调
 
@@ -69,9 +70,9 @@ generation
 行为如下：
 
 - 子进程退出：`OnTerminate()` 仅在 `owner_alive` 且 generation 匹配时通知宿主；
-- 宿主收到通知：清空 `process_`、输入流和输出流，不释放进程对象；
+- 宿主收到通知：清空 `process_`、输入流和输出流，不在宿主侧释放进程对象；
 - 宿主析构：先标记 `owner_alive = false`，再执行幂等关闭；
-- 宿主销毁后的迟到回调只更新共享状态，不访问已经析构的 `SidecarProcess`。
+- 宿主销毁后的迟到回调不访问已经析构的 `SidecarProcess`，但退出处理器仍在 `OnTerminate()` 末尾自回收。
 
 generation 用于防止旧子进程的退出回调清除后来重启的新进程指针。
 
@@ -93,7 +94,7 @@ generation 用于防止旧子进程的退出回调清除后来重启的新进程
 3. 仅给予最多 1 秒的有界优雅退出窗口，不允许无限等待；
 4. 有界窗口结束后子进程仍存在时发送 `wxSIGTERM`；
 5. 立即使当前 transport 不再接受新 RPC，并清空宿主持有的非拥有指针；
-6. 真实进程对象仍由 wxWidgets 在退出通知后回收。
+6. 真实进程对象在迟到的 `OnTerminate()` 中自回收；宿主关闭路径不直接删除它。
 
 ### 取消和超时
 
