@@ -12,7 +12,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <csignal>
 #include <memory>
+#include <mutex>
 
 using nlohmann::json;
 
@@ -31,33 +33,114 @@ static bool IsBatchAbortingCode(ResultCode c) {
 // ---------------------------------------------------------------------------
 
 class SidecarProcess : public RpcTransport {
+private:
+    // Both the transport and the self-deleting wxProcess keep this state alive.
+    // The mutex protects every stream access against OnTerminate deleting pipes.
+    struct ProcessState {
+        std::mutex mutex;
+        wxProcess* process = nullptr; // Non-owning.
+        wxInputStream* in = nullptr;
+        wxOutputStream* out = nullptr;
+        long pid = 0;
+        std::uint64_t generation = 0;
+        std::string buffer;
+
+        void Clear() {
+            process = nullptr;
+            in = nullptr;
+            out = nullptr;
+            pid = 0;
+            generation = 0;
+            buffer.clear();
+        }
+
+        void ClearIfCurrent(wxProcess* child, std::uint64_t child_generation) {
+            if (process == child && generation == child_generation) Clear();
+        }
+    };
+
+    class PatxProcess : public wxProcess {
+    public:
+        PatxProcess(std::shared_ptr<ProcessState> state,
+                    std::shared_ptr<SidecarProcessLifecycle> lifecycle,
+                    std::uint64_t generation)
+            : wxProcess(wxPROCESS_REDIRECT), state_(std::move(state)),
+              lifecycle_(std::move(lifecycle)), generation_(generation) {}
+
+        void OnTerminate(int, int) override {
+            lifecycle_->NotifyChildExit(generation_, [] {});
+            {
+                std::lock_guard<std::mutex> lock(state_->mutex);
+                // Cleanup is safe even after DetachOwner/StopChild: state is
+                // shared, and no callback dereferences the former transport.
+                state_->ClearIfCurrent(this, generation_);
+            }
+            delete this;
+        }
+
+    private:
+        std::shared_ptr<ProcessState> state_;
+        std::shared_ptr<SidecarProcessLifecycle> lifecycle_;
+        std::uint64_t generation_;
+    };
+
 public:
-    SidecarProcess() : lifecycle_(std::make_shared<SidecarProcessLifecycle>()) {}
+    SidecarProcess()
+        : lifecycle_(std::make_shared<SidecarProcessLifecycle>()),
+          state_(std::make_shared<ProcessState>()) {
+#ifndef _WIN32
+        // A pipe can close between checking the child and writing. Let wx
+        // report EPIPE as a stream error instead of terminating the GUI.
+        static std::once_flag sigpipe_once;
+        std::call_once(sigpipe_once, [] { std::signal(SIGPIPE, SIG_IGN); });
+#endif
+    }
 
     ~SidecarProcess() override {
         lifecycle_->DetachOwner();
         Shutdown();
     }
 
-    // command must be fully resolved (absolute script path) - no shell, no
-    // cwd change (that would break the GUI's relative database paths).
+    // Host operations are serialized by Manager; termination callbacks use
+    // only shared state and can run concurrently or inside wxExecute itself.
     bool Start(const std::string& command, std::string& error) override {
-        if (process_) return true;
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            if (state_->process) return true;
+        }
         const auto generation = lifecycle_->BeginChild();
-        auto* process = new PatxProcess(this, lifecycle_, generation);
+        auto* process = new PatxProcess(state_, lifecycle_, generation);
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->process = process;
+            state_->generation = generation;
+        }
+        // Do not hold state_->mutex: wxExecute may call OnTerminate here.
         const long pid = wxExecute(wxString::FromUTF8(command.c_str()), wxEXEC_ASYNC, process);
         if (pid == 0) {
             lifecycle_->StopChild(generation);
-            delete process; // No running child owns this instance yet.
+            {
+                std::lock_guard<std::mutex> lock(state_->mutex);
+                state_->ClearIfCurrent(process, generation);
+            }
+            delete process; // No child was started, so no exit callback owns it.
             error = "无法启动 sidecar 进程: " + command;
             return false;
         }
-        process_ = process;
-        pid_ = pid;
-        generation_ = generation;
-        in_ = process_->GetInputStream();     // sidecar stdout
-        out_ = process_->GetOutputStream();   // sidecar stdin
-        if (!in_ || !out_) {
+        bool pipes_ready = false;
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            if (state_->process != process || state_->generation != generation) {
+                error = "sidecar 在启动时已退出";
+                return false;
+            }
+            // The exit callback must acquire this lock before deleting process.
+            state_->pid = pid;
+            state_->in = process->GetInputStream();
+            state_->out = process->GetOutputStream();
+            pipes_ready = state_->in && state_->out;
+        }
+        if (!pipes_ready) {
             error = "sidecar 管道初始化失败";
             Shutdown();
             return false;
@@ -67,96 +150,111 @@ public:
 
     bool Call(const std::string& line_request, int timeout_ms, std::string& line_response,
               std::atomic<bool>& cancel) override {
-        if (!process_ || !out_ || !in_) return false;
-        if (!out_->Write(line_request.c_str(), line_request.size()).IsOk()) return false;
-        out_->Write("\n", 1);
+        std::uint64_t generation = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            if (!state_->process || !state_->out || !state_->in) return false;
+            generation = state_->generation;
+            if (!state_->out->Write(line_request.c_str(), line_request.size()).IsOk() ||
+                !state_->out->Write("\n", 1).IsOk()) return false;
+            state_->out->Sync();
+            if (!state_->out->IsOk()) return false;
+            state_->buffer.clear();
+        }
 
-        buffer_.clear();
-        auto start = std::chrono::steady_clock::now();
+        const auto start = std::chrono::steady_clock::now();
         while (true) {
             if (cancel.load()) return false;
-            if (in_->CanRead()) {
-                char chunk[4096];
-                size_t got = in_->Read(chunk, sizeof(chunk)).LastRead();
-                if (got == 0 && in_->Eof()) return false;   // sidecar died
-                buffer_.append(chunk, got);
-                size_t nl = buffer_.find('\n');
-                if (nl != std::string::npos) {
-                    line_response = buffer_.substr(0, nl);
-                    buffer_.erase(0, nl + 1);
-                    return !line_response.empty();
+            bool can_read = false;
+            {
+                std::lock_guard<std::mutex> lock(state_->mutex);
+                if (state_->generation != generation || !state_->in) return false;
+                can_read = state_->in->CanRead();
+                if (can_read) {
+                    char chunk[4096];
+                    const size_t got = state_->in->Read(chunk, sizeof(chunk)).LastRead();
+                    if (got == 0 && state_->in->Eof()) return false;
+                    state_->buffer.append(chunk, got);
+                    const size_t nl = state_->buffer.find('\n');
+                    if (nl != std::string::npos) {
+                        line_response = state_->buffer.substr(0, nl);
+                        state_->buffer.erase(0, nl + 1);
+                        return !line_response.empty();
+                    }
                 }
-            } else {
-                wxMilliSleep(25);
             }
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            if (!can_read) wxMilliSleep(25);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - start);
             if (elapsed.count() > timeout_ms) return false;
         }
     }
 
     void Shutdown() override {
-        if (!process_) {
-            ClearChildReferences();
-            return;
+        std::uint64_t generation = 0;
+        long pid = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            if (!state_->process) {
+                state_->Clear();
+                return;
+            }
+            generation = state_->generation;
+            pid = state_->pid;
+            if (state_->out) {
+                static constexpr char request[] = "{\"op\":\"shutdown\"}\n";
+                if (state_->out->Write(request, sizeof(request) - 1).IsOk()) {
+                    state_->out->Sync();
+                    // Stream failure is best effort only; the bounded kill path
+                    // below handles an unresponsive or already closed pipe.
+                }
+            }
+            state_->in = nullptr;
+            state_->out = nullptr;
+            state_->buffer.clear();
         }
-        const auto generation = generation_;
-        const long pid = pid_;
-        if (out_) {
-            static constexpr char shutdown_request[] = "{\"op\":\"shutdown\"}\n";
-            out_->Write(shutdown_request, sizeof(shutdown_request) - 1);
-            out_->Sync();
+
+        if (!WaitForChildExit(pid, generation, 10, 100)) {
+#ifdef _WIN32
+            KillChild(pid, wxSIGKILL);
+#else
+            const auto result = KillChild(pid, wxSIGTERM);
+            if (result != wxKILL_NO_PROCESS &&
+                !WaitForChildExit(pid, generation, 10, 20)) {
+                KillChild(pid, wxSIGKILL);
+            }
+#endif
         }
-        for (int attempt = 0; attempt < 10 && wxProcess::Exists(pid); ++attempt) {
-            wxMilliSleep(100);
-        }
-        if (wxProcess::Exists(pid)) wxProcess::Kill(pid, wxSIGTERM);
         lifecycle_->StopChild(generation);
-        ClearChildReferences();
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            if (state_->generation == generation) state_->Clear();
+        }
     }
 
 private:
-    class PatxProcess : public wxProcess {
-    public:
-        PatxProcess(SidecarProcess* owner, std::shared_ptr<SidecarProcessLifecycle> lifecycle,
-                    std::uint64_t generation)
-            : wxProcess(wxPROCESS_REDIRECT), owner_(owner),
-              lifecycle_(std::move(lifecycle)), generation_(generation) {}
-
-        void OnTerminate(int, int) override {
-            lifecycle_->NotifyChildExit(generation_, [this] {
-                owner_->OnChildExited(this, generation_);
-            });
-            delete this;
+    bool WaitForChildExit(long pid, std::uint64_t generation, int attempts, int sleep_ms) {
+        for (int attempt = 0; attempt <= attempts; ++attempt) {
+            {
+                std::lock_guard<std::mutex> lock(state_->mutex);
+                if (state_->generation != generation || pid <= 0 ||
+                    !wxProcess::Exists(pid)) return true;
+            }
+            if (attempt < attempts) wxMilliSleep(sleep_ms);
         }
-
-    private:
-        SidecarProcess* owner_;
-        std::shared_ptr<SidecarProcessLifecycle> lifecycle_;
-        std::uint64_t generation_;
-    };
-
-    void OnChildExited(wxProcess* process, std::uint64_t generation) {
-        if (generation != generation_ || process != process_) return;
-        ClearChildReferences();
+        return false;
     }
 
-    void ClearChildReferences() {
-        process_ = nullptr;
-        in_ = nullptr;
-        out_ = nullptr;
-        pid_ = 0;
-        generation_ = 0;
-        buffer_.clear();
+    static wxKillError KillChild(long pid, wxSignal signal) {
+        const auto result = wxProcess::Kill(pid, signal);
+        if (result != wxKILL_OK && result != wxKILL_NO_PROCESS) {
+            wxLogWarning("无法结束 sidecar 进程 %ld (错误 %d)", pid, static_cast<int>(result));
+        }
+        return result;
     }
 
     std::shared_ptr<SidecarProcessLifecycle> lifecycle_;
-    wxProcess* process_ = nullptr; // Non-owning; PatxProcess deletes itself on exit.
-    wxInputStream* in_ = nullptr;
-    wxOutputStream* out_ = nullptr;
-    long pid_ = 0;
-    std::uint64_t generation_ = 0;
-    std::string buffer_;
+    std::shared_ptr<ProcessState> state_;
 };
 
 std::unique_ptr<RpcTransport> CreateDefaultRpcTransport() {

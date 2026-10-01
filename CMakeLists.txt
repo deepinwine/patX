@@ -184,6 +184,7 @@ if(PATX_BUILD_TESTS)
         endif()
         add_test(NAME patx_sidecar_transport_tests
                  COMMAND patx_sidecar_transport_tests $<TARGET_FILE:patx_sidecar_echo_helper>)
+        set_tests_properties(patx_sidecar_transport_tests PROPERTIES SKIP_RETURN_CODE 77)
 
         add_executable(patx_web_dossier_manager_tests
             tests/test_web_dossier_manager.cpp
