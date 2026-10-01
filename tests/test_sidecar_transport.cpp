@@ -88,6 +88,44 @@ bool TestRestartAfterChildExit(const std::string& helper) {
     return true;
 }
 
+bool TestRestartAfterImmediateChildExit(const std::string& helper) {
+    auto transport = webdossier::CreateDefaultRpcTransport();
+    std::string error;
+    // wxExecute can deliver termination before returning; either Start result
+    // is valid for the immediately exiting child, but restart must succeed.
+    if (!transport->Start(QuoteCommand(helper, "--exit-immediately"), error)) {
+        CHECK(!error.empty());
+    }
+    long pid = 0;
+    std::atomic<bool> cancel{false};
+    CHECK(WaitUntil([&] {
+        if (!transport->Start(QuoteCommand(helper), error)) return false;
+        std::string response;
+        if (!transport->Call(R"({"op":"ping"})", 500, response, cancel)) return false;
+        const auto parsed = nlohmann::json::parse(response, nullptr, false);
+        if (parsed.is_discarded() || parsed.value("op", "") != "pong") return false;
+        pid = parsed.value("pid", 0L);
+        return pid > 0;
+    }, 5000));
+    transport->Shutdown();
+    CHECK(ChildHasExited(pid));
+    return true;
+}
+
+bool TestDestroyImmediatelyAfterStartingExitingChild(const std::string& helper) {
+    auto transport = webdossier::CreateDefaultRpcTransport();
+    std::string error;
+    const bool started = transport->Start(QuoteCommand(helper, "--exit-immediately"), error);
+    transport.reset(); // No RPC, event pumping, or wait before destruction.
+    CHECK(started || !error.empty());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    do {
+        PumpWxEvents();
+        wxMilliSleep(10);
+    } while (std::chrono::steady_clock::now() < deadline);
+    return true;
+}
+
 bool TestDestroyBeforeChildExitNotification(const std::string& helper) {
     auto transport = webdossier::CreateDefaultRpcTransport();
     std::string error;
@@ -211,9 +249,11 @@ int main(int argc, char** argv) {
         {"ignore-shutdown", TestIgnoreShutdown},
         {"concurrent-exit", TestExitDuringConcurrentCall},
         {"rapid-exit", TestRapidExitDuringStart},
+        {"restart-immediate", TestRestartAfterImmediateChildExit},
         {"restart", TestRestartAfterChildExit},
         {"repeated-shutdown", TestRepeatedShutdown},
         {"destroy-before-notification", TestDestroyBeforeChildExitNotification},
+        {"destroy-immediate", TestDestroyImmediatelyAfterStartingExitingChild},
     };
     bool matched = false;
     for (const auto& scenario : scenarios) {
