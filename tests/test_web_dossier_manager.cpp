@@ -1,4 +1,5 @@
 #include "database.hpp"
+#include "patx/sidecar_process_lifecycle.hpp"
 #include "web_dossier.hpp"
 
 #include <atomic>
@@ -10,6 +11,9 @@
 #include <thread>
 
 using namespace webdossier;
+
+#define CHECK(condition) do { if (!(condition)) { std::cerr << __FILE__ << ':' << __LINE__ << ": check failed: " #condition << std::endl; return false; } } while (false)
+#define CHECK_EQ(actual, expected) CHECK((actual) == (expected))
 
 namespace {
 
@@ -83,11 +87,11 @@ private:
 
 } // namespace
 
-int main() {
+static bool TestCancellationDropsTransport() {
     Database db(":memory:");
     if (!db.IsOpen()) {
         std::cerr << "failed to open test database" << std::endl;
-        return 1;
+        return false;
     }
 
     auto state = std::make_shared<BlockingRpcState>();
@@ -115,8 +119,43 @@ int main() {
     }
     if (!ok) {
         std::cerr << "cancel was not propagated through the blocking RPC" << std::endl;
-        return 1;
+        return false;
     }
-    std::cout << "web dossier manager cancellation test passed" << std::endl;
+    return true;
+}
+
+static bool TestSidecarProcessLifecycleState() {
+    SidecarProcessLifecycle lifecycle;
+    int notifications = 0;
+
+    const auto first = lifecycle.BeginChild();
+    CHECK(first != 0);
+    CHECK(lifecycle.NotifyChildExit(first, [&] { ++notifications; }));
+    CHECK_EQ(notifications, 1);
+
+    const auto stale = lifecycle.BeginChild();
+    const auto current = lifecycle.BeginChild();
+    CHECK(stale != current);
+    CHECK(!lifecycle.NotifyChildExit(stale, [&] { ++notifications; }));
+    CHECK_EQ(notifications, 1);
+    CHECK(lifecycle.NotifyChildExit(current, [&] { ++notifications; }));
+    CHECK_EQ(notifications, 2);
+
+    const auto stoppable = lifecycle.BeginChild();
+    CHECK(lifecycle.StopChild(stoppable));
+    CHECK(!lifecycle.StopChild(stoppable));
+    CHECK(!lifecycle.NotifyChildExit(stoppable, [&] { ++notifications; }));
+
+    const auto detached = lifecycle.BeginChild();
+    lifecycle.DetachOwner();
+    CHECK(!lifecycle.NotifyChildExit(detached, [&] { ++notifications; }));
+    CHECK_EQ(notifications, 2);
+    return true;
+}
+
+int main() {
+    if (!TestCancellationDropsTransport()) return 1;
+    if (!TestSidecarProcessLifecycleState()) return 1;
+    std::cout << "web dossier manager and sidecar lifecycle tests passed" << std::endl;
     return 0;
 }
