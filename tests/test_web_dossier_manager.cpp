@@ -3,6 +3,7 @@
 #include "web_dossier.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <iostream>
 #include <memory>
@@ -153,9 +154,80 @@ static bool TestSidecarProcessLifecycleState() {
     return true;
 }
 
+static bool TestDetachOwnerWaitsForExitCallback() {
+    SidecarProcessLifecycle lifecycle;
+    const auto generation = lifecycle.BeginChild();
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool callback_entered = false;
+    bool release_callback = false;
+    bool detach_started = false;
+    bool detach_finished = false;
+    bool notify_result = false;
+
+    std::thread notifier([&] {
+        notify_result = lifecycle.NotifyChildExit(generation, [&] {
+            std::unique_lock<std::mutex> lock(mutex);
+            callback_entered = true;
+            cv.notify_all();
+            cv.wait(lock, [&] { return release_callback; });
+        });
+    });
+
+    bool callback_started = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        callback_started = cv.wait_for(lock, std::chrono::seconds(2),
+                                       [&] { return callback_entered; });
+    }
+
+    std::thread detacher;
+    bool detach_was_blocked = false;
+    bool detacher_started = false;
+    if (callback_started) {
+        detacher = std::thread([&] {
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                detach_started = true;
+                cv.notify_all();
+            }
+            lifecycle.DetachOwner();
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                detach_finished = true;
+                cv.notify_all();
+            }
+        });
+
+        std::unique_lock<std::mutex> lock(mutex);
+        detacher_started = cv.wait_for(lock, std::chrono::seconds(2),
+                                       [&] { return detach_started; });
+        if (detacher_started) {
+            detach_was_blocked = !cv.wait_for(
+                lock, std::chrono::milliseconds(100), [&] { return detach_finished; });
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release_callback = true;
+        cv.notify_all();
+    }
+    notifier.join();
+    if (detacher.joinable()) detacher.join();
+
+    CHECK(callback_started);
+    CHECK(detacher_started);
+    CHECK(detach_was_blocked);
+    CHECK(notify_result);
+    CHECK(detach_finished);
+    return true;
+}
+
 int main() {
     if (!TestCancellationDropsTransport()) return 1;
     if (!TestSidecarProcessLifecycleState()) return 1;
+    if (!TestDetachOwnerWaitsForExitCallback()) return 1;
     std::cout << "web dossier manager and sidecar lifecycle tests passed" << std::endl;
     return 0;
 }

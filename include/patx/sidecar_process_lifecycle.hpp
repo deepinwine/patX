@@ -14,6 +14,9 @@ public:
         return active_generation_;
     }
 
+    // The callback runs synchronously under mutex_; it must not re-enter this
+    // object or wait for a thread that needs this lock. DetachOwner waits for
+    // any running callback to finish before it returns.
     template <typename Callback>
     bool NotifyChildExit(std::uint64_t generation, Callback&& callback) {
         std::lock_guard<std::mutex> lock(mutex_);
