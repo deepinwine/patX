@@ -186,6 +186,9 @@ std::string FormatOAImportPreview(const OAImportPreview& preview) {
             << "  不变 " << preview.unchanged << "\n"
             << "  处理人冲突 " << preview.handler_conflicts << "\n"
             << "  重复匹配冲突 " << preview.match_conflicts;
+    if (preview.match_conflicts > 0) {
+        message << "\n\n重复匹配冲突行将跳过，不会自动覆盖。";
+    }
     return message.str();
 }
 
@@ -857,6 +860,8 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
 
                 if (policy == OAHandlerConflictPolicy::CancelImport) {
                     result.cancelled = true;
+                    result.handler_conflicts += plan.preview.handler_conflicts;
+                    result.match_conflicts += plan.preview.match_conflicts;
                     sheet_skipped += static_cast<int>(plan.rows.size());
                 } else {
                     if (reviewed) plan = BuildOAImportPlan(incoming_rows, db);

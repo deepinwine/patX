@@ -41,6 +41,8 @@ TEST(oa_import_preview_message_includes_all_action_counts) {
     CHECK(message.find("不变 4") != std::string::npos);
     CHECK(message.find("处理人冲突 3") != std::string::npos);
     CHECK(message.find("重复匹配冲突 1") != std::string::npos);
+    CHECK(message.find("重复匹配冲突行将跳过，不会自动覆盖") !=
+          std::string::npos);
 }
 
 TEST(excel_export_writes_real_xlsx) {
@@ -649,6 +651,8 @@ TEST(oa_excel_import_cancel_writes_nothing_from_oa_sheet) {
          "2026-09-16", "2027-01-16", "新处理人"},
         {"GK-OA-CANCEL-INSERT", "取消新增专利", "第二次审查意见通知书",
          "2026-09-17", "2027-01-17", "另一处理人"},
+        {"GK-OA-CANCEL-MULTI", "取消重复匹配", "第一次审查意见通知书",
+         "2026-09-18", "2027-01-18", "待更新处理人"},
     });
 
     Database db(":memory:");
@@ -661,6 +665,17 @@ TEST(oa_excel_import_cancel_writes_nothing_from_oa_sheet) {
     const int existing_id = db.InsertOA(existing);
     CHECK(existing_id > 0);
 
+    OARecord ambiguous = existing;
+    ambiguous.geke_code = "GK-OA-CANCEL-MULTI";
+    ambiguous.issue_date = "2026-09-18";
+    ambiguous.handler = "原处理人甲";
+    const int ambiguous_first_id = db.InsertOA(ambiguous);
+    CHECK(ambiguous_first_id > 0);
+    ambiguous.oa_type = "第一次审查意见通知书";
+    ambiguous.handler = "原处理人乙";
+    const int ambiguous_second_id = db.InsertOA(ambiguous);
+    CHECK(ambiguous_second_id > 0);
+
     ExcelIO io;
     const ImportResult result = io.ImportPatents(
         xlsx_path,
@@ -669,6 +684,7 @@ TEST(oa_excel_import_cancel_writes_nothing_from_oa_sheet) {
         [](const OAImportPreview& preview) {
             CHECK_EQ(preview.added, 1);
             CHECK_EQ(preview.handler_conflicts, 1);
+            CHECK_EQ(preview.match_conflicts, 1);
             return OAHandlerConflictPolicy::CancelImport;
         }
     );
@@ -676,11 +692,15 @@ TEST(oa_excel_import_cancel_writes_nothing_from_oa_sheet) {
     CHECK(result.cancelled);
     CHECK_EQ(result.added, 0);
     CHECK_EQ(result.updated, 0);
-    CHECK_EQ(result.skipped, 2);
-    CHECK_EQ(db.GetOARecords().size(), 1u);
+    CHECK_EQ(result.skipped, 3);
+    CHECK_EQ(result.handler_conflicts, 1);
+    CHECK_EQ(result.match_conflicts, 1);
+    CHECK_EQ(db.GetOARecords().size(), 3u);
     const OARecord stored = db.GetOAById(existing_id);
     CHECK_STR_EQ(stored.handler, "旧处理人");
     CHECK_STR_EQ(stored.writer, "人工撰写人");
+    CHECK_STR_EQ(db.GetOAById(ambiguous_first_id).handler, "原处理人甲");
+    CHECK_STR_EQ(db.GetOAById(ambiguous_second_id).handler, "原处理人乙");
     CHECK(db.GetOAByPatent("GK-OA-CANCEL-INSERT").empty());
 
     std::filesystem::remove(xlsx_path);
