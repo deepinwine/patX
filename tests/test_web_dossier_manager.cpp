@@ -18,6 +18,41 @@ using namespace webdossier;
 
 namespace {
 
+struct ScriptedTransportState {
+    int created = 0;
+    int shutdown = 0;
+    int destroyed = 0;
+};
+
+class ScriptedTransport : public RpcTransport {
+public:
+    ScriptedTransport(std::shared_ptr<ScriptedTransportState> state, bool fail_sync)
+        : state_(std::move(state)), fail_sync_(fail_sync) {
+        ++state_->created;
+    }
+
+    ~ScriptedTransport() override { ++state_->destroyed; }
+
+    bool Start(const std::string&, std::string&) override { return true; }
+
+    bool Call(const std::string& request, int, std::string& response,
+              std::atomic<bool>&) override {
+        if (request.find("\"op\":\"ping\"") != std::string::npos) {
+            response = R"({"op":"pong","python_ok":true})";
+            return true;
+        }
+        if (fail_sync_) return false;
+        response = R"({"ok":true,"code":"NO_CHANGE","documents":[]})";
+        return true;
+    }
+
+    void Shutdown() override { ++state_->shutdown; }
+
+private:
+    std::shared_ptr<ScriptedTransportState> state_;
+    bool fail_sync_;
+};
+
 struct BlockingRpcState {
     std::mutex mutex;
     std::condition_variable cv;
@@ -87,6 +122,36 @@ private:
 };
 
 } // namespace
+
+static bool TestCommunicationFailureRebuildsTransport() {
+    Database db(":memory:");
+    CHECK(db.IsOpen());
+    Patent patent;
+    patent.id = 1;
+    patent.geke_code = "CN-REBUILD";
+    patent.application_number = "CN202410000001.1";
+
+    auto state = std::make_shared<ScriptedTransportState>();
+    int sequence = 0;
+    Manager manager(db, ".", [state, &sequence] {
+        return std::make_unique<ScriptedTransport>(state, sequence++ == 0);
+    });
+    std::string error;
+    CHECK(manager.EnsureRunning(error));
+    CHECK_EQ(state->created, 1);
+
+    std::atomic<bool> cancel{false};
+    CHECK_EQ(manager.SyncCase(patent, cancel).code, ResultCode::SidecarError);
+    CHECK(!manager.sidecar_running());
+    CHECK_EQ(state->shutdown, 1);
+    CHECK_EQ(state->destroyed, 1);
+
+    CHECK(manager.EnsureRunning(error));
+    CHECK(manager.sidecar_running());
+    CHECK_EQ(state->created, 2);
+    CHECK_EQ(manager.SyncCase(patent, cancel).code, ResultCode::NoChange);
+    return true;
+}
 
 static bool TestCancellationDropsTransport() {
     Database db(":memory:");
@@ -225,6 +290,7 @@ static bool TestDetachOwnerWaitsForExitCallback() {
 }
 
 int main() {
+    if (!TestCommunicationFailureRebuildsTransport()) return 1;
     if (!TestCancellationDropsTransport()) return 1;
     if (!TestSidecarProcessLifecycleState()) return 1;
     if (!TestDetachOwnerWaitsForExitCallback()) return 1;

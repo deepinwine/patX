@@ -96,19 +96,28 @@ private:
     std::string buffer_;
 };
 
+std::unique_ptr<RpcTransport> CreateDefaultRpcTransport() {
+    return std::make_unique<SidecarProcess>();
+}
+
 // ---------------------------------------------------------------------------
 // Manager
 // ---------------------------------------------------------------------------
 
 Manager::Manager(Database& db, const std::string& script_dir)
-    : db_(db), script_dir_(script_dir) {
+    : Manager(db, script_dir, RpcTransportFactory{CreateDefaultRpcTransport}) {}
+
+Manager::Manager(Database& db, const std::string& script_dir,
+                 RpcTransportFactory transport_factory)
+    : db_(db), script_dir_(script_dir),
+      transport_factory_(std::move(transport_factory)) {
     set_check_interval_days(atoi(db_.GetConfig("web_dossier_interval_days").c_str()));
 }
 
 Manager::Manager(Database& db, const std::string& script_dir,
                  std::unique_ptr<RpcTransport> transport)
-    : db_(db), script_dir_(script_dir), sidecar_(std::move(transport)) {
-    set_check_interval_days(atoi(db_.GetConfig("web_dossier_interval_days").c_str()));
+    : Manager(db, script_dir, RpcTransportFactory{CreateDefaultRpcTransport}) {
+    sidecar_ = std::move(transport);
 }
 
 Manager::~Manager() {
@@ -128,13 +137,18 @@ void Manager::set_check_interval_days(int days) {
 
 bool Manager::EnsureRunning(std::string& error) {
     std::lock_guard<std::mutex> lock(rpc_mutex_);
-    if (!sidecar_) sidecar_ = std::make_unique<SidecarProcess>();
+    if (!sidecar_ && transport_factory_) sidecar_ = transport_factory_();
+    if (!sidecar_) {
+        error = "无法创建 sidecar transport";
+        return false;
+    }
     std::string python = db_.GetConfig("web_dossier_python");
     if (python.empty()) python = "python3";
     // script_dir_ is the absolute path of tools/web_dossier (resolved by the
     // GUI next to the executable, falling back to the working directory).
     std::string command = python + " \"" + script_dir_ + "/service.py\"";
     if (!sidecar_->Start(command, error)) {
+        sidecar_->Shutdown();
         sidecar_.reset();
         return false;
     }
@@ -183,8 +197,8 @@ bool Manager::Rpc(const std::string& op, const std::string& json_payload,
     int timeout = op == "login" ? 1200000 : 300000;
     const bool ok = sidecar_->Call(req.dump(), timeout, response,
                                    cancel ? *cancel : no_cancel);
-    if (!ok && cancel && cancel->load()) {
-        // The cancelled response may still arrive later. Drop the sidecar so
+    if (!ok) {
+        // A failed response may still arrive later. Drop the sidecar so
         // a future RPC cannot consume that stale line as its own response.
         sidecar_->Shutdown();
         sidecar_.reset();

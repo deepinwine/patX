@@ -250,12 +250,17 @@ public:
     virtual void Shutdown() = 0;
 };
 
+using RpcTransportFactory = std::function<std::unique_ptr<RpcTransport>()>;
+std::unique_ptr<RpcTransport> CreateDefaultRpcTransport();
+
 class Manager {
 public:
     // db must outlive the manager. script_dir is the ABSOLUTE path of the
     // tools/web_dossier directory (the GUI resolves it next to the
     // executable or the cwd).
     Manager(Database& db, const std::string& script_dir);
+    Manager(Database& db, const std::string& script_dir,
+            RpcTransportFactory transport_factory);
     Manager(Database& db, const std::string& script_dir,
             std::unique_ptr<RpcTransport> transport);
     ~Manager();
@@ -300,6 +305,7 @@ private:
     Database& db_;
     std::string script_dir_;
     std::unique_ptr<RpcTransport> sidecar_;
+    RpcTransportFactory transport_factory_;
     mutable std::mutex rpc_mutex_;
     std::atomic<int> check_interval_days_{1};
 };
