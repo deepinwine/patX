@@ -166,6 +166,25 @@ if(PATX_BUILD_TESTS)
     add_test(NAME patx_web_dossier_tests COMMAND patx_web_dossier_tests)
 
     if(wxWidgets_FOUND)
+        add_executable(patx_sidecar_echo_helper tests/sidecar_echo_helper.cpp)
+        add_executable(patx_sidecar_transport_tests
+            tests/test_sidecar_transport.cpp
+            src/cpp/web_dossier.cpp
+        )
+        target_link_libraries(patx_sidecar_transport_tests PRIVATE
+            patx_core ${wxWidgets_LIBRARIES})
+        target_include_directories(patx_sidecar_transport_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/cpp
+        )
+        add_dependencies(patx_sidecar_transport_tests patx_sidecar_echo_helper)
+        if(MSVC)
+            target_compile_options(patx_sidecar_echo_helper PRIVATE /utf-8)
+            target_compile_options(patx_sidecar_transport_tests PRIVATE /utf-8)
+        endif()
+        add_test(NAME patx_sidecar_transport_tests
+                 COMMAND patx_sidecar_transport_tests $<TARGET_FILE:patx_sidecar_echo_helper>)
+
         add_executable(patx_web_dossier_manager_tests
             tests/test_web_dossier_manager.cpp
             src/cpp/web_dossier.cpp

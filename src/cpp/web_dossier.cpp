@@ -1,5 +1,6 @@
 // 审查意见网页自动同步 - C++ core implementation. See web_dossier.hpp.
 #include "web_dossier.hpp"
+#include "patx/sidecar_process_lifecycle.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -9,7 +10,9 @@
 #include <wx/log.h>
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <memory>
 
 using nlohmann::json;
 
@@ -29,19 +32,36 @@ static bool IsBatchAbortingCode(ResultCode c) {
 
 class SidecarProcess : public RpcTransport {
 public:
-    ~SidecarProcess() override { Shutdown(); }
+    SidecarProcess() : lifecycle_(std::make_shared<SidecarProcessLifecycle>()) {}
+
+    ~SidecarProcess() override {
+        lifecycle_->DetachOwner();
+        Shutdown();
+    }
 
     // command must be fully resolved (absolute script path) - no shell, no
     // cwd change (that would break the GUI's relative database paths).
     bool Start(const std::string& command, std::string& error) override {
         if (process_) return true;
-        process_ = wxProcess::Open(wxString::FromUTF8(command.c_str()));
-        if (!process_) {
+        const auto generation = lifecycle_->BeginChild();
+        auto* process = new PatxProcess(this, lifecycle_, generation);
+        const long pid = wxExecute(wxString::FromUTF8(command.c_str()), wxEXEC_ASYNC, process);
+        if (pid == 0) {
+            lifecycle_->StopChild(generation);
+            delete process; // No running child owns this instance yet.
             error = "无法启动 sidecar 进程: " + command;
             return false;
         }
+        process_ = process;
+        pid_ = pid;
+        generation_ = generation;
         in_ = process_->GetInputStream();     // sidecar stdout
         out_ = process_->GetOutputStream();   // sidecar stdin
+        if (!in_ || !out_) {
+            error = "sidecar 管道初始化失败";
+            Shutdown();
+            return false;
+        }
         return true;
     }
 
@@ -76,23 +96,66 @@ public:
     }
 
     void Shutdown() override {
-        if (process_) {
-            // best effort graceful stop, then detach
-            if (out_) {
-                out_->Write("{\"op\":\"shutdown\"}\n", 19);
-                wxMilliSleep(300);
-            }
-            delete process_;   // closes pipes; child gets EOF
-            process_ = nullptr;
-            in_ = nullptr;
-            out_ = nullptr;
+        if (!process_) {
+            ClearChildReferences();
+            return;
         }
+        const auto generation = generation_;
+        const long pid = pid_;
+        if (out_) {
+            static constexpr char shutdown_request[] = "{\"op\":\"shutdown\"}\n";
+            out_->Write(shutdown_request, sizeof(shutdown_request) - 1);
+            out_->Sync();
+        }
+        for (int attempt = 0; attempt < 10 && wxProcess::Exists(pid); ++attempt) {
+            wxMilliSleep(100);
+        }
+        if (wxProcess::Exists(pid)) wxProcess::Kill(pid, wxSIGTERM);
+        lifecycle_->StopChild(generation);
+        ClearChildReferences();
     }
 
 private:
-    wxProcess* process_ = nullptr;
+    class PatxProcess : public wxProcess {
+    public:
+        PatxProcess(SidecarProcess* owner, std::shared_ptr<SidecarProcessLifecycle> lifecycle,
+                    std::uint64_t generation)
+            : wxProcess(wxPROCESS_REDIRECT), owner_(owner),
+              lifecycle_(std::move(lifecycle)), generation_(generation) {}
+
+        void OnTerminate(int, int) override {
+            lifecycle_->NotifyChildExit(generation_, [this] {
+                owner_->OnChildExited(this, generation_);
+            });
+            delete this;
+        }
+
+    private:
+        SidecarProcess* owner_;
+        std::shared_ptr<SidecarProcessLifecycle> lifecycle_;
+        std::uint64_t generation_;
+    };
+
+    void OnChildExited(wxProcess* process, std::uint64_t generation) {
+        if (generation != generation_ || process != process_) return;
+        ClearChildReferences();
+    }
+
+    void ClearChildReferences() {
+        process_ = nullptr;
+        in_ = nullptr;
+        out_ = nullptr;
+        pid_ = 0;
+        generation_ = 0;
+        buffer_.clear();
+    }
+
+    std::shared_ptr<SidecarProcessLifecycle> lifecycle_;
+    wxProcess* process_ = nullptr; // Non-owning; PatxProcess deletes itself on exit.
     wxInputStream* in_ = nullptr;
     wxOutputStream* out_ = nullptr;
+    long pid_ = 0;
+    std::uint64_t generation_ = 0;
     std::string buffer_;
 };
 
