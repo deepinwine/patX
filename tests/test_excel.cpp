@@ -109,3 +109,165 @@ TEST(excel_import_csv_into_structured_fields) {
     std::filesystem::remove(db_path);
 }
 
+
+// ---------------------------------------------------------------------------
+// OA 导入预检（移植自 codex 分支设计：预检与执行分离、处理人保护）
+// ---------------------------------------------------------------------------
+static void WriteOAWorkbook(
+    const std::string& path,
+    const std::vector<std::vector<std::string>>& rows
+) {
+    ExcelIO io;
+    ExportTable table;
+    table.sheet_name = "OA";
+    table.headers = {"编号", "专利名称", "OA类型", "发文日", "官方期限", "处理人"};
+    table.rows = rows;
+    CHECK(io.ExportXlsx(table, path));
+}
+
+TEST(oa_import_preview_message_includes_all_action_counts) {
+    OAImportPreview preview;
+    preview.added = 2;
+    preview.handler_updates = 1;
+    preview.unchanged = 4;
+    preview.handler_conflicts = 3;
+    preview.match_conflicts = 1;
+
+    const std::string message = FormatOAImportPreview(preview);
+
+    CHECK(message.find("新增 2") != std::string::npos);
+    CHECK(message.find("自动更新处理人 1") != std::string::npos);
+    CHECK(message.find("不变 4") != std::string::npos);
+    CHECK(message.find("处理人冲突 3") != std::string::npos);
+    CHECK(message.find("重复匹配冲突 1") != std::string::npos);
+}
+
+TEST(oa_excel_import_previews_and_adds_new_handler) {
+    const std::string xlsx_path = TempDbPath("oa_import_preview") + ".xlsx";
+    const std::string db_path = TempDbPath("oa_import_preview");
+    std::filesystem::remove(xlsx_path);
+    std::filesystem::remove(db_path);
+    WriteOAWorkbook(xlsx_path, {{"GK-OA-1", "OA 导入专利", "第一次审查意见通知书",
+                                 "2026-09-01", "2027-01-01", "新处理人"}});
+
+    int review_calls = 0;
+    OAImportPreview preview;
+    ImportResult result;
+    std::vector<OARecord> records;
+    {
+        Database db(db_path);
+        ExcelIO io;
+        result = io.ImportPatents(
+            xlsx_path, db, nullptr,
+            [&](const OAImportPreview& value) {
+                review_calls++;
+                preview = value;
+                return OAHandlerConflictPolicy::PreserveExisting;
+            });
+        records = db.GetOARecords();
+    }
+    std::filesystem::remove(xlsx_path);
+    std::filesystem::remove(db_path);
+
+    CHECK_EQ(review_calls, 1);
+    CHECK_EQ(preview.added, 1);
+    CHECK_EQ(result.added, 1);
+    CHECK_EQ(records.size(), 1u);
+    CHECK_STR_EQ(records.front().handler, "新处理人");
+}
+
+TEST(oa_excel_import_protects_existing_handler) {
+    const std::string db_path = TempDbPath("oa_import_protect");
+    std::filesystem::remove(db_path);
+    {
+        Database db(db_path);
+        OARecord existing;
+        existing.geke_code = "GK-OA-2";
+        existing.oa_type = "第一次审查意见通知书";
+        existing.issue_date = "2026-08-01";
+        existing.handler = "原处理人";
+        db.InsertOA(existing, false);
+
+        const std::string xlsx_path = TempDbPath("oa_import_protect") + ".xlsx";
+        std::filesystem::remove(xlsx_path);
+        WriteOAWorkbook(xlsx_path, {{"GK-OA-2", "OA 导入专利",
+                                     "第一次审查意见通知书",
+                                     "2026-08-01", "2026-12-01", "新处理人"}});
+        ExcelIO io;
+        auto result = io.ImportPatents(xlsx_path, db, nullptr,
+            [](const OAImportPreview&) {
+                return OAHandlerConflictPolicy::PreserveExisting;
+            });
+        CHECK_EQ(result.handler_conflicts, 1);
+        CHECK_EQ(result.added, 0);
+        auto records = db.GetOARecords();
+        CHECK_EQ(records.size(), 1u);
+        CHECK_STR_EQ(records.front().handler, "原处理人");   // 未被覆盖
+        std::filesystem::remove(xlsx_path);
+    }
+    std::filesystem::remove(db_path);
+}
+
+TEST(oa_excel_import_overwrite_policy_replaces_handler) {
+    const std::string db_path = TempDbPath("oa_import_overwrite");
+    std::filesystem::remove(db_path);
+    {
+        Database db(db_path);
+        OARecord existing;
+        existing.geke_code = "GK-OA-3";
+        existing.oa_type = "1-OA";
+        existing.issue_date = "2026-07-01";
+        existing.handler = "原处理人";
+        db.InsertOA(existing, false);
+
+        const std::string xlsx_path = TempDbPath("oa_import_overwrite") + ".xlsx";
+        std::filesystem::remove(xlsx_path);
+        // 类型写法不同（1-OA vs 第一次审查意见通知书）也要规范化后匹配上
+        WriteOAWorkbook(xlsx_path, {{"GK-OA-3", "OA 导入专利",
+                                     "第一次审查意见通知书",
+                                     "2026-07-01", "2026-11-01", "新处理人"}});
+        ExcelIO io;
+        auto result = io.ImportPatents(xlsx_path, db, nullptr,
+            [](const OAImportPreview&) {
+                return OAHandlerConflictPolicy::OverwriteWithExcel;
+            });
+        CHECK_EQ(result.updated, 1);
+        auto records = db.GetOARecords();
+        CHECK_EQ(records.size(), 1u);
+        CHECK_STR_EQ(records.front().handler, "新处理人");   // 授权覆盖
+        std::filesystem::remove(xlsx_path);
+    }
+    std::filesystem::remove(db_path);
+}
+
+TEST(oa_excel_import_fills_only_empty_handler) {
+    const std::string db_path = TempDbPath("oa_import_fill");
+    std::filesystem::remove(db_path);
+    {
+        Database db(db_path);
+        OARecord existing;   // 无处理人
+        existing.geke_code = "GK-OA-4";
+        existing.oa_type = "第二次审查意见通知书";
+        existing.issue_date = "2026-06-01";
+        db.InsertOA(existing, false);
+
+        const std::string xlsx_path = TempDbPath("oa_import_fill") + ".xlsx";
+        std::filesystem::remove(xlsx_path);
+        // 工作表内重复行（同身份两次）只算一条，处理人取有值那行
+        WriteOAWorkbook(xlsx_path, {
+            {"GK-OA-4", "", "二通", "2026-06-01", "", ""},
+            {"GK-OA-4", "", "第二次审查意见通知书", "2026-06-01", "", "补填处理人"},
+        });
+        ExcelIO io;
+        auto result = io.ImportPatents(xlsx_path, db, nullptr,
+            [](const OAImportPreview&) {
+                return OAHandlerConflictPolicy::PreserveExisting;
+            });
+        CHECK_EQ(result.updated, 1);
+        auto records = db.GetOARecords();
+        CHECK_EQ(records.size(), 1u);              // 重复行没有产生第二条
+        CHECK_STR_EQ(records.front().handler, "补填处理人");
+        std::filesystem::remove(xlsx_path);
+    }
+    std::filesystem::remove(db_path);
+}

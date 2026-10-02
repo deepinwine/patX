@@ -10,16 +10,42 @@ Guardrails baked in on purpose:
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import datetime as _dt
 import json
+import math
 import os
+import re
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Optional, Tuple
 
 LOGIN_WAIT_TIMEOUT_SECONDS = float(os.environ.get("PATX_LOGIN_WAIT", str(20 * 60)))
 STEP_TIMEOUT_MS = 30_000
+
+# ---- CNIPA JWT 严格校验（移植自 codex 分支加固设计）----
+_BASE64URL_SEGMENT = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _decode_base64url(segment: str) -> bytes:
+    if not isinstance(segment, str) or not _BASE64URL_SEGMENT.fullmatch(segment):
+        raise ValueError("invalid base64url segment")
+    padding = "=" * (-len(segment) % 4)
+    return base64.b64decode(
+        (segment + padding).encode("ascii"),
+        altchars=b"-_",
+        validate=True,
+    )
+
+
+def _decode_jwt_object(segment: str, name: str) -> dict:
+    value = json.loads(_decode_base64url(segment).decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"JWT {name} is not an object")
+    return value
 
 
 def default_profile_dir(provider: str) -> Path:
@@ -109,6 +135,69 @@ class BrowserManager:
             return bool(self._page.evaluate("localStorage.getItem('ACCESS_TOKEN')"))
         except Exception:
             return False
+
+    def cpquery_session_state(
+        self,
+        expected_origin: str,
+        *,
+        page=None,
+        now: Optional[float] = None,
+        min_ttl_seconds: float = 60,
+    ) -> str:
+        """Inspect an existing CNIPA session without launching or navigating.
+
+        Returns NOT_INITIALIZED / AUTH_REQUIRED / SESSION_EXPIRED /
+        AUTHENTICATED. A token that exists but is malformed or within the
+        TTL margin counts as expired - never as authenticated."""
+        target_page = page
+        if target_page is None:
+            if self._context is None or self._page is None:
+                return "NOT_INITIALIZED"
+            target_page = self._page
+        try:
+            expected = urllib.parse.urlparse(str(expected_origin or ""))
+            parsed = urllib.parse.urlparse(str(target_page.url or ""))
+            if expected.scheme not in ("http", "https") or not expected.netloc:
+                return "SESSION_EXPIRED"
+            if (
+                parsed.scheme.lower() != expected.scheme.lower()
+                or parsed.netloc.lower() != expected.netloc.lower()
+            ):
+                return "AUTH_REQUIRED"
+            token = target_page.evaluate("localStorage.getItem('ACCESS_TOKEN')")
+        except Exception:
+            return "SESSION_EXPIRED"
+        if not isinstance(token, str) or not token:
+            return "AUTH_REQUIRED"
+        try:
+            parts = token.split(".")
+            if len(parts) != 3:
+                raise ValueError("not a JWT")
+            _decode_jwt_object(parts[0], "header")
+            payload = _decode_jwt_object(parts[1], "payload")
+            _decode_base64url(parts[2])
+            expires_at = payload.get("exp")
+            if (
+                isinstance(expires_at, bool)
+                or not isinstance(expires_at, (int, float))
+                or not math.isfinite(float(expires_at))
+            ):
+                raise ValueError("JWT has no finite numeric exp")
+            reference_time = time.time() if now is None else float(now)
+            ttl_margin = max(0.0, float(min_ttl_seconds))
+            if not math.isfinite(reference_time) or not math.isfinite(ttl_margin):
+                raise ValueError("invalid expiry comparison clock")
+        except (
+            ValueError,
+            TypeError,
+            UnicodeError,
+            binascii.Error,
+            json.JSONDecodeError,
+        ):
+            return "SESSION_EXPIRED"
+        if float(expires_at) <= reference_time + ttl_margin:
+            return "SESSION_EXPIRED"
+        return "AUTHENTICATED"
 
     def _spawn_and_attach(self):
         """Launch a REAL browser ourselves with a debug port, then attach via

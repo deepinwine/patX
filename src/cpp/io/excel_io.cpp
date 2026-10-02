@@ -3,6 +3,7 @@
  */
 
 #include "excel_io.hpp"
+#include "web_dossier.hpp"
 #include "database.hpp"
 #include <fstream>
 #include <sstream>
@@ -13,6 +14,8 @@
 #include <cctype>
 #include <regex>
 #include <set>
+#include <tuple>
+#include <map>
 #include <iostream>
 
 #include <OpenXLSX.hpp>
@@ -25,6 +28,148 @@
 // Import diagnostics: written to the unified log (and a debug file only when
 // PATX_IMPORT_DEBUG is set, so normal imports stop littering the workdir).
 #include "patx/log.hpp"
+
+namespace {
+
+// ---- OA 导入预检计划（借鉴 codex 分支设计：预检与执行分离）----
+enum class OAImportAction {
+    Insert,
+    UpdateEmptyHandler,
+    Unchanged,
+    HandlerConflict,
+    MatchConflict
+};
+
+struct PlannedOAImport {
+    OARecord incoming;
+    OAImportAction action = OAImportAction::Insert;
+    bool sheet_handler_conflict = false;   // 工作表内同身份多个不同处理人
+    size_t represented_rows = 1;           // 该行代表的原始行数（去重后）
+};
+
+struct OAImportPlan {
+    std::vector<PlannedOAImport> rows;
+    OAImportPreview preview;
+};
+
+std::vector<OARecord> FindExactOAMatches(const OARecord& incoming, Database& db) {
+    std::vector<OARecord> matches;
+    if (incoming.oa_type.empty() || incoming.issue_date.empty()) return matches;
+    const std::string normalized_type = webdossier::NormalizeOaTypeCn(incoming.oa_type);
+    for (const auto& existing : db.GetOAByPatent(incoming.geke_code)) {
+        if (webdossier::NormalizeOaTypeCn(existing.oa_type) == normalized_type &&
+            existing.issue_date == incoming.issue_date) {
+            matches.push_back(existing);
+        }
+    }
+    return matches;
+}
+
+PlannedOAImport ClassifyOAImport(const OARecord& incoming, Database& db) {
+    PlannedOAImport planned;
+    planned.incoming = incoming;
+    if (incoming.oa_type.empty() || incoming.issue_date.empty()) return planned;
+
+    const auto matches = FindExactOAMatches(incoming, db);
+    if (matches.size() > 1) {
+        planned.action = OAImportAction::MatchConflict;
+    } else if (matches.size() == 1) {
+        const OARecord& existing = matches.front();
+        if (existing.handler.empty() && !incoming.handler.empty()) {
+            planned.action = OAImportAction::UpdateEmptyHandler;
+        } else if (incoming.handler.empty() ||
+                   existing.handler == incoming.handler) {
+            planned.action = OAImportAction::Unchanged;
+        } else {
+            planned.action = OAImportAction::HandlerConflict;
+        }
+    }
+    return planned;
+}
+
+OAImportPlan BuildOAImportPlan(const std::vector<OARecord>& incoming_rows,
+                               Database& db) {
+    OAImportPlan plan;
+    plan.rows.reserve(incoming_rows.size());
+    for (const auto& incoming : incoming_rows) {
+        PlannedOAImport planned;
+        planned.incoming = incoming;
+        plan.rows.push_back(std::move(planned));
+    }
+
+    // 同一身份（编号+规范类型+发文日）的行分组去重
+    using MatchKey = std::tuple<std::string, std::string, std::string>;
+    std::map<MatchKey, std::vector<size_t>> groups;
+    for (size_t index = 0; index < plan.rows.size(); index++) {
+        const OARecord& incoming = plan.rows[index].incoming;
+        if (incoming.oa_type.empty() || incoming.issue_date.empty()) continue;
+        groups[{incoming.geke_code,
+                webdossier::NormalizeOaTypeCn(incoming.oa_type),
+                incoming.issue_date}].push_back(index);
+    }
+
+    for (const auto& group : groups) {
+        const auto& indices = group.second;
+        std::set<std::string> incoming_handlers;
+        size_t primary_index = indices.front();
+        for (size_t index : indices) {
+            const std::string& handler = plan.rows[index].incoming.handler;
+            if (!handler.empty()) {
+                incoming_handlers.insert(handler);
+                if (plan.rows[primary_index].incoming.handler.empty())
+                    primary_index = index;
+            }
+        }
+
+        PlannedOAImport classified =
+            ClassifyOAImport(plan.rows[primary_index].incoming, db);
+        if (classified.action == OAImportAction::MatchConflict) {
+            for (size_t index : indices) {
+                plan.rows[index].action = OAImportAction::MatchConflict;
+                plan.rows[index].represented_rows = 0;
+            }
+            plan.rows[primary_index].represented_rows = indices.size();
+            continue;
+        }
+        // 工作表内同身份出现多个不同处理人：整组标记冲突
+        if (incoming_handlers.size() > 1) {
+            for (size_t index : indices) {
+                plan.rows[index].action = OAImportAction::HandlerConflict;
+                plan.rows[index].sheet_handler_conflict = true;
+            }
+            continue;
+        }
+
+        plan.rows[primary_index] = std::move(classified);
+        plan.rows[primary_index].represented_rows = indices.size();
+        const OAImportAction duplicate_action =
+            plan.rows[primary_index].action == OAImportAction::HandlerConflict
+                ? OAImportAction::HandlerConflict
+                : OAImportAction::Unchanged;
+        for (size_t index : indices) {
+            if (index != primary_index) {
+                plan.rows[index].action = duplicate_action;
+                plan.rows[index].represented_rows = 0;
+            }
+        }
+    }
+
+    for (const auto& planned : plan.rows) {
+        switch (planned.action) {
+            case OAImportAction::Insert: plan.preview.added++; break;
+            case OAImportAction::UpdateEmptyHandler:
+                plan.preview.handler_updates++; break;
+            case OAImportAction::Unchanged: plan.preview.unchanged++; break;
+            case OAImportAction::HandlerConflict:
+                plan.preview.handler_conflicts++; break;
+            case OAImportAction::MatchConflict:
+                plan.preview.match_conflicts++; break;
+        }
+    }
+    return plan;
+}
+
+} // namespace
 static void DebugLog(const std::string& msg) {
     if (std::getenv("PATX_IMPORT_DEBUG")) {
         static std::ofstream debug_log;
@@ -455,17 +600,29 @@ int ExcelIO::MapForeignColumnToField(const std::string& column_name) {
 
 // ===================== Import Entry =====================
 
+std::string FormatOAImportPreview(const OAImportPreview& preview) {
+    std::ostringstream message;
+    message << "OA 导入预检：\n"
+            << "  新增 " << preview.added << "\n"
+            << "  自动更新处理人 " << preview.handler_updates << "\n"
+            << "  不变 " << preview.unchanged << "\n"
+            << "  处理人冲突 " << preview.handler_conflicts << "\n"
+            << "  重复匹配冲突 " << preview.match_conflicts;
+    return message.str();
+}
+
 ImportResult ExcelIO::ImportPatents(
     const std::string& file_path,
     Database& db,
-    std::function<bool(int, int)> progress_callback
+    std::function<bool(int, int)> progress_callback,
+    OAImportReviewCallback oa_review_callback
 ) {
     ImportResult result;
     try {
         if (IsCsvFile(file_path)) {
             result = ImportPatentsFromCsv(file_path, db, progress_callback);
         } else if (IsExcelFile(file_path)) {
-            result = ImportPatentsFromXlsx(file_path, db, progress_callback);
+            result = ImportPatentsFromXlsx(file_path, db, progress_callback, oa_review_callback);
         } else {
             last_error_ = "Unsupported file format";
         }
@@ -578,7 +735,8 @@ ImportResult ExcelIO::ImportPatentsFromCsv(
 ImportResult ExcelIO::ImportPatentsFromXlsx(
     const std::string& file_path,
     Database& db,
-    std::function<bool(int, int)> progress_callback
+    std::function<bool(int, int)> progress_callback,
+    OAImportReviewCallback oa_review_callback
 ) {
     ImportResult result;
 
@@ -668,7 +826,8 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                     field_map.push_back(MapOAColumnToField(headers[col]));
                 }
 
-                db.BeginBatch();
+                // 第一遍：解析全部行
+                std::vector<OARecord> incoming_rows;
                 for (uint32_t row = 2; row <= rowCount; row++) {
                     OARecord oa;
                     for (uint16_t col = 0; col < colCount; col++) {
@@ -689,10 +848,80 @@ ImportResult ExcelIO::ImportPatentsFromXlsx(
                         }
                     }
                     if (oa.geke_code.empty() || !IsValidGekeCode(oa.geke_code)) continue;
-                    db.InsertOA(oa);
-                    sheet_added++;
+                    incoming_rows.push_back(oa);
                 }
-                result.type_summary += "OA: " + std::to_string(sheet_added) + " added; ";
+
+                // 第二遍：预检 → 用户确认 → 重建计划（防止确认期间库被改）→ 执行
+                OAImportPlan plan = BuildOAImportPlan(incoming_rows, db);
+                OAHandlerConflictPolicy policy = OAHandlerConflictPolicy::PreserveExisting;
+                bool reviewed = false;
+                if (!plan.rows.empty() && oa_review_callback) {
+                    policy = oa_review_callback(plan.preview);
+                    reviewed = true;
+                }
+
+                if (policy == OAHandlerConflictPolicy::CancelImport) {
+                    result.cancelled = true;
+                    result.handler_conflicts += plan.preview.handler_conflicts;
+                    result.match_conflicts += plan.preview.match_conflicts;
+                    sheet_skipped += static_cast<int>(plan.rows.size());
+                } else {
+                    if (reviewed) plan = BuildOAImportPlan(incoming_rows, db);
+                    db.BeginBatch();
+                    for (const auto& planned : plan.rows) {
+                        if (planned.represented_rows == 0) continue;
+                        const int represented_rows =
+                            static_cast<int>(planned.represented_rows);
+                        if (planned.sheet_handler_conflict) {
+                            result.handler_conflicts++;
+                            sheet_skipped++;
+                            continue;
+                        }
+                        // 缺类型或日期的行无法精确合并，按旧行为直接插入
+                        if (planned.incoming.oa_type.empty() ||
+                            planned.incoming.issue_date.empty()) {
+                            if (db.InsertOA(planned.incoming) > 0) sheet_added++;
+                            else result.errors++;
+                            continue;
+                        }
+
+                        const OAExactMergeResult applied = db.MergeOAExact(
+                            planned.incoming,
+                            true,
+                            true,
+                            policy == OAHandlerConflictPolicy::OverwriteWithExcel);
+                        switch (applied.status) {
+                            case OAExactMergeStatus::Inserted:
+                                sheet_added++;
+                                sheet_skipped += represented_rows - 1;
+                                break;
+                            case OAExactMergeStatus::HandlerUpdated:
+                                sheet_updated++;
+                                sheet_skipped += represented_rows - 1;
+                                if (applied.overwrote_handler_conflict) {
+                                    result.handler_conflicts += represented_rows;
+                                }
+                                break;
+                            case OAExactMergeStatus::Unchanged:
+                                sheet_skipped += represented_rows;
+                                break;
+                            case OAExactMergeStatus::HandlerConflict:
+                                result.handler_conflicts += represented_rows;
+                                sheet_skipped += represented_rows;
+                                break;
+                            case OAExactMergeStatus::MatchConflict:
+                                result.match_conflicts += represented_rows;
+                                sheet_skipped += represented_rows;
+                                break;
+                            case OAExactMergeStatus::Error:
+                                result.errors += represented_rows;
+                                break;
+                        }
+                    }
+                }
+                result.type_summary += "OA: " + std::to_string(sheet_added) + " added, " +
+                    std::to_string(sheet_updated) + " updated, " +
+                    std::to_string(sheet_skipped) + " skipped; ";
 
             } else if (type == SheetType::PCT) {
                 std::vector<int> field_map;

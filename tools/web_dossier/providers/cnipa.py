@@ -441,16 +441,30 @@ class CNIPAWebProvider(DossierProvider):
             page.wait_for_timeout(3000)   # let the SPA settle / redirect
         except Exception:
             pass
-        if self._manager.has_cpquery_token():
-            return ResultCode.OK
+        # 统一会话判定（严格 JWT 结构 + 剩余 TTL 余量）：先看当前页，
+        # 再扫描其他 cpquery 标签页——存在但结构坏/将过期的 token
+        # 一律按过期处理，绝不当作已登录
+        state_reader = getattr(self._manager, "cpquery_session_state", None)
+        if callable(state_reader):
+            state = state_reader(BASE_URL)
+            if state == "AUTHENTICATED":
+                return ResultCode.OK
         try:
             for p in self._manager._context.pages:
                 if not p.is_closed() and "cpquery" in p.url:
-                    if p.evaluate("localStorage.getItem('ACCESS_TOKEN')"):
+                    if callable(state_reader):
+                        if state_reader(BASE_URL, page=p) == "AUTHENTICATED":
+                            self._manager._page = p
+                            return ResultCode.OK
+                    elif p.evaluate("localStorage.getItem('ACCESS_TOKEN')"):
                         self._manager._page = p
                         return ResultCode.OK
         except Exception:
             pass
+        if callable(state_reader):
+            state = state_reader(BASE_URL)
+            if state == "SESSION_EXPIRED":
+                return ResultCode.SESSION_EXPIRED
         html = page.content()
         if looks_blocked(html):
             return ResultCode.RATE_LIMITED

@@ -2214,10 +2214,37 @@ private:
         progress.Pulse();
 
         auto& excel = GetExcelIO();
-        auto result = excel.ImportPatents(path, *db, [&progress](int current, int total) -> bool {
-            progress.Update(std::min(current * 100 / std::max(total, 1), 99));
-            return !progress.WasCancelled();
-        });
+        auto result = excel.ImportPatents(path, *db,
+            [&progress](int current, int total) -> bool {
+                progress.Update(std::min(current * 100 / std::max(total, 1), 99));
+                return !progress.WasCancelled();
+            },
+            [this](const OAImportPreview& preview) {
+                // OA 导入预检：有处理人冲突时三选一，否则确认导入
+                const wxString message =
+                    wxString::FromUTF8(FormatOAImportPreview(preview).c_str());
+                if (preview.handler_conflicts > 0) {
+                    const int answer = wxMessageBox(
+                        message + UTF8_STR(
+                            "\n\n是：以 Excel 覆盖冲突处理人"
+                            "\n否：保留原处理人"
+                            "\n取消：不导入该 OA 工作表"),
+                        UTF8_STR("OA 导入预检"),
+                        wxYES_NO | wxCANCEL | wxICON_QUESTION, this);
+                    if (answer == wxYES)
+                        return OAHandlerConflictPolicy::OverwriteWithExcel;
+                    if (answer == wxNO)
+                        return OAHandlerConflictPolicy::PreserveExisting;
+                    return OAHandlerConflictPolicy::CancelImport;
+                }
+                const int answer = wxMessageBox(
+                    message + UTF8_STR("\n\n是否继续导入？"),
+                    UTF8_STR("OA 导入预检"),
+                    wxYES_NO | wxICON_QUESTION, this);
+                return answer == wxYES
+                    ? OAHandlerConflictPolicy::PreserveExisting
+                    : OAHandlerConflictPolicy::CancelImport;
+            });
         progress.Update(100);
         progress.Close();
 

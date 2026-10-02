@@ -250,6 +250,23 @@ struct DossierSyncState {
     std::string auth_state;           // NOT_INITIALIZED / AUTHENTICATED / ...
 };
 
+
+// OA 精确合并（Excel 导入用）：按 编号+规范类型+发文日 唯一匹配。
+enum class OAExactMergeStatus {
+    Inserted,
+    HandlerUpdated,
+    Unchanged,
+    HandlerConflict,
+    MatchConflict,
+    Error
+};
+
+struct OAExactMergeResult {
+    OAExactMergeStatus status = OAExactMergeStatus::Error;
+    int record_id = 0;
+    bool overwrote_handler_conflict = false;
+};
+
 class Database {
 public:
     explicit Database(const std::string& db_path);
@@ -280,6 +297,13 @@ public:
     OARecord GetOAById(int id);
     std::vector<OARecord> GetOAByPatent(const std::string& geke_code);
     int InsertOA(const OARecord& oa, bool log_undo = true);
+    // 原子合并一条完整 OA 身份（编号+规范类型+发文日）：
+    // 处理人默认只填空值；overwrite_handler_conflict=true 才允许覆盖，
+    // 多条匹配返回 MatchConflict 绝不猜测。整个操作在事务内完成。
+    OAExactMergeResult MergeOAExact(const OARecord& incoming,
+                                    bool fill_empty_handler = true,
+                                    bool log_undo = true,
+                                    bool overwrite_handler_conflict = false);
     bool UpdateOA(int id, const OARecord& oa, bool log_undo = true);
     bool DeleteOA(int id, bool log_undo = true);
     bool MarkOACompleted(int id);

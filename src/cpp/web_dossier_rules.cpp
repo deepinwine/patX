@@ -3,6 +3,8 @@
 // so the offline unit tests link without wxWidgets.
 #include "web_dossier.hpp"
 
+#include <regex>
+
 namespace webdossier {
 
 const char* ToString(ResultCode c) {
@@ -127,6 +129,15 @@ int OaTypeOrdinalCn(const std::string& raw) {
         }
         pos = s.find("第", pos + 3);
     }
+    {
+        static const std::regex digit_oa_re("^([1-9][0-9]?)[-_]?(OA|通)$",
+                                            std::regex::icase);
+        std::smatch dm;
+        if (std::regex_match(s, dm, digit_oa_re)) {
+            int v = std::stoi(dm[1].str());
+            return v > 0 && v < 100 ? v : 0;
+        }
+    }
     if (s.find("一通") != std::string::npos) return 1;
     if (s.find("二通") != std::string::npos) return 2;
     if (s.find("三通") != std::string::npos) return 3;
@@ -140,6 +151,16 @@ std::string NormalizeOaTypeCn(const std::string& raw) {
     std::string compact;
     for (char c : s) {
         if (c != ' ' && c != '\t') compact += c;
+    }
+    // 旧台账风格 "1-OA"/"2-OA"/"3通"：规范成中文名（跨风格精确匹配的基础）
+    {
+        static const std::regex digit_oa_re("^([1-9][0-9]?)[-_]?(OA|通)$",
+                                            std::regex::icase);
+        std::smatch dm;
+        if (std::regex_match(compact, dm, digit_oa_re)) {
+            return "第" + OrdinalToChinese(std::stoi(dm[1].str())) +
+                   "次审查意见通知书";
+        }
     }
     if (compact.find("审查意见通知书") == std::string::npos) {
         // internal abbreviations: 一通/二通/三通/四通

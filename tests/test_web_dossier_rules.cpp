@@ -57,6 +57,11 @@ static void TestNormalizeOaType() {
     CHECK_STR_EQ(NormalizeOaTypeCn("第3次审查意见通知书"), "第三次审查意见通知书");
     CHECK_STR_EQ(NormalizeOaTypeCn("第１０次审查意见通知书"), "第十次审查意见通知书");
     CHECK_STR_EQ(NormalizeOaTypeCn("二通"), "第二次审查意见通知书");
+    CHECK_STR_EQ(NormalizeOaTypeCn("1-OA"), "第一次审查意见通知书");
+    CHECK_STR_EQ(NormalizeOaTypeCn("2-OA"), "第二次审查意见通知书");
+    CHECK_STR_EQ(NormalizeOaTypeCn("3通"), "第三次审查意见通知书");
+    CHECK(OaTypeOrdinalCn("1-OA") == 1);
+    CHECK(OaTypeOrdinalCn("4-OA") == 4);
     CHECK_STR_EQ(NormalizeOaTypeCn("审查意见通知书"), "审查意见通知书");
     CHECK_STR_EQ(NormalizeOaTypeCn("第二次 审查意见 通知书"), "第二次审查意见通知书");
     // Non-OA titles come back untouched

@@ -7,6 +7,7 @@
 #include "undo_manager.hpp"
 #include "patx/schema_migrations.hpp"
 #include "patx/deadline_engine.hpp"
+#include "web_dossier.hpp"
 #include "patx/log.hpp"
 
 #include <sstream>
@@ -872,6 +873,86 @@ std::vector<OARecord> Database::GetOAByPatent(const std::string& geke_code) {
         sqlite3_finalize(stmt);
     }
     return results;
+}
+
+OAExactMergeResult Database::MergeOAExact(const OARecord& incoming,
+                                            bool fill_empty_handler,
+                                            bool log_undo,
+                                            bool overwrite_handler_conflict) {
+    OAExactMergeResult result;
+    if (incoming.geke_code.empty() || incoming.oa_type.empty() ||
+        incoming.issue_date.empty()) {
+        last_error_ = "OA 精确合并需要编号、类型与发文日";
+        return result;
+    }
+    // 事务保证：查匹配与写入之间没有其他写入插入
+    Execute("BEGIN IMMEDIATE;");
+    auto finish = [&](OAExactMergeResult value) {
+        Execute(value.status == OAExactMergeStatus::Error ? "ROLLBACK;" : "COMMIT;");
+        return value;
+    };
+
+    const std::string canonical = webdossier::NormalizeOaTypeCn(incoming.oa_type);
+    std::vector<OARecord> matches;
+    for (const auto& existing : GetOAByPatent(incoming.geke_code)) {
+        if (existing.issue_date == incoming.issue_date &&
+            webdossier::NormalizeOaTypeCn(existing.oa_type) == canonical) {
+            matches.push_back(existing);
+        }
+    }
+    if (matches.size() > 1) {
+        result.status = OAExactMergeStatus::MatchConflict;
+        last_error_ = "多条 OA 匹配同一身份，待人工确认";
+        return finish(result);
+    }
+    if (matches.empty()) {
+        int id = InsertOA(incoming, log_undo);
+        if (id > 0) {
+            result.status = OAExactMergeStatus::Inserted;
+            result.record_id = id;
+        }
+        return finish(result);
+    }
+
+    const OARecord& existing = matches.front();
+    result.record_id = existing.id;
+    const bool fills_empty = fill_empty_handler && existing.handler.empty() &&
+                             !incoming.handler.empty();
+    const bool overwrites = overwrite_handler_conflict &&
+                            !existing.handler.empty() &&
+                            !incoming.handler.empty() &&
+                            existing.handler != incoming.handler;
+    if (fills_empty || overwrites) {
+        sqlite3_stmt* stmt = nullptr;
+        const char* sql = fills_empty
+            ? "UPDATE oa_records SET handler = ? "
+              "WHERE id = ? AND (handler IS NULL OR handler = '')"
+            : "UPDATE oa_records SET handler = ? WHERE id = ?";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, incoming.handler.c_str(), -1,
+                              SQLITE_TRANSIENT);
+            sqlite3_bind_int(stmt, 2, existing.id);
+            if (sqlite3_step(stmt) == SQLITE_DONE &&
+                sqlite3_changes(db_) > 0) {
+                result.status = OAExactMergeStatus::HandlerUpdated;
+                result.overwrote_handler_conflict = overwrites;
+            }
+            sqlite3_finalize(stmt);
+        } else {
+            last_error_ = sqlite3_errmsg(db_);
+        }
+        if (result.status != OAExactMergeStatus::HandlerUpdated) {
+            result.status = OAExactMergeStatus::Error;
+            return finish(result);
+        }
+        return finish(result);
+    }
+    if (!incoming.handler.empty() && existing.handler != incoming.handler) {
+        result.status = OAExactMergeStatus::HandlerConflict;
+    } else {
+        result.status = OAExactMergeStatus::Unchanged;
+    }
+    return finish(result);
 }
 
 int Database::InsertOA(const OARecord& oa, bool log_undo) {
