@@ -11,6 +11,7 @@
 #include <future>
 #include <sqlite3.h>
 #include <thread>
+#include <utility>
 
 using namespace testutil;
 
@@ -42,69 +43,324 @@ Patent MakePatent() {
     return p;
 }
 
+class ScopedSqliteStatement {
+public:
+    ScopedSqliteStatement() = default;
+    ~ScopedSqliteStatement() {
+        if (value_) sqlite3_finalize(value_);
+    }
+
+    ScopedSqliteStatement(const ScopedSqliteStatement&) = delete;
+    ScopedSqliteStatement& operator=(const ScopedSqliteStatement&) = delete;
+
+    sqlite3_stmt** out() { return &value_; }
+    sqlite3_stmt* get() const { return value_; }
+
+private:
+    sqlite3_stmt* value_ = nullptr;
+};
+
 bool SqliteHasColumn(sqlite3* db, const char* table, const char* column) {
-    sqlite3_stmt* stmt = nullptr;
+    ScopedSqliteStatement stmt;
     std::string sql = std::string("PRAGMA table_info(") + table + ")";
-    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, stmt.out(), nullptr) != SQLITE_OK) return false;
     bool found = false;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 1));
         if (name && std::string(name) == column) {
             found = true;
             break;
         }
     }
-    sqlite3_finalize(stmt);
     return found;
 }
 
 bool SqliteHasIndex(sqlite3* db, const char* index) {
-    sqlite3_stmt* stmt = nullptr;
+    ScopedSqliteStatement stmt;
     const char* sql = "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?";
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) return false;
-    sqlite3_bind_text(stmt, 1, index, -1, SQLITE_TRANSIENT);
-    bool found = sqlite3_step(stmt) == SQLITE_ROW;
-    sqlite3_finalize(stmt);
+    if (sqlite3_prepare_v2(db, sql, -1, stmt.out(), nullptr) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt.get(), 1, index, -1, SQLITE_TRANSIENT);
+    bool found = sqlite3_step(stmt.get()) == SQLITE_ROW;
     return found;
 }
 
 std::vector<std::string> SqliteIndexColumns(sqlite3* db, const char* index) {
     std::vector<std::string> columns;
-    sqlite3_stmt* stmt = nullptr;
+    ScopedSqliteStatement stmt;
     std::string sql = std::string("PRAGMA index_info(") + index + ")";
-    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return columns;
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, stmt.out(), nullptr) != SQLITE_OK) return columns;
+    while (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 2));
         if (name) columns.emplace_back(name);
     }
-    sqlite3_finalize(stmt);
     return columns;
 }
 
 std::string SqliteIndexSql(sqlite3* db, const char* index) {
-    sqlite3_stmt* stmt = nullptr;
+    ScopedSqliteStatement stmt;
     const char* query = "SELECT sql FROM sqlite_master WHERE type='index' AND name=?";
-    if (sqlite3_prepare_v2(db, query, -1, &stmt, nullptr) != SQLITE_OK) return "";
-    sqlite3_bind_text(stmt, 1, index, -1, SQLITE_TRANSIENT);
+    if (sqlite3_prepare_v2(db, query, -1, stmt.out(), nullptr) != SQLITE_OK) return "";
+    sqlite3_bind_text(stmt.get(), 1, index, -1, SQLITE_TRANSIENT);
     std::string sql;
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0));
         if (text) sql = text;
     }
-    sqlite3_finalize(stmt);
     return sql;
 }
+
+void RemoveDatabaseAndMigrationBackups(const std::string& path) noexcept {
+    std::error_code error;
+    const std::filesystem::path db_path(path);
+    const std::string backup_prefix = db_path.filename().string() + ".pre_migration_";
+    std::filesystem::directory_iterator iterator(db_path.parent_path(), error);
+    const std::filesystem::directory_iterator end;
+    while (!error && iterator != end) {
+        if (iterator->path().filename().string().find(backup_prefix) == 0) {
+            std::filesystem::remove(iterator->path(), error);
+        }
+        iterator.increment(error);
+    }
+    error.clear();
+    std::filesystem::remove(path + "-wal", error);
+    error.clear();
+    std::filesystem::remove(path + "-shm", error);
+    error.clear();
+    std::filesystem::remove(path, error);
+}
+
+struct ScopedMigrationDatabase {
+    explicit ScopedMigrationDatabase(std::string database_path)
+        : path(std::move(database_path)) {
+        RemoveDatabaseAndMigrationBackups(path);
+    }
+
+    ~ScopedMigrationDatabase() { RemoveDatabaseAndMigrationBackups(path); }
+
+    std::string path;
+};
+
+struct ScopedSqliteHandle {
+    ScopedSqliteHandle() = default;
+    ~ScopedSqliteHandle() {
+        if (value) sqlite3_close_v2(value);
+    }
+
+    ScopedSqliteHandle(const ScopedSqliteHandle&) = delete;
+    ScopedSqliteHandle& operator=(const ScopedSqliteHandle&) = delete;
+
+    sqlite3* value = nullptr;
+};
+
+std::string UnifiedLegacySchemaSql(int version, bool include_due_index) {
+    std::string sql =
+        "CREATE TABLE schema_info(version INTEGER NOT NULL);"
+        "INSERT INTO schema_info VALUES(" + std::to_string(version) + ");";
+    sql += R"sql(
+        CREATE TABLE patents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            geke_code TEXT UNIQUE,
+            application_number TEXT,
+            title TEXT,
+            proposal_name TEXT,
+            application_status TEXT,
+            patent_type TEXT,
+            patent_level TEXT,
+            application_date TEXT,
+            authorization_date TEXT,
+            expiration_date TEXT,
+            geke_handler TEXT,
+            rd_department TEXT,
+            agency_firm TEXT,
+            original_applicant TEXT,
+            current_applicant TEXT,
+            inventor TEXT,
+            notes TEXT,
+            class_level1 TEXT,
+            class_level2 TEXT,
+            class_level3 TEXT,
+            updated_at INTEGER DEFAULT 0,
+            related_case_info TEXT,
+            fee_status TEXT,
+            rd_project TEXT,
+            class_level4 TEXT,
+            tags TEXT,
+            details TEXT,
+            filing_date TEXT,
+            disclosure_writer TEXT,
+            agent_code TEXT,
+            agent_name TEXT,
+            intangible_asset_eval TEXT,
+            internal_rd_project TEXT,
+            technology_route TEXT,
+            project_id TEXT,
+            oa_reminder_1 TEXT,
+            oa_reminder_2 TEXT,
+            oa_reminder_3 TEXT,
+            oa_reminder_4 TEXT,
+            oa_reminder_5 TEXT,
+            reexamination TEXT,
+            pudong_subsidy TEXT,
+            pct_reminder TEXT,
+            publication_number TEXT,
+            last_dossier_check_at INTEGER DEFAULT 0,
+            next_dossier_check_at INTEGER DEFAULT 0
+        );
+        CREATE TABLE oa_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patent_id INTEGER,
+            geke_code TEXT,
+            patent_title TEXT,
+            oa_type TEXT,
+            official_deadline TEXT,
+            issue_date TEXT,
+            response_date TEXT,
+            handler TEXT,
+            writer TEXT,
+            progress TEXT,
+            agency TEXT,
+            oa_summary TEXT,
+            is_completed INTEGER DEFAULT 0,
+            is_extendable INTEGER DEFAULT 0,
+            extension_requested INTEGER DEFAULT 0,
+            extension_months INTEGER,
+            extended_deadline TEXT,
+            notes TEXT,
+            jurisdiction TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            deadline_source TEXT DEFAULT '',
+            remote_document_id TEXT DEFAULT '',
+            sync_flag TEXT DEFAULT ''
+        );
+        CREATE TABLE prosecution_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patent_id INTEGER,
+            jurisdiction TEXT,
+            application_number TEXT,
+            publication_number TEXT,
+            source TEXT,
+            remote_document_id TEXT,
+            document_type TEXT,
+            document_title TEXT,
+            raw_title TEXT DEFAULT '',
+            document_code TEXT DEFAULT '',
+            document_version TEXT DEFAULT 'ORIGINAL',
+            official_date TEXT,
+            direction TEXT,
+            source_url TEXT,
+            download_url TEXT,
+            download_available INTEGER DEFAULT 0,
+            fingerprint TEXT,
+            event_key TEXT DEFAULT '',
+            source_trace TEXT DEFAULT '',
+            first_seen_at INTEGER,
+            last_seen_at INTEGER,
+            local_path TEXT,
+            downloaded_at INTEGER DEFAULT 0,
+            raw_metadata TEXT,
+            UNIQUE (source, application_number, fingerprint)
+        );
+        CREATE INDEX idx_prosecution_docs_patent ON prosecution_documents(patent_id);
+        CREATE UNIQUE INDEX idx_prosecution_docs_event_key
+            ON prosecution_documents(patent_id,event_key) WHERE event_key <> '';
+        CREATE TABLE dossier_sync_state (
+            patent_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            last_checked_at INTEGER DEFAULT 0,
+            last_success_at INTEGER DEFAULT 0,
+            last_error_at INTEGER DEFAULT 0,
+            last_error_code TEXT,
+            last_error_message TEXT,
+            latest_remote_oa_date TEXT,
+            latest_remote_oa_type TEXT,
+            auth_state TEXT DEFAULT 'NOT_INITIALIZED',
+            PRIMARY KEY (patent_id, provider)
+        );
+    )sql";
+    if (include_due_index) {
+        sql += "CREATE INDEX idx_patents_next_dossier_check "
+               "ON patents(next_dossier_check_at);";
+    }
+    return sql;
+}
+
+void CheckUnifiedV6Shape(sqlite3* db) {
+    for (const char* column : {
+             "geke_code", "application_number", "title", "proposal_name",
+             "application_status", "patent_type", "geke_handler", "technology_route",
+             "project_id", "publication_number", "last_dossier_check_at",
+             "next_dossier_check_at"}) {
+        CHECK(SqliteHasColumn(db, "patents", column));
+    }
+    for (const char* column : {
+             "patent_id", "geke_code", "patent_title", "oa_type", "official_deadline",
+             "issue_date", "response_date", "handler", "writer", "progress", "agency",
+             "oa_summary", "notes", "jurisdiction", "source", "deadline_source",
+             "remote_document_id", "sync_flag"}) {
+        CHECK(SqliteHasColumn(db, "oa_records", column));
+    }
+    for (const char* column : {
+             "patent_id", "jurisdiction", "application_number", "publication_number",
+             "source", "remote_document_id", "document_type", "document_title",
+             "official_date", "direction", "source_url", "download_url",
+             "download_available", "fingerprint", "first_seen_at", "last_seen_at",
+             "local_path", "downloaded_at", "raw_metadata", "raw_title", "document_code",
+             "document_version", "event_key", "source_trace"}) {
+        CHECK(SqliteHasColumn(db, "prosecution_documents", column));
+    }
+    for (const char* column : {
+             "patent_id", "provider", "last_checked_at", "last_success_at", "last_error_at",
+             "last_error_code", "last_error_message", "latest_remote_oa_date",
+             "latest_remote_oa_type", "auth_state", "latest_applicant_activity",
+             "terminal_state", "reexamination_state"}) {
+        CHECK(SqliteHasColumn(db, "dossier_sync_state", column));
+    }
+    CHECK(SqliteHasIndex(db, "idx_patents_next_dossier_check"));
+    CHECK(SqliteHasIndex(db, "idx_prosecution_docs_event_key"));
+}
+
+struct AlterTableAuthorizerContext {
+    int alter_table_calls = 0;
+};
+
+int DenySecondAlterTable(void* raw_context, int action, const char*, const char*,
+                         const char*, const char*) {
+    if (action != SQLITE_ALTER_TABLE) return SQLITE_OK;
+    auto* context = static_cast<AlterTableAuthorizerContext*>(raw_context);
+    ++context->alter_table_calls;
+    return context->alter_table_calls == 2 ? SQLITE_DENY : SQLITE_OK;
+}
+
+class ScopedAlterTableAuthorizer {
+public:
+    ScopedAlterTableAuthorizer(sqlite3* db, AlterTableAuthorizerContext* context)
+        : db_(db), status_(sqlite3_set_authorizer(db, DenySecondAlterTable, context)) {}
+
+    ~ScopedAlterTableAuthorizer() {
+        if (db_) sqlite3_set_authorizer(db_, nullptr, nullptr);
+    }
+
+    ScopedAlterTableAuthorizer(const ScopedAlterTableAuthorizer&) = delete;
+    ScopedAlterTableAuthorizer& operator=(const ScopedAlterTableAuthorizer&) = delete;
+
+    int status() const { return status_; }
+
+private:
+    sqlite3* db_;
+    int status_;
+};
 
 } // namespace
 
 TEST(database_fresh_schema_is_versioned) {
-    std::string path = TempDbPath("fresh");
+    ScopedMigrationDatabase fixture(TempDbPath("fresh"));
+    const std::string& path = fixture.path;
     std::filesystem::remove(path);
     {
         Database db(path);
         CHECK(db.IsOpen());
         CHECK_EQ(db.SchemaVersion(), patx::kSchemaVersionCurrent);
-        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK_EQ(db.SchemaVersion(), 6);
         CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "raw_title"));
         CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "document_code"));
         CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "document_version"));
@@ -112,11 +368,14 @@ TEST(database_fresh_schema_is_versioned) {
         CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "source_trace"));
         CHECK(SqliteHasIndex(db.GetHandle(), "idx_prosecution_docs_event_key"));
         CHECK(SqliteHasIndex(db.GetHandle(), "idx_patents_next_dossier_check"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "latest_applicant_activity"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "terminal_state"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "reexamination_state"));
 
         auto repeated = patx::RunSchemaMigrations(db.GetHandle(), path);
         CHECK(repeated.ok);
-        CHECK_EQ(repeated.from_version, 5);
-        CHECK_EQ(repeated.to_version, 5);
+        CHECK_EQ(repeated.from_version, 6);
+        CHECK_EQ(repeated.to_version, 6);
     }
     const std::string backup_prefix = std::filesystem::path(path).filename().string() +
                                       ".pre_migration_";
@@ -129,8 +388,9 @@ TEST(database_fresh_schema_is_versioned) {
     std::filesystem::remove(path);
 }
 
-TEST(database_v4_to_v5_migration_is_incremental_and_preserves_data) {
-    std::string path = TempDbPath("v4_to_v5");
+TEST(database_v4_to_current_migration_is_incremental_and_preserves_data) {
+    ScopedMigrationDatabase fixture(TempDbPath("v4_to_current"));
+    const std::string& path = fixture.path;
     std::filesystem::remove(path);
     {
         sqlite3* raw = nullptr;
@@ -138,6 +398,7 @@ TEST(database_v4_to_v5_migration_is_incremental_and_preserves_data) {
         const char* sql =
             "CREATE TABLE schema_info (version INTEGER NOT NULL);"
             "INSERT INTO schema_info VALUES (4);"
+            "CREATE TABLE patents(id INTEGER PRIMARY KEY, next_dossier_check_at INTEGER DEFAULT 0);"
             "CREATE TABLE prosecution_documents ("
             " id INTEGER PRIMARY KEY AUTOINCREMENT, patent_id INTEGER, jurisdiction TEXT,"
             " application_number TEXT, publication_number TEXT, source TEXT,"
@@ -147,6 +408,12 @@ TEST(database_v4_to_v5_migration_is_incremental_and_preserves_data) {
             " first_seen_at INTEGER, last_seen_at INTEGER, local_path TEXT,"
             " downloaded_at INTEGER DEFAULT 0, raw_metadata TEXT,"
             " UNIQUE(source, application_number, fingerprint));"
+            "CREATE TABLE dossier_sync_state("
+            "patent_id INTEGER NOT NULL, provider TEXT NOT NULL,"
+            "last_checked_at INTEGER DEFAULT 0, last_success_at INTEGER DEFAULT 0,"
+            "last_error_at INTEGER DEFAULT 0, last_error_code TEXT, last_error_message TEXT,"
+            "latest_remote_oa_date TEXT, latest_remote_oa_type TEXT,"
+            "auth_state TEXT DEFAULT 'NOT_INITIALIZED', PRIMARY KEY(patent_id,provider));"
             "INSERT INTO prosecution_documents (patent_id, application_number, source,"
             " remote_document_id, document_title, official_date, fingerprint, raw_metadata)"
             " VALUES (7, '202410000001.1', 'cnipa', 'remote-old', '旧通知书',"
@@ -160,7 +427,7 @@ TEST(database_v4_to_v5_migration_is_incremental_and_preserves_data) {
     {
         Database db(path);
         CHECK(db.IsOpen());
-        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK_EQ(db.SchemaVersion(), 6);
         CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "raw_title"));
         CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "document_code"));
         CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "document_version"));
@@ -168,6 +435,9 @@ TEST(database_v4_to_v5_migration_is_incremental_and_preserves_data) {
         CHECK(SqliteHasColumn(db.GetHandle(), "prosecution_documents", "source_trace"));
         CHECK(SqliteHasIndex(db.GetHandle(), "idx_prosecution_docs_event_key"));
         CHECK(SqliteHasIndex(db.GetHandle(), "idx_patents_next_dossier_check"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "latest_applicant_activity"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "terminal_state"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "reexamination_state"));
 
         ProsecutionDocumentRecord migrated = db.GetProsecutionDocumentById(1);
         CHECK_EQ(migrated.id, 1);
@@ -184,8 +454,8 @@ TEST(database_v4_to_v5_migration_is_incremental_and_preserves_data) {
 
         auto repeated = patx::RunSchemaMigrations(db.GetHandle(), path);
         CHECK(repeated.ok);
-        CHECK_EQ(repeated.from_version, 5);
-        CHECK_EQ(repeated.to_version, 5);
+        CHECK_EQ(repeated.from_version, 6);
+        CHECK_EQ(repeated.to_version, 6);
     }
     const std::string v4_backup_prefix = std::filesystem::path(path).filename().string() +
                                          ".pre_migration_";
@@ -199,7 +469,8 @@ TEST(database_v4_to_v5_migration_is_incremental_and_preserves_data) {
 }
 
 TEST(database_constructor_backs_up_v4_before_initializing_current_tables) {
-    std::string path = TempDbPath("constructor_v4_backup_order");
+    ScopedMigrationDatabase fixture(TempDbPath("constructor_v4_backup_order"));
+    const std::string& path = fixture.path;
     std::filesystem::remove(path);
     const std::string backup_prefix = std::filesystem::path(path).filename().string() +
                                       ".pre_migration_";
@@ -218,6 +489,12 @@ TEST(database_constructor_backs_up_v4_before_initializing_current_tables) {
         "CREATE TABLE prosecution_documents("
         "id INTEGER PRIMARY KEY, patent_id INTEGER, source TEXT, application_number TEXT,"
         "fingerprint TEXT, UNIQUE(source,application_number,fingerprint));"
+        "CREATE TABLE dossier_sync_state("
+        "patent_id INTEGER NOT NULL, provider TEXT NOT NULL,"
+        "last_checked_at INTEGER DEFAULT 0, last_success_at INTEGER DEFAULT 0,"
+        "last_error_at INTEGER DEFAULT 0, last_error_code TEXT, last_error_message TEXT,"
+        "latest_remote_oa_date TEXT, latest_remote_oa_type TEXT,"
+        "auth_state TEXT DEFAULT 'NOT_INITIALIZED', PRIMARY KEY(patent_id,provider));"
         "CREATE TABLE v4_marker(value TEXT);"
         "INSERT INTO v4_marker VALUES('before-init');";
     CHECK_EQ(sqlite3_exec(raw, schema, nullptr, nullptr, nullptr), SQLITE_OK);
@@ -226,8 +503,11 @@ TEST(database_constructor_backs_up_v4_before_initializing_current_tables) {
     {
         Database db(path);
         CHECK(db.IsOpen());
-        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK_EQ(db.SchemaVersion(), 6);
         CHECK(SqliteHasIndex(db.GetHandle(), "idx_patents_next_dossier_check"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "latest_applicant_activity"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "terminal_state"));
+        CHECK(SqliteHasColumn(db.GetHandle(), "dossier_sync_state", "reexamination_state"));
     }
 
     std::filesystem::path backup_path;
@@ -310,21 +590,314 @@ TEST(database_constructor_backup_failure_does_not_initialize_or_migrate_v4) {
     std::filesystem::remove_all(directory);
 }
 
-TEST(database_reopens_v5_and_repairs_missing_due_index) {
-    std::string path = TempDbPath("v5_due_index_repair");
+TEST(database_reopens_v6_and_repairs_missing_due_index) {
+    ScopedMigrationDatabase fixture(TempDbPath("v6_due_index_repair"));
+    const std::string& path = fixture.path;
     std::filesystem::remove(path);
     {
         Database db(path);
-        CHECK_EQ(db.SchemaVersion(), 5);
+        CHECK_EQ(db.SchemaVersion(), 6);
         CHECK(db.Execute("DROP INDEX idx_patents_next_dossier_check"));
         CHECK(!SqliteHasIndex(db.GetHandle(), "idx_patents_next_dossier_check"));
     }
     {
         Database reopened(path);
-        CHECK_EQ(reopened.SchemaVersion(), 5);
+        CHECK_EQ(reopened.SchemaVersion(), 6);
         CHECK(SqliteHasIndex(reopened.GetHandle(), "idx_patents_next_dossier_check"));
     }
     std::filesystem::remove(path);
+}
+
+TEST(database_codex_v5_to_v6_preserves_data_and_is_idempotent) {
+    ScopedMigrationDatabase fixture(TempDbPath("codex_v5_to_v6"));
+    ScopedSqliteHandle database;
+    CHECK_EQ(sqlite3_open(fixture.path.c_str(), &database.value), SQLITE_OK);
+    const std::string schema = UnifiedLegacySchemaSql(5, true) + R"sql(
+        INSERT INTO patents(
+            id,geke_code,application_number,title,application_status,patent_type,geke_handler,
+            technology_route,project_id,publication_number,last_dossier_check_at,
+            next_dossier_check_at)
+        VALUES(41,'GK-CODEX-V5','202610000001.2','Codex保留案卷','pending','invention',
+               '王五','芯片封装','PROJECT-CODEX','CN119900001A',1700000000,1700000900);
+        INSERT INTO oa_records(
+            id,patent_id,geke_code,patent_title,oa_type,official_deadline,issue_date,response_date,
+            handler,writer,progress,agency,oa_summary,notes,jurisdiction,source,deadline_source,
+            remote_document_id,sync_flag)
+        VALUES(51,41,'GK-CODEX-V5','Codex保留案卷','第一次审查意见通知书','2027-01-01',
+               '2026-09-01','','张三','赵六','drafting','测试代理所','创造性','人工备注',
+               'CN','cnipa','manual','oa-codex-51','manual_reviewed');
+        INSERT INTO prosecution_documents(
+            id,patent_id,jurisdiction,application_number,publication_number,source,
+            remote_document_id,document_type,document_title,raw_title,document_code,
+            document_version,official_date,direction,source_url,download_url,download_available,
+            fingerprint,event_key,source_trace,first_seen_at,last_seen_at,local_path,downloaded_at,
+            raw_metadata)
+        VALUES(61,41,'CN','202610000001.2','CN119900001A','cnipa','doc-codex-61',
+               'office_action','第一次审查意见通知书','第一次审查意见通知书（原始）','OA-1',
+               'ORIGINAL','2026-09-01','incoming','https://example.test/source/61',
+               'https://example.test/download/61',1,'fp-codex-v5',
+               'cn:202610000001.2:office-action:2026-09-01','epo_global_dossier,cnipa',
+               1700000010,1700000020,'/tmp/codex-oa-61.pdf',1700000030,
+               '{"fixture":"codex-v5"}');
+        INSERT INTO dossier_sync_state(
+            patent_id,provider,last_checked_at,last_success_at,last_error_at,last_error_code,
+            last_error_message,latest_remote_oa_date,latest_remote_oa_type,auth_state)
+        VALUES(41,'cnipa',1700000100,1700000050,1700000001,'OLD_WARNING','保留同步状态',
+               '2026-09-01','第一次审查意见通知书','AUTHENTICATED');
+    )sql";
+    CHECK_EQ(sqlite3_exec(database.value, schema.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+    CHECK(SqliteHasIndex(database.value, "idx_patents_next_dossier_check"));
+
+    auto migration = patx::RunSchemaMigrations(database.value, fixture.path);
+    CHECK(migration.ok);
+    CHECK_EQ(migration.from_version, 5);
+    CHECK_EQ(migration.to_version, 6);
+    CHECK(migration.performed_backup);
+    CHECK(!migration.backup_path.empty());
+    CHECK(std::filesystem::exists(migration.backup_path));
+    CHECK_EQ(patx::ReadSchemaVersion(database.value), 6);
+    CheckUnifiedV6Shape(database.value);
+
+    ScopedSqliteHandle backup;
+    CHECK_EQ(sqlite3_open_v2(migration.backup_path.c_str(), &backup.value,
+                             SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    CHECK_EQ(patx::ReadSchemaVersion(backup.value), 5);
+    CHECK(!SqliteHasColumn(backup.value, "dossier_sync_state", "terminal_state"));
+
+    auto repeated = patx::RunSchemaMigrations(database.value, fixture.path);
+    CHECK(repeated.ok);
+    CHECK_EQ(repeated.from_version, 6);
+    CHECK_EQ(repeated.to_version, 6);
+    CHECK(!repeated.performed_backup);
+    CHECK_EQ(patx::ReadSchemaVersion(database.value), 6);
+    CheckUnifiedV6Shape(database.value);
+
+    ScopedSqliteStatement preserved;
+    CHECK_EQ(sqlite3_prepare_v2(database.value,
+        "SELECT p.geke_code,p.title,p.next_dossier_check_at,"
+        "o.handler,o.writer,o.deadline_source,o.source,o.remote_document_id,o.sync_flag,"
+        "d.local_path,d.downloaded_at,d.raw_title,d.document_code,d.document_version,"
+        "d.event_key,d.source_trace,s.last_checked_at,s.last_error_message,s.auth_state "
+        "FROM patents p JOIN oa_records o ON o.patent_id=p.id "
+        "JOIN prosecution_documents d ON d.patent_id=p.id "
+        "JOIN dossier_sync_state s ON s.patent_id=p.id WHERE p.id=41",
+        -1, preserved.out(), nullptr), SQLITE_OK);
+    CHECK_EQ(sqlite3_step(preserved.get()), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 0)),
+                 "GK-CODEX-V5");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 1)),
+                 "Codex保留案卷");
+    CHECK_EQ(sqlite3_column_int64(preserved.get(), 2), 1700000900);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 3)), "张三");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 4)), "赵六");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 5)), "manual");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 6)), "cnipa");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 7)),
+                 "oa-codex-51");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 8)),
+                 "manual_reviewed");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 9)),
+                 "/tmp/codex-oa-61.pdf");
+    CHECK_EQ(sqlite3_column_int64(preserved.get(), 10), 1700000030);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 11)),
+                 "第一次审查意见通知书（原始）");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 12)), "OA-1");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 13)),
+                 "ORIGINAL");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 14)),
+                 "cn:202610000001.2:office-action:2026-09-01");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 15)),
+                 "epo_global_dossier,cnipa");
+    CHECK_EQ(sqlite3_column_int64(preserved.get(), 16), 1700000100);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 17)),
+                 "保留同步状态");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 18)),
+                 "AUTHENTICATED");
+}
+
+TEST(database_glm_v5_to_v6_repairs_missing_codex_shape) {
+    ScopedMigrationDatabase fixture(TempDbPath("glm_v5_to_v6"));
+    ScopedSqliteHandle database;
+    CHECK_EQ(sqlite3_open(fixture.path.c_str(), &database.value), SQLITE_OK);
+    const std::string schema = UnifiedLegacySchemaSql(5, false) + R"sql(
+        INSERT INTO patents(
+            id,geke_code,application_number,title,application_status,patent_type,geke_handler,
+            technology_route,project_id,publication_number,last_dossier_check_at,
+            next_dossier_check_at)
+        VALUES(71,'GK-GLM-V5','US18990001','GLM保留案卷','pending','invention','钱七',
+               '电池材料','PROJECT-GLM','US2026990001A1',1701000000,1701000900);
+        INSERT INTO oa_records(
+            id,patent_id,geke_code,patent_title,oa_type,official_deadline,issue_date,response_date,
+            handler,writer,progress,agency,oa_summary,notes,jurisdiction,source,deadline_source,
+            remote_document_id,sync_flag)
+        VALUES(72,71,'GK-GLM-V5','GLM保留案卷','Non-Final Rejection','2026-11-20',
+               '2026-08-20','','李四','周八','review','GLM Agency','102 rejection','manual note',
+               'US','uspto','manual','oa-glm-72','confirmed');
+        INSERT INTO prosecution_documents(
+            id,patent_id,jurisdiction,application_number,publication_number,source,
+            remote_document_id,document_type,document_title,raw_title,document_code,
+            document_version,official_date,direction,source_url,download_url,download_available,
+            fingerprint,event_key,source_trace,first_seen_at,last_seen_at,local_path,downloaded_at,
+            raw_metadata)
+        VALUES(73,71,'US','US18990001','US2026990001A1','uspto','doc-glm-73',
+               'non_final_rejection','Non-Final Rejection','NON-FINAL REJECTION','CTNF',
+               'ORIGINAL','2026-08-20','incoming','https://example.test/source/73',
+               'https://example.test/download/73',1,'fp-glm-v5',
+               'us:18990001:non-final:2026-08-20','uspto',1701000010,1701000020,
+               '/tmp/glm-oa-73.pdf',1701000030,'{"fixture":"glm-v5"}');
+        INSERT INTO dossier_sync_state(
+            patent_id,provider,last_checked_at,last_success_at,last_error_at,last_error_code,
+            last_error_message,latest_remote_oa_date,latest_remote_oa_type,auth_state)
+        VALUES(71,'uspto',1701000100,1701000050,1701000001,'STALE_TOKEN','保留GLM同步状态',
+               '2026-08-20','Non-Final Rejection','AUTHENTICATED');
+    )sql";
+    CHECK_EQ(sqlite3_exec(database.value, schema.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+    CHECK(!SqliteHasIndex(database.value, "idx_patents_next_dossier_check"));
+    CHECK(SqliteHasIndex(database.value, "idx_prosecution_docs_event_key"));
+
+    auto migration = patx::RunSchemaMigrations(database.value, fixture.path);
+    CHECK(migration.ok);
+    CHECK_EQ(migration.from_version, 5);
+    CHECK_EQ(migration.to_version, 6);
+    CHECK(migration.performed_backup);
+    CHECK(std::filesystem::exists(migration.backup_path));
+    CHECK_EQ(patx::ReadSchemaVersion(database.value), 6);
+    CheckUnifiedV6Shape(database.value);
+
+    auto repeated = patx::RunSchemaMigrations(database.value, fixture.path);
+    CHECK(repeated.ok);
+    CHECK_EQ(repeated.from_version, 6);
+    CHECK_EQ(repeated.to_version, 6);
+    CHECK(!repeated.performed_backup);
+    CHECK_EQ(patx::ReadSchemaVersion(database.value), 6);
+    CheckUnifiedV6Shape(database.value);
+
+    ScopedSqliteStatement preserved;
+    CHECK_EQ(sqlite3_prepare_v2(database.value,
+        "SELECT p.geke_code,p.title,p.next_dossier_check_at,"
+        "o.handler,o.writer,o.deadline_source,o.source,o.remote_document_id,o.sync_flag,"
+        "d.local_path,d.downloaded_at,d.raw_title,d.document_code,d.document_version,"
+        "d.event_key,d.source_trace,s.last_checked_at,s.last_error_message,s.auth_state "
+        "FROM patents p JOIN oa_records o ON o.patent_id=p.id "
+        "JOIN prosecution_documents d ON d.patent_id=p.id "
+        "JOIN dossier_sync_state s ON s.patent_id=p.id WHERE p.id=71",
+        -1, preserved.out(), nullptr), SQLITE_OK);
+    CHECK_EQ(sqlite3_step(preserved.get()), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 0)),
+                 "GK-GLM-V5");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 1)),
+                 "GLM保留案卷");
+    CHECK_EQ(sqlite3_column_int64(preserved.get(), 2), 1701000900);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 3)), "李四");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 4)), "周八");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 5)), "manual");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 6)), "uspto");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 7)),
+                 "oa-glm-72");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 8)),
+                 "confirmed");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 9)),
+                 "/tmp/glm-oa-73.pdf");
+    CHECK_EQ(sqlite3_column_int64(preserved.get(), 10), 1701000030);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 11)),
+                 "NON-FINAL REJECTION");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 12)), "CTNF");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 13)),
+                 "ORIGINAL");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 14)),
+                 "us:18990001:non-final:2026-08-20");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 15)), "uspto");
+    CHECK_EQ(sqlite3_column_int64(preserved.get(), 16), 1701000100);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 17)),
+                 "保留GLM同步状态");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 18)),
+                 "AUTHENTICATED");
+}
+
+TEST(database_reopens_v6_and_repairs_missing_required_shape) {
+    ScopedMigrationDatabase fixture(TempDbPath("v6_required_shape_repair"));
+    {
+        ScopedSqliteHandle created;
+        CHECK_EQ(sqlite3_open(fixture.path.c_str(), &created.value), SQLITE_OK);
+        const std::string schema = UnifiedLegacySchemaSql(6, true) +
+            "ALTER TABLE dossier_sync_state ADD COLUMN latest_applicant_activity TEXT DEFAULT '';"
+            "ALTER TABLE dossier_sync_state ADD COLUMN reexamination_state TEXT DEFAULT '';"
+            "INSERT INTO dossier_sync_state "
+            "(patent_id,provider,latest_applicant_activity,reexamination_state) "
+            "VALUES(81,'cnipa','2026-09-20','pending');";
+        CHECK_EQ(sqlite3_exec(created.value, schema.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+        CHECK(!SqliteHasColumn(created.value, "dossier_sync_state", "terminal_state"));
+    }
+
+    ScopedSqliteHandle reopened;
+    CHECK_EQ(sqlite3_open(fixture.path.c_str(), &reopened.value), SQLITE_OK);
+    auto migration = patx::RunSchemaMigrations(reopened.value, fixture.path);
+    CHECK(migration.ok);
+    CHECK_EQ(migration.from_version, 6);
+    CHECK_EQ(migration.to_version, 6);
+    CHECK(SqliteHasColumn(reopened.value, "dossier_sync_state", "terminal_state"));
+    CHECK(migration.performed_backup);
+    CHECK(!migration.backup_path.empty());
+    CHECK(std::filesystem::exists(migration.backup_path));
+    CHECK_EQ(patx::ReadSchemaVersion(reopened.value), 6);
+    CheckUnifiedV6Shape(reopened.value);
+
+    ScopedSqliteStatement preserved;
+    CHECK_EQ(sqlite3_prepare_v2(reopened.value,
+        "SELECT latest_applicant_activity,reexamination_state FROM dossier_sync_state "
+        "WHERE patent_id=81 AND provider='cnipa'", -1, preserved.out(), nullptr), SQLITE_OK);
+    CHECK_EQ(sqlite3_step(preserved.get()), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 0)),
+                 "2026-09-20");
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved.get(), 1)),
+                 "pending");
+
+    ScopedSqliteHandle backup;
+    CHECK_EQ(sqlite3_open_v2(migration.backup_path.c_str(), &backup.value,
+                             SQLITE_OPEN_READONLY, nullptr), SQLITE_OK);
+    CHECK_EQ(patx::ReadSchemaVersion(backup.value), 6);
+    CHECK(!SqliteHasColumn(backup.value, "dossier_sync_state", "terminal_state"));
+}
+
+TEST(database_v6_repair_failure_rolls_back_and_keeps_version) {
+    ScopedMigrationDatabase fixture(TempDbPath("v6_repair_rollback"));
+    ScopedSqliteHandle database;
+    CHECK_EQ(sqlite3_open(fixture.path.c_str(), &database.value), SQLITE_OK);
+    const std::string schema = UnifiedLegacySchemaSql(6, true) + R"sql(
+        INSERT INTO dossier_sync_state(
+            patent_id,provider,last_checked_at,last_success_at,last_error_at,last_error_code,
+            last_error_message,latest_remote_oa_date,latest_remote_oa_type,auth_state)
+        VALUES(91,'cnipa',1702000100,1702000050,1702000001,'KEEP_CODE',
+               'keep-after-failed-repair','2026-09-30','驳回决定','AUTHENTICATED');
+    )sql";
+    CHECK_EQ(sqlite3_exec(database.value, schema.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+    CHECK(!SqliteHasColumn(database.value, "dossier_sync_state", "latest_applicant_activity"));
+    CHECK(!SqliteHasColumn(database.value, "dossier_sync_state", "terminal_state"));
+
+    AlterTableAuthorizerContext authorizer_context;
+    patx::SchemaMigrationResult migration;
+    {
+        ScopedAlterTableAuthorizer authorizer(database.value, &authorizer_context);
+        CHECK_EQ(authorizer.status(), SQLITE_OK);
+        migration = patx::RunSchemaMigrations(database.value, fixture.path);
+    }
+    CHECK(!migration.ok);
+    CHECK(!migration.error.empty());
+    CHECK_EQ(authorizer_context.alter_table_calls, 2);
+    CHECK_EQ(migration.from_version, 6);
+    CHECK_EQ(patx::ReadSchemaVersion(database.value), 6);
+    CHECK(!SqliteHasColumn(database.value, "dossier_sync_state", "latest_applicant_activity"));
+    CHECK(!SqliteHasColumn(database.value, "dossier_sync_state", "terminal_state"));
+    CHECK(!SqliteHasColumn(database.value, "dossier_sync_state", "reexamination_state"));
+    CHECK(sqlite3_get_autocommit(database.value) != 0);
+
+    ScopedSqliteStatement marker;
+    CHECK_EQ(sqlite3_prepare_v2(database.value,
+        "SELECT last_error_message FROM dossier_sync_state WHERE patent_id=91 AND provider='cnipa'",
+        -1, marker.out(), nullptr), SQLITE_OK);
+    CHECK_EQ(sqlite3_step(marker.get()), SQLITE_ROW);
+    CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(marker.get(), 0)),
+                 "keep-after-failed-repair");
 }
 
 TEST(database_constructor_migration_failure_closes_database) {
@@ -364,10 +937,12 @@ TEST(database_constructor_migration_failure_closes_database) {
 }
 
 TEST(database_v4_file_migration_creates_one_openable_pre_migration_backup) {
-    std::string path = TempDbPath("v4_backup");
+    ScopedMigrationDatabase fixture(TempDbPath("v4_backup"));
+    const std::string& path = fixture.path;
     std::filesystem::remove(path);
-    sqlite3* raw = nullptr;
-    CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    ScopedSqliteHandle database;
+    CHECK_EQ(sqlite3_open(path.c_str(), &database.value), SQLITE_OK);
+    sqlite3* raw = database.value;
     const char* schema =
         "CREATE TABLE schema_info(version INTEGER NOT NULL);"
         "INSERT INTO schema_info VALUES(4);"
@@ -376,6 +951,12 @@ TEST(database_v4_file_migration_creates_one_openable_pre_migration_backup) {
         "id INTEGER PRIMARY KEY, patent_id INTEGER, source TEXT, application_number TEXT,"
         "fingerprint TEXT, document_title TEXT, local_path TEXT, downloaded_at INTEGER DEFAULT 0,"
         "raw_metadata TEXT, UNIQUE(source,application_number,fingerprint));"
+        "CREATE TABLE dossier_sync_state("
+        "patent_id INTEGER NOT NULL, provider TEXT NOT NULL,"
+        "last_checked_at INTEGER DEFAULT 0, last_success_at INTEGER DEFAULT 0,"
+        "last_error_at INTEGER DEFAULT 0, last_error_code TEXT, last_error_message TEXT,"
+        "latest_remote_oa_date TEXT, latest_remote_oa_type TEXT,"
+        "auth_state TEXT DEFAULT 'NOT_INITIALIZED', PRIMARY KEY(patent_id,provider));"
         "INSERT INTO prosecution_documents VALUES(1,9,'cnipa','202410000001.1','fp-backup',"
         "'迁移前数据','',0,'old');";
     CHECK_EQ(sqlite3_exec(raw, schema, nullptr, nullptr, nullptr), SQLITE_OK);
@@ -385,8 +966,11 @@ TEST(database_v4_file_migration_creates_one_openable_pre_migration_backup) {
     CHECK(migration.performed_backup);
     CHECK(!migration.backup_path.empty());
     CHECK(std::filesystem::exists(migration.backup_path));
-    CHECK_EQ(patx::ReadSchemaVersion(raw), 5);
-    CHECK(!SqliteHasIndex(raw, "idx_patents_next_dossier_check"));
+    CHECK_EQ(patx::ReadSchemaVersion(raw), 6);
+    CHECK(SqliteHasIndex(raw, "idx_patents_next_dossier_check"));
+    CHECK(SqliteHasColumn(raw, "dossier_sync_state", "latest_applicant_activity"));
+    CHECK(SqliteHasColumn(raw, "dossier_sync_state", "terminal_state"));
+    CHECK(SqliteHasColumn(raw, "dossier_sync_state", "reexamination_state"));
     int backup_count = 0;
     const std::string backup_prefix = std::filesystem::path(path).filename().string() +
                                       ".pre_migration_";
@@ -411,6 +995,7 @@ TEST(database_v4_file_migration_creates_one_openable_pre_migration_backup) {
     sqlite3_finalize(row);
     sqlite3_close(backup);
     sqlite3_close(raw);
+    database.value = nullptr;
     std::filesystem::remove(migration.backup_path);
     std::filesystem::remove(path);
 }
@@ -666,10 +1251,12 @@ TEST(database_legacy_migration_preserves_data) {
 }
 
 TEST(database_v1_migration_fills_historical_columns_before_creating_indexes) {
-    std::string path = TempDbPath("v1_missing_historical_columns");
+    ScopedMigrationDatabase fixture(TempDbPath("v1_missing_historical_columns"));
+    const std::string& path = fixture.path;
     std::filesystem::remove(path);
-    sqlite3* raw = nullptr;
-    CHECK_EQ(sqlite3_open(path.c_str(), &raw), SQLITE_OK);
+    ScopedSqliteHandle database;
+    CHECK_EQ(sqlite3_open(path.c_str(), &database.value), SQLITE_OK);
+    sqlite3* raw = database.value;
     const char* legacy_schema =
         "CREATE TABLE patents("
         "id INTEGER PRIMARY KEY, geke_code TEXT UNIQUE, application_number TEXT, title TEXT,"
@@ -690,8 +1277,11 @@ TEST(database_v1_migration_fills_historical_columns_before_creating_indexes) {
     CHECK(migration.ok);
     CHECK(migration.performed_backup);
     CHECK_EQ(migration.from_version, 0);
-    CHECK_EQ(migration.to_version, 5);
-    CHECK_EQ(patx::ReadSchemaVersion(raw), 5);
+    CHECK_EQ(migration.to_version, 6);
+    CHECK_EQ(patx::ReadSchemaVersion(raw), 6);
+    CHECK(SqliteHasColumn(raw, "dossier_sync_state", "latest_applicant_activity"));
+    CHECK(SqliteHasColumn(raw, "dossier_sync_state", "terminal_state"));
+    CHECK(SqliteHasColumn(raw, "dossier_sync_state", "reexamination_state"));
 
     for (const char* column : {"patent_level", "geke_handler", "class_level1", "class_level2",
                                "class_level3", "rd_department", "agency_firm",
@@ -726,6 +1316,7 @@ TEST(database_v1_migration_fills_historical_columns_before_creating_indexes) {
     CHECK_STR_EQ(reinterpret_cast<const char*>(sqlite3_column_text(preserved, 1)), "保留数据");
     sqlite3_finalize(preserved);
     sqlite3_close(raw);
+    database.value = nullptr;
 
     sqlite3* backup = nullptr;
     CHECK_EQ(sqlite3_open_v2(migration.backup_path.c_str(), &backup,
