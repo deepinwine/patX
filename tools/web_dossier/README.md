@@ -36,6 +36,8 @@ patX 会自动启动 `service.py`；手工调试：
 echo '{"op":"ping"}' | python3 tools/web_dossier/service.py
 ```
 
+patX GUI 通过显式重定向的 stdin/stdout 管道与 sidecar 通信。发生取消、超时、管道错误或子进程异常退出时，当前通信连接会关闭并丢弃；下一次同步需要时会自动重建。正常关闭时先发送 `shutdown`，再进行有界等待，必要时终止由 patX 启动的子进程，不会无限阻塞。该通信机制不会保存或打印 Cookie、密码、API Key 或 RPC 请求正文。
+
 ## 后台调度与通知
 
 - 默认检查间隔为 1 天，用户可以在 GUI 中选择 1、3 或 7 天。
