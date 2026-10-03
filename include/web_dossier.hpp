@@ -82,6 +82,11 @@ struct CaseSyncReport {
     int patent_id = 0;
     std::string geke_code;
     std::string identifier_used;     // application or publication number
+    std::string provider_used;
+    std::string latest_applicant_activity;
+    bool rate_limited_upstream = false;
+    std::string terminal_state;
+    std::string reexamination_state;
     ResultCode code = ResultCode::Ok;
     std::string message;             // human-readable, for the sync log UI
     std::string latest_remote_oa_type;
@@ -111,6 +116,14 @@ struct RemoteCaseResult {
     std::string resolved_application_number;
     std::string auth_state;
     std::string provider_used;
+    std::string latest_applicant_activity;
+    bool has_latest_applicant_activity = false;
+    bool rate_limited_upstream = false;
+    bool has_rate_limited_upstream = false;
+    std::string terminal_state;
+    bool has_terminal_state = false;
+    std::string reexamination_state;
+    bool has_reexamination_state = false;
     std::vector<RemoteDocument> documents;
     bool has_latest_event = false;
     RemoteDocument latest_event;

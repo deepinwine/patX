@@ -1566,9 +1566,13 @@ static void TestRemoteCaseParsingAndApplicationBoundary() {
     CHECK(ParseRemoteCaseResultJson(body, remote));
     CHECK_STR_EQ(remote.provider_used, "epo_global_dossier");
     CHECK_STR_EQ(remote.latest_applicant_activity, "2026-02-18");
+    CHECK(remote.has_latest_applicant_activity);
     CHECK(remote.rate_limited_upstream);
+    CHECK(remote.has_rate_limited_upstream);
     CHECK_STR_EQ(remote.terminal_state, "REEXAMINATION_PENDING");
+    CHECK(remote.has_terminal_state);
     CHECK_STR_EQ(remote.reexamination_state, "REQUEST_PERIOD");
+    CHECK(remote.has_reexamination_state);
     CHECK(remote.documents.size() == 4);
     CHECK_STR_EQ(remote.documents[0].source, "epo_global_dossier");
     CHECK_STR_EQ(remote.documents[0].document_code, "210401-CN");
@@ -1683,9 +1687,90 @@ static void TestLegacyRemoteCaseProtocolDefaults() {
     RemoteCaseResult remote;
     CHECK(ParseRemoteCaseResultJson(body, remote));
     CHECK_STR_EQ(remote.latest_applicant_activity, "");
+    CHECK(!remote.has_latest_applicant_activity);
     CHECK(!remote.rate_limited_upstream);
+    CHECK(!remote.has_rate_limited_upstream);
     CHECK_STR_EQ(remote.terminal_state, "");
+    CHECK(!remote.has_terminal_state);
     CHECK_STR_EQ(remote.reexamination_state, "");
+    CHECK(!remote.has_reexamination_state);
+
+    std::string path = TempDb();
+    {
+        Database db(path);
+        Patent patent;
+        patent.geke_code = "GC-LEGACY-PROTOCOL";
+        patent.application_number = "202410000002.2";
+        patent.id = db.InsertPatent(patent, false);
+
+        const std::string enhanced_body = R"json({
+            "ok": true,
+            "code": "OK",
+            "provider_used": "epo_global_dossier",
+            "latest_applicant_activity": "2026-02-18",
+            "rate_limited_upstream": true,
+            "terminal_state": "REEXAMINATION_PENDING",
+            "reexamination_state": "REQUEST_PERIOD",
+            "documents": []
+        })json";
+        RemoteCaseResult enhanced;
+        CHECK(ParseRemoteCaseResultJson(enhanced_body, enhanced));
+        ApplyRemoteCaseResult(db, patent, enhanced, 7, 1'800'000'000LL);
+
+        CaseSyncReport legacy_report =
+            ApplyRemoteCaseResult(db, patent, remote, 7, 1'800'000'100LL);
+        CHECK_STR_EQ(legacy_report.latest_applicant_activity, "");
+        CHECK(!legacy_report.rate_limited_upstream);
+        CHECK_STR_EQ(legacy_report.terminal_state, "");
+        CHECK_STR_EQ(legacy_report.reexamination_state, "");
+
+        auto states = db.GetDossierSyncStates();
+        CHECK(states.size() == 1);
+        CHECK_STR_EQ(states.front().latest_applicant_activity, "2026-02-18");
+        CHECK_STR_EQ(states.front().terminal_state, "REEXAMINATION_PENDING");
+        CHECK_STR_EQ(states.front().reexamination_state, "REQUEST_PERIOD");
+
+        const std::string mixed_body = R"json({
+            "ok": true,
+            "code": "OK",
+            "provider_used": "epo_global_dossier",
+            "latest_applicant_activity": "",
+            "rate_limited_upstream": false,
+            "documents": []
+        })json";
+        RemoteCaseResult mixed;
+        CHECK(ParseRemoteCaseResultJson(mixed_body, mixed));
+        CHECK(mixed.has_latest_applicant_activity);
+        CHECK_STR_EQ(mixed.latest_applicant_activity, "");
+        CHECK(mixed.has_rate_limited_upstream);
+        CHECK(!mixed.rate_limited_upstream);
+        CHECK(!mixed.has_terminal_state);
+        CHECK(!mixed.has_reexamination_state);
+
+        CaseSyncReport mixed_report =
+            ApplyRemoteCaseResult(db, patent, mixed, 7, 1'800'000'200LL);
+        CHECK_STR_EQ(mixed_report.latest_applicant_activity, "");
+        CHECK(!mixed_report.rate_limited_upstream);
+        states = db.GetDossierSyncStates();
+        CHECK(states.size() == 1);
+        CHECK_STR_EQ(states.front().latest_applicant_activity, "");
+        CHECK_STR_EQ(states.front().terminal_state, "REEXAMINATION_PENDING");
+        CHECK_STR_EQ(states.front().reexamination_state, "REQUEST_PERIOD");
+    }
+    std::filesystem::remove(path);
+}
+
+static void TestRemoteCaseProtocolRejectsInvalidFieldTypes() {
+    const std::vector<std::string> invalid_bodies = {
+        R"json({"ok":true,"code":"OK","latest_applicant_activity":null})json",
+        R"json({"ok":true,"code":"OK","rate_limited_upstream":"true"})json",
+        R"json({"ok":true,"code":"OK","terminal_state":123})json",
+        R"json({"ok":true,"code":"OK","reexamination_state":false})json",
+    };
+    for (const auto& invalid_body : invalid_bodies) {
+        RemoteCaseResult remote;
+        CHECK(!ParseRemoteCaseResultJson(invalid_body, remote));
+    }
 }
 
 int main() {
@@ -1709,6 +1794,7 @@ int main() {
     TestCompletionCallbackBinding();
     TestRemoteCaseParsingAndApplicationBoundary();
     TestLegacyRemoteCaseProtocolDefaults();
+    TestRemoteCaseProtocolRejectsInvalidFieldTypes();
     if (g_failures == 0) {
         std::cout << "all web dossier rule tests passed" << std::endl;
         return 0;
