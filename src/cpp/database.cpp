@@ -427,6 +427,9 @@ void Database::InitTables() {
             latest_remote_oa_date TEXT,
             latest_remote_oa_type TEXT,
             auth_state TEXT DEFAULT 'NOT_INITIALIZED',
+            latest_applicant_activity TEXT DEFAULT '',
+            terminal_state TEXT DEFAULT '',
+            reexamination_state TEXT DEFAULT '',
             PRIMARY KEY (patent_id, provider)
         )
     )");
@@ -2420,7 +2423,8 @@ bool Database::UpsertDossierSyncState(const DossierSyncState& s) {
     std::string sql =
         "INSERT INTO dossier_sync_state (patent_id, provider, last_checked_at, last_success_at, "
         "last_error_at, last_error_code, last_error_message, latest_remote_oa_date, "
-        "latest_remote_oa_type, auth_state) VALUES (" +
+        "latest_remote_oa_type, auth_state, latest_applicant_activity, terminal_state, "
+        "reexamination_state) VALUES (" +
         std::to_string(s.patent_id) + ",'" +
         EscapeString(s.provider) + "'," +
         std::to_string(s.last_checked_at) + "," +
@@ -2430,7 +2434,10 @@ bool Database::UpsertDossierSyncState(const DossierSyncState& s) {
         EscapeString(s.last_error_message) + "','" +
         EscapeString(s.latest_remote_oa_date) + "','" +
         EscapeString(s.latest_remote_oa_type) + "','" +
-        EscapeString(s.auth_state) + "') "
+        EscapeString(s.auth_state) + "','" +
+        EscapeString(s.latest_applicant_activity) + "','" +
+        EscapeString(s.terminal_state) + "','" +
+        EscapeString(s.reexamination_state) + "') "
         "ON CONFLICT(patent_id, provider) DO UPDATE SET "
         "last_checked_at = excluded.last_checked_at, "
         "last_success_at = excluded.last_success_at, "
@@ -2439,7 +2446,10 @@ bool Database::UpsertDossierSyncState(const DossierSyncState& s) {
         "last_error_message = excluded.last_error_message, "
         "latest_remote_oa_date = excluded.latest_remote_oa_date, "
         "latest_remote_oa_type = excluded.latest_remote_oa_type, "
-        "auth_state = excluded.auth_state";
+        "auth_state = excluded.auth_state, "
+        "latest_applicant_activity = excluded.latest_applicant_activity, "
+        "terminal_state = excluded.terminal_state, "
+        "reexamination_state = excluded.reexamination_state";
     return Execute(sql);
 }
 
@@ -2448,7 +2458,8 @@ std::vector<DossierSyncState> Database::GetDossierSyncStates(int limit) {
     sqlite3_stmt* stmt;
     std::string sql = "SELECT patent_id, provider, last_checked_at, last_success_at, "
                       "last_error_at, last_error_code, last_error_message, "
-                      "latest_remote_oa_date, latest_remote_oa_type, auth_state "
+                      "latest_remote_oa_date, latest_remote_oa_type, auth_state, "
+                      "latest_applicant_activity, terminal_state, reexamination_state "
                       "FROM dossier_sync_state ORDER BY last_checked_at DESC LIMIT " +
                       std::to_string(limit);
     if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
@@ -2468,6 +2479,9 @@ std::vector<DossierSyncState> Database::GetDossierSyncStates(int limit) {
             s.latest_remote_oa_date = text(7);
             s.latest_remote_oa_type = text(8);
             s.auth_state = text(9);
+            s.latest_applicant_activity = text(10);
+            s.terminal_state = text(11);
+            s.reexamination_state = text(12);
             results.push_back(s);
         }
         sqlite3_finalize(stmt);

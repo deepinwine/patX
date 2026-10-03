@@ -17,7 +17,7 @@ namespace patx {
 
 // Bump when adding a migration step. Fresh databases jump straight to this
 // version; existing databases step up one version at a time.
-inline constexpr int kSchemaVersionCurrent = 5;
+inline constexpr int kSchemaVersionCurrent = 6;
 
 struct SchemaMigrationResult {
     bool ok = true;
@@ -33,7 +33,8 @@ struct SchemaMigrationResult {
 int ReadSchemaVersion(sqlite3* db);
 
 // Brings the schema up to kSchemaVersionCurrent. For a legacy database this
-// applies each incremental step through v5. Safe to call repeatedly.
+// applies each incremental step through v6 and repairs an incomplete current
+// shape. Safe to call repeatedly.
 SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_path,
                                           bool create_backup = true);
 
