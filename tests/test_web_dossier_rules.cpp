@@ -1486,6 +1486,10 @@ static void TestRemoteCaseParsingAndApplicationBoundary() {
         "resolved_application_number": "CN202410000001.1",
         "auth_state": "AUTHENTICATED",
         "provider_used": "epo_global_dossier",
+        "latest_applicant_activity": "2026-02-18",
+        "rate_limited_upstream": true,
+        "terminal_state": "REEXAMINATION_PENDING",
+        "reexamination_state": "REQUEST_PERIOD",
         "documents": [
             {
                 "source": "",
@@ -1561,6 +1565,10 @@ static void TestRemoteCaseParsingAndApplicationBoundary() {
     RemoteCaseResult remote;
     CHECK(ParseRemoteCaseResultJson(body, remote));
     CHECK_STR_EQ(remote.provider_used, "epo_global_dossier");
+    CHECK_STR_EQ(remote.latest_applicant_activity, "2026-02-18");
+    CHECK(remote.rate_limited_upstream);
+    CHECK_STR_EQ(remote.terminal_state, "REEXAMINATION_PENDING");
+    CHECK_STR_EQ(remote.reexamination_state, "REQUEST_PERIOD");
     CHECK(remote.documents.size() == 4);
     CHECK_STR_EQ(remote.documents[0].source, "epo_global_dossier");
     CHECK_STR_EQ(remote.documents[0].document_code, "210401-CN");
@@ -1583,6 +1591,11 @@ static void TestRemoteCaseParsingAndApplicationBoundary() {
         const long long now = 1'800'000'000LL;
         CaseSyncReport first = ApplyRemoteCaseResult(db, patent, remote, 3, now);
         CHECK(first.code == ResultCode::NewOfficialEvent);
+        CHECK_STR_EQ(first.provider_used, "epo_global_dossier");
+        CHECK_STR_EQ(first.latest_applicant_activity, "2026-02-18");
+        CHECK(first.rate_limited_upstream);
+        CHECK_STR_EQ(first.terminal_state, "REEXAMINATION_PENDING");
+        CHECK_STR_EQ(first.reexamination_state, "REQUEST_PERIOD");
         CHECK(first.documents_total == 4);
         CHECK(first.documents_new == 2);
         CHECK(db.GetOAsForPatentId(patent.id).size() == 1);
@@ -1621,6 +1634,23 @@ static void TestRemoteCaseParsingAndApplicationBoundary() {
         CHECK(states.size() == 1);
         CHECK_STR_EQ(states.front().provider, "epo_global_dossier");
         CHECK_STR_EQ(states.front().latest_remote_oa_type, "授权通知");
+        CHECK_STR_EQ(states.front().latest_applicant_activity, "2026-02-18");
+        CHECK_STR_EQ(states.front().terminal_state, "REEXAMINATION_PENDING");
+        CHECK_STR_EQ(states.front().reexamination_state, "REQUEST_PERIOD");
+
+        CHECK(sqlite3_prepare_v2(db.GetHandle(),
+            "PRAGMA table_info(dossier_sync_state)", -1,
+            &stmt, nullptr) == SQLITE_OK);
+        bool has_rate_limited_upstream_column = false;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* column_name =
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+            if (column_name && std::string(column_name) == "rate_limited_upstream") {
+                has_rate_limited_upstream_column = true;
+            }
+        }
+        sqlite3_finalize(stmt);
+        CHECK(!has_rate_limited_upstream_column);
 
         CaseSyncReport duplicate = ApplyRemoteCaseResult(db, patent, remote, 3, now + 10);
         CHECK(duplicate.code == ResultCode::NoChange);
@@ -1640,6 +1670,22 @@ static void TestRemoteCaseParsingAndApplicationBoundary() {
         sqlite3_finalize(stmt);
     }
     std::filesystem::remove(path);
+}
+
+static void TestLegacyRemoteCaseProtocolDefaults() {
+    const std::string body = R"json({
+        "ok": true,
+        "code": "OK",
+        "provider_used": "epo_global_dossier",
+        "documents": []
+    })json";
+
+    RemoteCaseResult remote;
+    CHECK(ParseRemoteCaseResultJson(body, remote));
+    CHECK_STR_EQ(remote.latest_applicant_activity, "");
+    CHECK(!remote.rate_limited_upstream);
+    CHECK_STR_EQ(remote.terminal_state, "");
+    CHECK_STR_EQ(remote.reexamination_state, "");
 }
 
 int main() {
@@ -1662,6 +1708,7 @@ int main() {
     TestWorkerOwnerCancelsAndJoinsDeterministically();
     TestCompletionCallbackBinding();
     TestRemoteCaseParsingAndApplicationBoundary();
+    TestLegacyRemoteCaseProtocolDefaults();
     if (g_failures == 0) {
         std::cout << "all web dossier rule tests passed" << std::endl;
         return 0;
