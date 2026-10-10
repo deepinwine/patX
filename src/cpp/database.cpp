@@ -1874,6 +1874,43 @@ ProsecutionDocumentRecord Database::GetProsecutionDocumentById(int id) {
     return doc;
 }
 
+Database::DossierPatrolStats Database::GetDossierPatrolStats() {
+    DossierPatrolStats st;
+    const char* kEligible =
+        "(application_number LIKE 'CN%' OR application_number GLOB '[0-9]*' "
+        "OR publication_number LIKE 'CN%') AND application_number != ''";
+    auto scalar = [this](const std::string& sql) -> int {
+        sqlite3_stmt* stmt;
+        int v = 0;
+        if (sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW) v = sqlite3_column_int(stmt, 0);
+            sqlite3_finalize(stmt);
+        }
+        return v;
+    };
+    st.total_eligible = scalar(
+        std::string("SELECT COUNT(*) FROM patents WHERE ") + kEligible);
+    st.synced = scalar(
+        "SELECT COUNT(DISTINCT patent_id) FROM dossier_sync_state");
+    st.synced_ok = scalar(
+        "SELECT COUNT(DISTINCT patent_id) FROM dossier_sync_state "
+        "WHERE (last_error_code IS NULL OR last_error_code = '') "
+        "AND last_checked_at > 0");
+    st.due_now = scalar(std::string(
+        "SELECT COUNT(*) FROM patents WHERE ") + kEligible +
+        " AND (next_dossier_check_at IS NULL OR next_dossier_check_at = 0 "
+        " OR next_dossier_check_at <= strftime('%s','now'))");
+    st.official_events = scalar(
+        "SELECT COUNT(*) FROM oa_records WHERE source = 'uspto_global_dossier'");
+    st.recent_half_year = scalar(
+        "SELECT COUNT(*) FROM oa_records WHERE source = 'uspto_global_dossier' "
+        "AND issue_date >= date('now','-6 months')");
+    st.answered = scalar(
+        "SELECT COUNT(*) FROM oa_records WHERE source = 'uspto_global_dossier' "
+        "AND response_date != ''");
+    return st;
+}
+
 std::vector<Patent> Database::GetPatentsDueForDossierCheck(bool include_granted,
                                                            long long now, int limit) {
     // Same status window as GetPatentsForDossierCheck, narrowed to cases the

@@ -360,6 +360,17 @@ public:
     bool BackupTo(const std::string& dest_path);
 
     // ---------- Web dossier sync (CNIPA 网页审查信息同步) ----------
+    // 巡检进度统计（GUI 监控窗口用；反映任何进程写入的同步状态）
+    struct DossierPatrolStats {
+        int total_eligible = 0;   // 可巡检的 CN 案件总数
+        int synced = 0;           // 已检查过的案件数
+        int synced_ok = 0;        // 最近一次成功
+        int due_now = 0;          // 当前到期待巡
+        int official_events = 0;  // 巡检发现的官方事件总数
+        int recent_half_year = 0; // 近 6 个月发文
+        int answered = 0;         // 带答复证据的
+    };
+    DossierPatrolStats GetDossierPatrolStats();
     // Cases worth checking: active prosecution statuses first. Terminal
     // statuses (放弃/失效/撤回/视撤/终止) are skipped; granted cases only
     // when include_granted (they are checked on the slow cycle).

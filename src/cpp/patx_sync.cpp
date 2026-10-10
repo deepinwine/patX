@@ -61,7 +61,7 @@ int SyncPatent(Database& db, const Patent& p) {
     if (parsed.code != "OK") {
         printf("  %s  %s: %s\n", p.geke_code.c_str(), parsed.code.c_str(),
                parsed.message.c_str());
-        return 1;
+        return parsed.code == "RATE_LIMITED" ? 2 : 1;
     }
 
     int created_docs = 0;
@@ -149,9 +149,28 @@ int main(int argc, char** argv) {
     }
 
     int failed = 0;
+    int consecutive_rate_limited = 0;
+    size_t processed = 0;
     for (const auto& p : targets) {
-        if (SyncPatent(db, p) != 0) failed++;
+        // 熔断：连续限流说明配额窗口耗尽，继续打只会更糟。
+        // 未处理的案件留在到期队列里，下一波继续。
+        if (consecutive_rate_limited >= 5) {
+            printf("限流熔断：连续 5 次 429，停止本波（已处理 %zu 件，剩 %zu 件留待下波）\n",
+                   processed, targets.size() - processed);
+            break;
+        }
+        int rc = SyncPatent(db, p);
+        processed++;
+        if (rc == 2) {
+            consecutive_rate_limited++;
+            failed++;
+        } else if (rc == 0) {
+            consecutive_rate_limited = 0;
+        } else {
+            consecutive_rate_limited = 0;   // 其他失败不累计熔断
+            failed++;
+        }
     }
-    printf("完成: %zu 件，失败 %d\n", targets.size(), failed);
+    printf("完成: %zu/%zu 件，失败 %d\n", processed, targets.size(), failed);
     return failed == 0 ? 0 : 1;
 }
