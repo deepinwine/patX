@@ -13,7 +13,7 @@ from dataclasses import dataclass
 _FULLWIDTH = {ord(f): ord(t) for f, t in zip("０１２３４５６７８９．　", "0123456789. ")}
 
 # CN application: 12 digits + optional check digit after a dot (2006+ style)
-_APP_RE = re.compile(r"^(?:CN)?(\d{12})(?:\.(\d))?$", re.IGNORECASE)
+_APP_RE = re.compile(r"^(?:CN)?(\d{12})(?:\.([0-9X]))?$", re.IGNORECASE)
 # CN publication: 9 digits + optional kind code letter(s), e.g. 119870049A
 _PUB_RE = re.compile(r"^(?:CN)?(\d{9})\s*([AB]1?|[ABU]?)$", re.IGNORECASE)
 

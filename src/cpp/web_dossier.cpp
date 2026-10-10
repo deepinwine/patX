@@ -475,7 +475,8 @@ CaseSyncReport Manager::ApplyRemoteResult(const Patent& patent, const RemoteCase
     // background sweep picks the case up again.
     long long next = now + static_cast<long long>(check_interval_days_) * 86400;
     if (report.code == ResultCode::NetworkError || report.code == ResultCode::RateLimited ||
-        report.code == ResultCode::PageStructureChanged) {
+        report.code == ResultCode::PageStructureChanged ||
+        report.code == ResultCode::TemporaryError) {
         next = now + 1800;
     }
     db_.UpdatePatentDossierCheck(patent.id, now, next);
@@ -533,6 +534,17 @@ CaseSyncReport Manager::SyncCase(const Patent& patent, std::atomic<bool>& cancel
                 remote.documents = std::move(parsed.documents);
                 remote.latest_applicant_activity = parsed.latest_applicant_activity;
                 PickLatestOfficialEvent(remote);
+                return ApplyRemoteResult(patent, remote);
+            }
+            // 限流：降级链同样会撞墙（EPO 403 / CNIPA 需登录），
+            // 直接按 30 分钟重试排期，不砸链、不弹浏览器
+            if (parsed.code == "RATE_LIMITED") {
+                RemoteCaseResult remote;
+                remote.ok = false;
+                remote.code = "RATE_LIMITED";
+                remote.provider_used = "uspto_global_dossier";
+                remote.attempts.emplace_back("uspto_global_dossier", "RATE_LIMITED");
+                remote.resolved_application_number = patent.application_number;
                 return ApplyRemoteResult(patent, remote);
             }
             // 原生层失败：sidecar 可用则降级，否则如实上报原生结果

@@ -32,3 +32,10 @@ def test_garbage_rejected():
     assert not normalize_cn_identifier("hello").valid
     assert not normalize_cn_identifier("").valid
     assert not normalize_cn_identifier("12345").valid
+
+
+def test_x_check_digit_is_accepted():
+    from web_dossier.number_resolver import normalize_cn_identifier
+    ident = normalize_cn_identifier("201310050857.X")
+    assert ident.valid and ident.number_type == "application"
+    assert ident.number == "201310050857"
