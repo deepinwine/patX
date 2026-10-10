@@ -157,131 +157,6 @@ struct NASConfig {
     }
 };
 
-// ============== 巡检监控窗口（非模态，2 秒自刷新） ==============
-class PatrolMonitorDialog : public wxDialog {
-public:
-    PatrolMonitorDialog(wxWindow* parent, Database& db)
-        : wxDialog(parent, wxID_ANY, UTF8_STR("巡检监控 / Patrol Monitor"),
-                   wxDefaultPosition, wxSize(820, 500),
-                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
-          db_(db) {
-        auto* sizer = new wxBoxSizer(wxVERTICAL);
-
-        stats_ = new wxStaticText(this, wxID_ANY, "");
-        stats_->SetFont(stats_->GetFont().Bold());
-        sizer->Add(stats_, 0, wxALL | wxEXPAND, 8);
-
-        gauge_ = new wxGauge(this, wxID_ANY, 100, wxDefaultPosition,
-                             wxDefaultSize, wxGA_HORIZONTAL);
-        gauge_->SetMinSize(wxSize(-1, 22));
-        sizer->Add(gauge_, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 8);
-
-        detail_ = new wxStaticText(this, wxID_ANY, "");
-        sizer->Add(detail_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 8);
-
-        list_ = new wxListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                               wxLC_REPORT | wxBORDER_SUNKEN);
-        list_->InsertColumn(0, UTF8_STR("案件"), wxLIST_FORMAT_LEFT, 130);
-        list_->InsertColumn(1, UTF8_STR("最新官方事件"), wxLIST_FORMAT_LEFT, 190);
-        list_->InsertColumn(2, UTF8_STR("官文日"), wxLIST_FORMAT_LEFT, 95);
-        list_->InsertColumn(3, UTF8_STR("结果"), wxLIST_FORMAT_LEFT, 130);
-        list_->InsertColumn(4, UTF8_STR("检查时间"), wxLIST_FORMAT_LEFT, 130);
-        sizer->Add(list_, 1, wxALL | wxEXPAND, 4);
-
-        auto* tb = new wxBoxSizer(wxHORIZONTAL);
-        auto* sync_btn = new wxButton(this, wxID_ANY,
-                                      UTF8_STR("立即巡检到期案件"));
-        sync_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            if (on_sync_request) on_sync_request();
-        });
-        tb->Add(sync_btn, 0, wxRIGHT, 8);
-        auto* close_btn = new wxButton(this, wxID_ANY, UTF8_STR("关闭"));
-        close_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Close(true); });
-        tb->AddStretchSpacer();
-        tb->Add(close_btn, 0, wxRIGHT, 8);
-        sizer->Add(tb, 0, wxALL & ~wxTOP | wxEXPAND, 6);
-
-        SetSizer(sizer);
-        Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent&) {
-            timer_.Stop();
-            Destroy();
-        });
-        timer_.SetOwner(this);
-        Bind(wxEVT_TIMER, &PatrolMonitorDialog::OnTimer, this);
-        timer_.Start(2000);
-        RefreshData();
-    }
-
-    std::function<void()> on_sync_request;
-
-private:
-    void OnTimer(wxTimerEvent&) { RefreshData(); }
-
-    void RefreshData() {
-        auto st = db_.GetDossierPatrolStats();
-        int pct = st.total_eligible > 0
-                      ? st.synced * 100 / st.total_eligible : 0;
-        gauge_->SetValue(pct);
-        stats_->SetLabel(wxString::Format(
-            UTF8_STR("进度 %d%%（%d / %d 件）   待巡 %d"),
-            pct, st.synced, st.total_eligible, st.due_now));
-        detail_->SetLabel(wxString::Format(
-            UTF8_STR("发现官方事件 %d 条 ｜ 近 6 个月发文 %d 条 ｜ 已答复 %d 条 ｜ 成功案件 %d"),
-            st.official_events, st.recent_half_year, st.answered, st.synced_ok));
-
-        list_->DeleteAllItems();
-        sqlite3_stmt* stmt;
-        std::string sql =
-            "SELECT p.geke_code, s.latest_remote_oa_type, s.latest_remote_oa_date, "
-            "COALESCE(s.last_error_code, 'OK'), s.last_checked_at "
-            "FROM dossier_sync_state s JOIN patents p ON p.id = s.patent_id "
-            "ORDER BY s.last_checked_at DESC LIMIT 15";
-        if (sqlite3_prepare_v2(db_.GetHandle(), sql.c_str(), -1, &stmt,
-                               nullptr) == SQLITE_OK) {
-            int row = 0;
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                auto text = [&stmt](int i) -> std::string {
-                    const char* v = (const char*)sqlite3_column_text(stmt, i);
-                    return v ? v : "";
-                };
-                long idx = list_->InsertItem(row, wxString::FromUTF8(text(0).c_str()));
-                list_->SetItem(idx, 1, wxString::FromUTF8(text(1).c_str()));
-                list_->SetItem(idx, 2, wxString::FromUTF8(text(2).c_str()));
-                std::string code = text(3);
-                list_->SetItem(idx, 3, code == "OK" ? UTF8_STR("✓ 成功")
-                                : wxString::FromUTF8(code.c_str()));
-                long long checked = sqlite3_column_int64(stmt, 4);
-                if (checked > 0) {
-                    time_t t = static_cast<time_t>(checked);
-                    struct tm tmv;
-#ifdef _WIN32
-                    localtime_s(&tmv, &t);
-#else
-                    localtime_r(&t, &tmv);
-#endif
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%02d-%02d %02d:%02d",
-                             tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
-                    list_->SetItem(idx, 4, buf);
-                } else {
-                    list_->SetItem(idx, 4, "-");
-                }
-                if (code != "OK")
-                    list_->SetItemBackgroundColour(idx, wxColour(255, 242, 204));
-                row++;
-            }
-            sqlite3_finalize(stmt);
-        }
-    }
-
-    Database& db_;
-    wxStaticText* stats_ = nullptr;
-    wxStaticText* detail_ = nullptr;
-    wxGauge* gauge_ = nullptr;
-    wxListCtrl* list_ = nullptr;
-    wxTimer timer_;
-};
-
 // ============== Main Frame ==============
 class PatXFrame : public wxFrame {
 public:
@@ -309,6 +184,16 @@ public:
                 auto_sync_timer_->Start(30 * 60 * 1000);   // switch to periodic
         }, auto_sync_timer_->GetId());
         auto_sync_timer_->StartOnce(30 * 1000);
+
+        // 巡检监控页签刷新：仅页签可见时查询，避免常驻轮询
+        patrol_refresh_timer_.SetOwner(this);
+        Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
+            if (patrol_tab_index_ >= 0 &&
+                notebook->GetSelection() == patrol_tab_index_) {
+                RefreshPatrolMonitor();
+            }
+        }, patrol_refresh_timer_.GetId());
+        patrol_refresh_timer_.Start(2000);
     }
 
 private:
@@ -330,7 +215,14 @@ private:
     wxStaticText* lbl_level;
     wxTextCtrl* patent_detail;
 
-    wxDialog* patrol_monitor_ = nullptr;
+
+    // 巡检监控页签（主窗口内嵌，非弹窗）
+    int patrol_tab_index_ = -1;
+    wxStaticText* patrol_stats_ = nullptr;
+    wxStaticText* patrol_detail_ = nullptr;
+    wxGauge* patrol_gauge_ = nullptr;
+    wxListCtrl* patrol_list_ = nullptr;
+    wxTimer patrol_refresh_timer_;
 
     // OA 状态直接以列的形式显示在国内申请列表末尾（最新审查意见/绝限日/剩余天数）
 
@@ -530,6 +422,7 @@ private:
                                      wxAUI_NB_TOP | wxAUI_NB_TAB_SPLIT | wxAUI_NB_TAB_MOVE);
         notebook->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, [this](wxBookCtrlEvent& e) {
             RefreshCommonFiltersForTab(e.GetSelection(), true);
+            if (e.GetSelection() == patrol_tab_index_) RefreshPatrolMonitor();
             e.Skip();
         });
         notebook->SetMinSize(wxSize(800, 600));
@@ -595,6 +488,7 @@ private:
         SetupUSTab();
         SetupAnnualFeeTab();
         SetupDeadlineRulesTab();
+        SetupPatrolMonitorTab();
 
         main_sizer->Add(notebook, 1, wxEXPAND | wxALL, 5);
 
@@ -2727,23 +2621,130 @@ private:
     void OnDossierErrors(wxCommandEvent&) { dossier_controller->ShowErrorCases(); }
     void OnDossierSettings(wxCommandEvent&) { dossier_controller->ShowSettings(); }
 
-    // 巡检监控窗口：非模态、2 秒自刷新，反映任何进程（GUI 巡检 / patx_sync
-    // CLI）写入数据库的同步状态
+    // 巡检监控页签：2 秒自刷新，反映任何进程（GUI 巡检 / patx_sync CLI）
+    // 写入数据库的同步状态
     void OnDossierMonitor(wxCommandEvent&) {
-        if (patrol_monitor_ && patrol_monitor_->IsShown()) {
-            patrol_monitor_->Raise();
-            return;
-        }
-        if (patrol_monitor_) patrol_monitor_->Destroy();
-        auto* dlg = new PatrolMonitorDialog(this, *db);
-        dlg->on_sync_request = [this]() {
+        notebook->SetSelection(patrol_tab_index_);
+        RefreshPatrolMonitor();
+    }
+
+    void SetupPatrolMonitorTab() {
+        wxPanel* panel = new wxPanel(notebook);
+        auto* sizer = new wxBoxSizer(wxVERTICAL);
+
+        patrol_stats_ = new wxStaticText(panel, wxID_ANY, "");
+        patrol_stats_->SetFont(patrol_stats_->GetFont().Bold());
+        sizer->Add(patrol_stats_, 0, wxALL | wxEXPAND, 10);
+
+        patrol_gauge_ = new wxGauge(panel, wxID_ANY, 100, wxDefaultPosition,
+                                    wxDefaultSize, wxGA_HORIZONTAL);
+        patrol_gauge_->SetMinSize(wxSize(-1, 24));
+        sizer->Add(patrol_gauge_, 0, wxLEFT | wxRIGHT | wxBOTTOM | wxEXPAND, 10);
+
+        patrol_detail_ = new wxStaticText(panel, wxID_ANY, "");
+        sizer->Add(patrol_detail_, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        patrol_list_ = new wxListCtrl(panel, wxID_ANY, wxDefaultPosition,
+                                      wxDefaultSize, wxLC_REPORT | wxBORDER_SUNKEN);
+        patrol_list_->InsertColumn(0, UTF8_STR("案件"), wxLIST_FORMAT_LEFT, 130);
+        patrol_list_->InsertColumn(1, UTF8_STR("最新官方事件"), wxLIST_FORMAT_LEFT, 200);
+        patrol_list_->InsertColumn(2, UTF8_STR("官文日"), wxLIST_FORMAT_LEFT, 95);
+        patrol_list_->InsertColumn(3, UTF8_STR("结果"), wxLIST_FORMAT_LEFT, 130);
+        patrol_list_->InsertColumn(4, UTF8_STR("检查时间"), wxLIST_FORMAT_LEFT, 130);
+        sizer->Add(patrol_list_, 1, wxALL | wxEXPAND, 6);
+
+        auto* tb = new wxBoxSizer(wxHORIZONTAL);
+        auto* sync_btn = new wxButton(panel, wxID_ANY,
+                                      UTF8_STR("立即巡检到期案件"));
+        sync_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
             dossier_controller->SyncAllActive(false);
-        };
-        patrol_monitor_ = dlg;
-        dlg->Bind(wxEVT_DESTROY, [this](wxWindowDestroyEvent&) {
-            patrol_monitor_ = nullptr;
         });
-        dlg->Show();
+        tb->Add(sync_btn, 0, wxRIGHT, 8);
+        tb->AddStretchSpacer();
+        sizer->Add(tb, 0, wxALL & ~wxTOP, 6);
+
+        panel->SetSizer(sizer);
+        notebook->AddPage(panel, UTF8_STR("巡检监控"));
+        patrol_tab_index_ = notebook->GetPageCount() - 1;
+    }
+
+    void RefreshPatrolMonitor() {
+        if (!db || !db->IsOpen() || !patrol_gauge_) return;
+        auto st = db->GetDossierPatrolStats();
+        int pct = st.total_eligible > 0
+                      ? st.synced * 100 / st.total_eligible : 0;
+        patrol_gauge_->SetValue(pct);
+
+        // 活动状态：最近一次检查距今多久（判断是跑着还是冷却）
+        sqlite3_stmt* stmt;
+        long long last_checked = 0;
+        std::string sql = "SELECT MAX(last_checked_at) FROM dossier_sync_state";
+        if (sqlite3_prepare_v2(db->GetHandle(), sql.c_str(), -1, &stmt,
+                               nullptr) == SQLITE_OK) {
+            if (sqlite3_step(stmt) == SQLITE_ROW)
+                last_checked = sqlite3_column_int64(stmt, 0);
+            sqlite3_finalize(stmt);
+        }
+        long long now = static_cast<long long>(time(nullptr));
+        long long idle_min = last_checked > 0 ? (now - last_checked) / 60 : -1;
+        wxString activity;
+        if (idle_min < 0) activity = UTF8_STR("尚未开始");
+        else if (idle_min < 3) activity = UTF8_STR("● 巡检进行中");
+        else if (idle_min < 12) activity = wxString::Format(
+            UTF8_STR("◌ 限流冷却中（%lld 分钟前有活动）"), idle_min);
+        else activity = wxString::Format(UTF8_STR("○ 空闲（%lld 分钟前有活动）"), idle_min);
+
+        patrol_stats_->SetLabel(wxString::Format(
+            UTF8_STR("进度 %d%%   已巡 %d / %d 件   待巡 %d 件   %s"),
+            pct, st.synced, st.total_eligible, st.due_now, activity));
+        patrol_detail_->SetLabel(wxString::Format(
+            UTF8_STR("发现官方事件 %d 条 ｜ 近 6 个月发文 %d 条 ｜ 已答复 %d 条 ｜ 成功案件 %d"),
+            st.official_events, st.recent_half_year, st.answered, st.synced_ok));
+
+        patrol_list_->DeleteAllItems();
+        std::string sql2 =
+            "SELECT p.geke_code, s.latest_remote_oa_type, s.latest_remote_oa_date, "
+            "COALESCE(s.last_error_code, 'OK'), s.last_checked_at "
+            "FROM dossier_sync_state s JOIN patents p ON p.id = s.patent_id "
+            "ORDER BY s.last_checked_at DESC LIMIT 15";
+        if (sqlite3_prepare_v2(db->GetHandle(), sql2.c_str(), -1, &stmt,
+                               nullptr) == SQLITE_OK) {
+            int row = 0;
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                auto text = [&stmt](int i) -> std::string {
+                    const char* v = (const char*)sqlite3_column_text(stmt, i);
+                    return v ? v : "";
+                };
+                long idx = patrol_list_->InsertItem(
+                    row, wxString::FromUTF8(text(0).c_str()));
+                patrol_list_->SetItem(idx, 1, wxString::FromUTF8(text(1).c_str()));
+                patrol_list_->SetItem(idx, 2, wxString::FromUTF8(text(2).c_str()));
+                std::string code = text(3);
+                patrol_list_->SetItem(idx, 3,
+                    code == "OK" ? UTF8_STR("✓ 成功")
+                                 : wxString::FromUTF8(code.c_str()));
+                long long checked = sqlite3_column_int64(stmt, 4);
+                if (checked > 0) {
+                    time_t t = static_cast<time_t>(checked);
+                    struct tm tmv;
+#ifdef _WIN32
+                    localtime_s(&tmv, &t);
+#else
+                    localtime_r(&t, &tmv);
+#endif
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%02d-%02d %02d:%02d",
+                             tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min);
+                    patrol_list_->SetItem(idx, 4, buf);
+                } else {
+                    patrol_list_->SetItem(idx, 4, "-");
+                }
+                if (code != "OK")
+                    patrol_list_->SetItemBackgroundColour(idx, wxColour(255, 242, 204));
+                row++;
+            }
+            sqlite3_finalize(stmt);
+        }
     }
 
     void OnEpoFamily(wxCommandEvent&) {
