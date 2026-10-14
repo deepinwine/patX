@@ -248,6 +248,9 @@ struct DossierSyncState {
     std::string latest_remote_oa_date;   // YYYY-MM-DD
     std::string latest_remote_oa_type;
     std::string auth_state;           // NOT_INITIALIZED / AUTHENTICATED / ...
+    std::string latest_applicant_activity;  // YYYY-MM-DD
+    std::string terminal_state;
+    std::string reexamination_state;
 };
 
 enum class OAExactMergeStatus {

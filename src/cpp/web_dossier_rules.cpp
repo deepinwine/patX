@@ -82,6 +82,39 @@ bool IsValidIsoDate(const std::string& value) {
     return day <= last_day;
 }
 
+void PreserveMissingCaseStateFields(Database& db, const RemoteCaseResult& remote,
+                                    DossierSyncState& state) {
+    const bool has_latest_applicant_activity =
+        remote.has_latest_applicant_activity || !remote.latest_applicant_activity.empty();
+    const bool has_terminal_state =
+        remote.has_terminal_state || !remote.terminal_state.empty();
+    const bool has_reexamination_state =
+        remote.has_reexamination_state || !remote.reexamination_state.empty();
+    if (has_latest_applicant_activity && has_terminal_state &&
+        has_reexamination_state) {
+        return;
+    }
+
+    sqlite3_stmt* stmt = nullptr;
+    constexpr const char* sql =
+        "SELECT latest_applicant_activity, terminal_state, reexamination_state "
+        "FROM dossier_sync_state WHERE patent_id = ? AND provider = ? LIMIT 1";
+    if (sqlite3_prepare_v2(db.GetHandle(), sql, -1, &stmt, nullptr) != SQLITE_OK) return;
+    sqlite3_bind_int(stmt, 1, state.patent_id);
+    sqlite3_bind_text(stmt, 2, state.provider.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        auto text = [stmt](int column) {
+            const char* value =
+                reinterpret_cast<const char*>(sqlite3_column_text(stmt, column));
+            return value ? std::string(value) : std::string();
+        };
+        if (!has_latest_applicant_activity) state.latest_applicant_activity = text(0);
+        if (!has_terminal_state) state.terminal_state = text(1);
+        if (!has_reexamination_state) state.reexamination_state = text(2);
+    }
+    sqlite3_finalize(stmt);
+}
+
 // 全角 digit -> ASCII
 std::string NormalizeFullwidth(const std::string& s) {
     std::string out;
@@ -385,6 +418,25 @@ bool ParseRemoteCaseResultJson(const std::string& json_body, RemoteCaseResult& o
         out.resolved_application_number = parsed.value("resolved_application_number", "");
         out.auth_state = parsed.value("auth_state", "");
         out.provider_used = parsed.value("provider_used", "");
+        if (parsed.contains("latest_applicant_activity")) {
+            out.latest_applicant_activity =
+                parsed.at("latest_applicant_activity").get<std::string>();
+            out.has_latest_applicant_activity = true;
+        }
+        if (parsed.contains("rate_limited_upstream")) {
+            out.rate_limited_upstream =
+                parsed.at("rate_limited_upstream").get<bool>();
+            out.has_rate_limited_upstream = true;
+        }
+        if (parsed.contains("terminal_state")) {
+            out.terminal_state = parsed.at("terminal_state").get<std::string>();
+            out.has_terminal_state = true;
+        }
+        if (parsed.contains("reexamination_state")) {
+            out.reexamination_state =
+                parsed.at("reexamination_state").get<std::string>();
+            out.has_reexamination_state = true;
+        }
 
         auto parse_document = [&](const json& value) {
             RemoteDocument doc;
@@ -443,6 +495,11 @@ CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
     CaseSyncReport report;
     report.patent_id = patent.id;
     report.geke_code = patent.geke_code;
+    report.provider_used = remote.provider_used;
+    report.latest_applicant_activity = remote.latest_applicant_activity;
+    report.rate_limited_upstream = remote.rate_limited_upstream;
+    report.terminal_state = remote.terminal_state;
+    report.reexamination_state = remote.reexamination_state;
     report.code = ResultCodeFromString(remote.code);
     report.message = remote.message;
 
@@ -451,6 +508,10 @@ CaseSyncReport ApplyRemoteCaseResult(Database& db, const Patent& patent,
     state.provider = remote.provider_used.empty() ? "cnipa" : remote.provider_used;
     state.last_checked_at = now;
     state.auth_state = remote.auth_state;
+    state.latest_applicant_activity = remote.latest_applicant_activity;
+    state.terminal_state = remote.terminal_state;
+    state.reexamination_state = remote.reexamination_state;
+    PreserveMissingCaseStateFields(db, remote, state);
 
     const std::string app_no = remote.resolved_application_number.empty()
                                    ? patent.application_number

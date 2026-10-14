@@ -2,6 +2,8 @@
 #include "patx/log.hpp"
 
 #include <sqlite3.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <ctime>
 #include <map>
@@ -66,6 +68,186 @@ bool HasIndex(sqlite3* db, const std::string& index) {
     const bool found = sqlite3_step(stmt) == SQLITE_ROW;
     sqlite3_finalize(stmt);
     return found;
+}
+
+bool HasExactBinaryAscendingKeyColumns(sqlite3* db, const std::string& index,
+                                       const std::vector<std::string>& expected) {
+    std::vector<std::string> columns;
+    sqlite3_stmt* stmt = nullptr;
+    const std::string sql = "PRAGMA index_xinfo(" + index + ");";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    bool valid = true;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        if (sqlite3_column_int(stmt, 5) == 0) continue;
+        const int cid = sqlite3_column_int(stmt, 1);
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        const bool descending = sqlite3_column_int(stmt, 3) != 0;
+        const char* collation = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        if (cid < 0 || !name || descending || !collation ||
+            std::string(collation) != "BINARY") {
+            valid = false;
+            break;
+        }
+        columns.emplace_back(name);
+    }
+    sqlite3_finalize(stmt);
+    return valid && columns == expected;
+}
+
+std::string NormalizeDeclaredType(const char* type) {
+    if (!type) return {};
+    std::string normalized(type);
+    const auto first = std::find_if_not(normalized.begin(), normalized.end(),
+        [](unsigned char c) { return std::isspace(c) != 0; });
+    const auto last = std::find_if_not(normalized.rbegin(), normalized.rend(),
+        [](unsigned char c) { return std::isspace(c) != 0; }).base();
+    if (first >= last) return {};
+    normalized = std::string(first, last);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return normalized;
+}
+
+bool HasIntegerRowidAliasPrimaryKey(sqlite3* db, const std::string& table) {
+    sqlite3_stmt* stmt = nullptr;
+    const std::string sql = "PRAGMA table_info(" + table + ");";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+    int primary_key_columns = 0;
+    bool has_integer_id_primary_key = false;
+    int step_result = SQLITE_OK;
+    while ((step_result = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const int ordinal = sqlite3_column_int(stmt, 5);
+        if (ordinal == 0) continue;
+        ++primary_key_columns;
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        has_integer_id_primary_key = ordinal == 1 && name && std::string(name) == "id" &&
+            NormalizeDeclaredType(type) == "INTEGER";
+    }
+    sqlite3_finalize(stmt);
+    if (step_result != SQLITE_DONE || primary_key_columns != 1 ||
+        !has_integer_id_primary_key) {
+        return false;
+    }
+
+    const std::string index_sql = "PRAGMA index_list(" + table + ");";
+    if (sqlite3_prepare_v2(db, index_sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    bool valid = sqlite3_column_count(stmt) > 3;
+    step_result = SQLITE_OK;
+    while (valid && (step_result = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const char* origin = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        if (!origin || std::string(origin) == "pk") valid = false;
+    }
+    sqlite3_finalize(stmt);
+    return valid && step_result == SQLITE_DONE;
+}
+
+struct IndexMetadata {
+    bool found = false;
+    bool unique = false;
+    bool partial = false;
+};
+
+IndexMetadata GetIndexMetadata(sqlite3* db, const std::string& table,
+                               const std::string& index) {
+    IndexMetadata metadata;
+    sqlite3_stmt* stmt = nullptr;
+    const std::string sql = "PRAGMA index_list(" + table + ");";
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return metadata;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        if (name && index == name) {
+            metadata.found = true;
+            metadata.unique = sqlite3_column_int(stmt, 2) != 0;
+            metadata.partial = sqlite3_column_int(stmt, 4) != 0;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return metadata;
+}
+
+bool HasRequiredDossierSyncKey(sqlite3* db) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA index_list(dossier_sync_state);", -1,
+                           &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    bool found = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const bool unique = sqlite3_column_int(stmt, 2) != 0;
+        const bool partial = sqlite3_column_int(stmt, 4) != 0;
+        if (name && unique && !partial &&
+            HasExactBinaryAscendingKeyColumns(
+                db, name, {"patent_id", "provider"})) {
+            found = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return found;
+}
+
+bool HasRequiredV6TableConstraints(sqlite3* db) {
+    return HasIntegerRowidAliasPrimaryKey(db, "patents") &&
+           HasIntegerRowidAliasPrimaryKey(db, "oa_records") &&
+           HasIntegerRowidAliasPrimaryKey(db, "prosecution_documents") &&
+           HasRequiredDossierSyncKey(db);
+}
+
+std::string GetIndexSql(sqlite3* db, const std::string& index) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db,
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", -1,
+            &stmt, nullptr) != SQLITE_OK) {
+        return {};
+    }
+    sqlite3_bind_text(stmt, 1, index.c_str(), -1, SQLITE_TRANSIENT);
+    std::string sql;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        if (text) sql = text;
+    }
+    sqlite3_finalize(stmt);
+    return sql;
+}
+
+std::string CompactSql(std::string sql) {
+    sql.erase(std::remove_if(sql.begin(), sql.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }), sql.end());
+    std::transform(sql.begin(), sql.end(), sql.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (!sql.empty() && sql.back() == ';') sql.pop_back();
+    return sql;
+}
+
+bool HasRequiredEventKeyIndex(sqlite3* db) {
+    const std::string name = "idx_prosecution_docs_event_key";
+    const IndexMetadata metadata = GetIndexMetadata(db, "prosecution_documents", name);
+    const std::string compact_sql = CompactSql(GetIndexSql(db, name));
+    const size_t where = compact_sql.find("where");
+    const std::string predicate = where == std::string::npos
+        ? std::string() : compact_sql.substr(where + 5);
+    return metadata.found && metadata.unique && metadata.partial &&
+           HasExactBinaryAscendingKeyColumns(
+               db, name, {"patent_id", "event_key"}) &&
+           predicate == "event_key<>''";
+}
+
+bool HasRequiredDossierCheckIndex(sqlite3* db) {
+    const std::string name = "idx_patents_next_dossier_check";
+    const IndexMetadata metadata = GetIndexMetadata(db, "patents", name);
+    return metadata.found && !metadata.unique && !metadata.partial &&
+           HasExactBinaryAscendingKeyColumns(
+               db, name, {"next_dossier_check_at"}) &&
+           CompactSql(GetIndexSql(db, name)).find("where") == std::string::npos;
 }
 
 bool BackupDatabase(sqlite3* source, const std::string& path, std::string* error) {
@@ -291,7 +473,7 @@ bool EnsureHistoricalColumns(sqlite3* db) {
     return true;
 }
 
-bool ApplyV1ToV2(sqlite3* db) {
+bool EnsureV2Shape(sqlite3* db) {
     if (!EnsureV1SupportingTables(db)) return false;
     if (!EnsureHistoricalColumns(db)) return false;
 
@@ -368,10 +550,16 @@ bool ApplyV1ToV2(sqlite3* db) {
         if (!Exec(db, sql)) return false;
     }
 
-    // 6. Move legacy notes-prefix data into the new columns
+    return true;
+}
+
+bool ApplyV1ToV2(sqlite3* db) {
+    if (!EnsureV2Shape(db)) return false;
+
+    // Move legacy notes-prefix data into the new columns.
     MigrateNotesPrefixesToColumns(db);
 
-    // 7. Seed deadline rules for existing installations
+    // Seed deadline rules for existing installations.
     SeedDeadlineRulesIfEmpty(db);
 
     return true;
@@ -653,6 +841,161 @@ bool ApplyV4ToV5(sqlite3* db) {
     return true;
 }
 
+bool EnsureColumns(sqlite3* db, const std::string& table,
+                   const std::vector<std::pair<std::string, std::string>>& columns) {
+    for (const auto& [column, type] : columns) {
+        if (!HasColumn(db, table, column) &&
+            !Exec(db, "ALTER TABLE " + table + " ADD COLUMN " + column + " " + type + ";")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool EnsureV1KeyColumns(sqlite3* db) {
+    if (!HasTable(db, "patents") || !EnsureV1SupportingTables(db)) return false;
+
+    const std::vector<std::pair<std::string, std::string>> patent_columns = {
+        {"geke_code", "TEXT"}, {"application_number", "TEXT"}, {"title", "TEXT"},
+        {"proposal_name", "TEXT"}, {"application_status", "TEXT"},
+        {"patent_type", "TEXT"}, {"patent_level", "TEXT"},
+        {"application_date", "TEXT"}, {"authorization_date", "TEXT"},
+        {"expiration_date", "TEXT"}, {"geke_handler", "TEXT"},
+        {"rd_department", "TEXT"}, {"agency_firm", "TEXT"},
+        {"original_applicant", "TEXT"}, {"current_applicant", "TEXT"},
+        {"inventor", "TEXT"}, {"notes", "TEXT"}, {"class_level1", "TEXT"},
+        {"class_level2", "TEXT"}, {"class_level3", "TEXT"},
+        {"updated_at", "INTEGER DEFAULT 0"},
+    };
+    if (!EnsureColumns(db, "patents", patent_columns)) return false;
+
+    const std::vector<std::pair<std::string, std::string>> oa_columns = {
+        {"patent_id", "INTEGER"}, {"geke_code", "TEXT"}, {"patent_title", "TEXT"},
+        {"oa_type", "TEXT"}, {"official_deadline", "TEXT"}, {"issue_date", "TEXT"},
+        {"response_date", "TEXT"}, {"handler", "TEXT"}, {"writer", "TEXT"},
+        {"progress", "TEXT"}, {"agency", "TEXT"}, {"oa_summary", "TEXT"},
+        {"is_completed", "INTEGER DEFAULT 0"}, {"is_extendable", "INTEGER DEFAULT 0"},
+        {"extension_requested", "INTEGER DEFAULT 0"}, {"extension_months", "INTEGER"},
+        {"extended_deadline", "TEXT"}, {"notes", "TEXT"},
+    };
+    return EnsureColumns(db, "oa_records", oa_columns) && EnsureHistoricalColumns(db);
+}
+
+bool EnsureV3TableColumns(sqlite3* db) {
+    const std::vector<std::pair<std::string, std::string>> document_columns = {
+        {"patent_id", "INTEGER"}, {"jurisdiction", "TEXT"},
+        {"application_number", "TEXT"}, {"publication_number", "TEXT"},
+        {"source", "TEXT"}, {"remote_document_id", "TEXT"},
+        {"document_type", "TEXT"}, {"document_title", "TEXT"},
+        {"official_date", "TEXT"}, {"direction", "TEXT"}, {"source_url", "TEXT"},
+        {"download_url", "TEXT"}, {"download_available", "INTEGER DEFAULT 0"},
+        {"fingerprint", "TEXT"}, {"first_seen_at", "INTEGER"},
+        {"last_seen_at", "INTEGER"}, {"raw_metadata", "TEXT"},
+    };
+    const std::vector<std::pair<std::string, std::string>> state_columns = {
+        {"patent_id", "INTEGER"}, {"provider", "TEXT"},
+        {"last_checked_at", "INTEGER DEFAULT 0"},
+        {"last_success_at", "INTEGER DEFAULT 0"},
+        {"last_error_at", "INTEGER DEFAULT 0"}, {"last_error_code", "TEXT"},
+        {"last_error_message", "TEXT"}, {"latest_remote_oa_date", "TEXT"},
+        {"latest_remote_oa_type", "TEXT"},
+        {"auth_state", "TEXT DEFAULT 'NOT_INITIALIZED'"},
+    };
+    return EnsureColumns(db, "prosecution_documents", document_columns) &&
+           EnsureColumns(db, "dossier_sync_state", state_columns);
+}
+
+bool HasV6Shape(sqlite3* db) {
+    if (!HasTable(db, "patents") || !HasTable(db, "oa_records") ||
+        !HasTable(db, "prosecution_documents") || !HasTable(db, "dossier_sync_state")) {
+        return false;
+    }
+
+    const std::vector<std::pair<std::string, std::vector<std::string>>> required_columns = {
+        {"patents", {
+            "geke_code", "application_number", "title", "proposal_name",
+            "application_status", "patent_type", "geke_handler", "technology_route",
+            "project_id", "publication_number", "last_dossier_check_at",
+            "next_dossier_check_at",
+        }},
+        {"oa_records", {
+            "patent_id", "geke_code", "patent_title", "oa_type", "official_deadline",
+            "issue_date", "response_date", "handler", "writer", "progress", "agency",
+            "oa_summary", "notes", "jurisdiction", "source", "deadline_source",
+            "remote_document_id", "sync_flag",
+        }},
+        {"prosecution_documents", {
+            "patent_id", "jurisdiction", "application_number", "publication_number",
+            "source", "remote_document_id", "document_type", "document_title",
+            "official_date", "direction", "source_url", "download_url",
+            "download_available", "fingerprint", "first_seen_at", "last_seen_at",
+            "local_path", "downloaded_at", "raw_metadata", "raw_title",
+            "document_code", "document_version", "event_key", "source_trace",
+        }},
+        {"dossier_sync_state", {
+            "patent_id", "provider", "last_checked_at", "last_success_at",
+            "last_error_at", "last_error_code", "last_error_message",
+            "latest_remote_oa_date", "latest_remote_oa_type", "auth_state",
+            "latest_applicant_activity", "terminal_state", "reexamination_state",
+        }},
+    };
+    for (const auto& [table, columns] : required_columns) {
+        for (const auto& column : columns) {
+            if (!HasColumn(db, table, column)) return false;
+        }
+    }
+    return HasRequiredV6TableConstraints(db) &&
+           HasRequiredDossierCheckIndex(db) && HasRequiredEventKeyIndex(db);
+}
+
+bool EnsureV6Shape(sqlite3* db, std::string* error = nullptr) {
+    if (!EnsureV1KeyColumns(db) || !EnsureV2Shape(db) || !ApplyV2ToV3(db) ||
+        !EnsureV3TableColumns(db)) {
+        return false;
+    }
+    if (!HasRequiredV6TableConstraints(db)) {
+        if (error) {
+            *error = "required primary/unique constraints are missing; "
+                     "dossier_sync_state requires UNIQUE(patent_id, provider) and "
+                     "patents/oa_records/prosecution_documents require PRIMARY KEY(id); "
+                     "repair would require rebuilding a business table";
+        }
+        return false;
+    }
+    if (!ApplyV3ToV4(db) || !ApplyV4ToV5(db)) return false;
+
+    const std::vector<std::pair<std::string, std::string>> state_columns = {
+        {"latest_applicant_activity", "TEXT DEFAULT ''"},
+        {"terminal_state", "TEXT DEFAULT ''"},
+        {"reexamination_state", "TEXT DEFAULT ''"},
+    };
+    if (!EnsureColumns(db, "dossier_sync_state", state_columns)) return false;
+
+    if (!HasRequiredDossierCheckIndex(db)) {
+        if (HasIndex(db, "idx_patents_next_dossier_check") &&
+            !Exec(db, "DROP INDEX idx_patents_next_dossier_check;")) {
+            return false;
+        }
+        if (!Exec(db, "CREATE INDEX idx_patents_next_dossier_check "
+                      "ON patents(next_dossier_check_at);")) {
+            return false;
+        }
+    }
+
+    if (!HasRequiredEventKeyIndex(db)) {
+        if (HasIndex(db, "idx_prosecution_docs_event_key") &&
+            !Exec(db, "DROP INDEX idx_prosecution_docs_event_key;")) {
+            return false;
+        }
+        if (!Exec(db, "CREATE UNIQUE INDEX idx_prosecution_docs_event_key "
+                      "ON prosecution_documents(patent_id, event_key) "
+                      "WHERE event_key <> '';")) {
+            return false;
+        }
+    }
+    return HasV6Shape(db);
+}
+
 SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_path,
                                           bool create_backup) {
     SchemaMigrationResult result;
@@ -662,40 +1005,42 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
         return result;
     }
 
-    // InitTables() creates the full current shape with CREATE TABLE IF NOT
-    // EXISTS, so both fresh and legacy databases have the core tables by now.
-    // They are distinguished by shape: a legacy (v1) patents table lacks the
-    // structured columns that v2 adds and has no schema_info version row.
     int version = ReadSchemaVersion(db);
     result.from_version = version;
 
+    if (version > kSchemaVersionCurrent) {
+        result.ok = false;
+        result.to_version = version;
+        result.error = "database schema version " + std::to_string(version) +
+                       " is newer than supported version " +
+                       std::to_string(kSchemaVersionCurrent) + "; refusing to downgrade";
+        return result;
+    }
+
     bool stamp_current_shape = false;
-    bool has_patents = false;
+    const bool has_patents = HasTable(db, "patents");
     if (version == 0) {
         const bool has_v2_shape =
-            HasTable(db, "patents") && HasColumn(db, "patents", "technology_route");
-        const bool has_current_shape = has_v2_shape &&
-            HasColumn(db, "patents", "publication_number") &&
-            HasColumn(db, "oa_records", "sync_flag") &&
-            HasTable(db, "prosecution_documents") && HasTable(db, "dossier_sync_state") &&
-            HasColumn(db, "prosecution_documents", "raw_title") &&
-            HasColumn(db, "prosecution_documents", "document_code") &&
-            HasColumn(db, "prosecution_documents", "document_version") &&
-            HasColumn(db, "prosecution_documents", "event_key") &&
-            HasColumn(db, "prosecution_documents", "source_trace") &&
-            HasIndex(db, "idx_prosecution_docs_event_key");
-        has_patents = HasTable(db, "patents");
-        if (has_current_shape || !has_patents) {
+            has_patents && HasColumn(db, "patents", "technology_route");
+        if (HasV6Shape(db)) {
             stamp_current_shape = true;
-        } else {
+        } else if (has_patents) {
             version = has_v2_shape ? 2 : 1;
+        } else {
+            result.ok = false;
+            result.error = "unversioned database is missing the patents table";
+            return result;
         }
     }
+
+    const bool repair_current_shape =
+        version == kSchemaVersionCurrent && !HasV6Shape(db);
 
     // One consistent SQLite snapshot per upgrade flow, before the first
     // migration statement. In-memory databases intentionally skip backups.
     const bool needs_backup = create_backup && db_path != ":memory:" &&
-        (version < kSchemaVersionCurrent || (stamp_current_shape && has_patents));
+        (version < kSchemaVersionCurrent || repair_current_shape ||
+         (result.from_version == 0 && has_patents));
     if (needs_backup) {
         time_t now = time(nullptr);
         struct tm tm_buf;
@@ -720,13 +1065,21 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
     }
 
     if (stamp_current_shape) {
-        // New/empty databases are initialized by Database::InitTables first;
-        // unversioned existing current-shaped databases have been backed up.
+        if (!Exec(db, "BEGIN IMMEDIATE;", &result.error)) {
+            result.ok = false;
+            return result;
+        }
         if (!Exec(db, "CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);",
                   &result.error) ||
+            !Exec(db, "DELETE FROM schema_info;", &result.error) ||
             !Exec(db, "INSERT INTO schema_info (version) VALUES (" +
-                          std::to_string(kSchemaVersionCurrent) + ");", &result.error)) {
+                          std::to_string(kSchemaVersionCurrent) + ");", &result.error) ||
+            !HasV6Shape(db) || !Exec(db, "COMMIT;", &result.error)) {
+            Exec(db, "ROLLBACK;");
             result.ok = false;
+            if (result.error.empty()) {
+                result.error = "unversioned v6 shape verification failed (rolled back)";
+            }
             return result;
         }
         SeedDeadlineRulesIfEmpty(db);
@@ -734,14 +1087,32 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
         return result;
     }
 
-    // Unversioned v2-shaped databases are stamped only after their backup.
-    if (result.from_version == 0 && version == 2) {
-        if (!Exec(db, "CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);",
-                  &result.error) ||
-            !Exec(db, "INSERT INTO schema_info (version) VALUES (2);", &result.error)) {
+    if (repair_current_shape) {
+        PATX_LOG_INFO("Repairing incomplete schema v6 shape");
+        if (!Exec(db, "BEGIN IMMEDIATE;", &result.error)) {
             result.ok = false;
             return result;
         }
+        std::string shape_error;
+        if (!EnsureV6Shape(db, &shape_error) || !HasV6Shape(db)) {
+            if (shape_error.empty()) shape_error = sqlite3_errmsg(db);
+            Exec(db, "ROLLBACK;");
+            result.ok = false;
+            result.error = "v6 shape repair failed (rolled back): " + shape_error;
+            if (!result.backup_path.empty()) result.error += "; backup: " + result.backup_path;
+            return result;
+        }
+        if (!Exec(db, "DELETE FROM schema_info;", &result.error) ||
+            !Exec(db, "INSERT INTO schema_info (version) VALUES (6);", &result.error) ||
+            !Exec(db, "COMMIT;", &result.error)) {
+            Exec(db, "ROLLBACK;");
+            result.ok = false;
+            if (result.error.empty()) result.error = "v6 shape repair commit failed";
+            return result;
+        }
+        result.to_version = 6;
+        PATX_LOG_INFO("Schema v6 shape repair committed");
+        return result;
     }
 
     while (version < kSchemaVersionCurrent) {
@@ -778,6 +1149,12 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
         } else if (version == 2) {
             PATX_LOG_INFO("Applying schema migration v2 -> v3");
             if (!Exec(db, "BEGIN TRANSACTION;", &result.error)) {
+                result.ok = false;
+                return result;
+            }
+            if (!Exec(db, "CREATE TABLE IF NOT EXISTS schema_info (version INTEGER NOT NULL);",
+                      &result.error)) {
+                Exec(db, "ROLLBACK;");
                 result.ok = false;
                 return result;
             }
@@ -863,6 +1240,33 @@ SchemaMigrationResult RunSchemaMigrations(sqlite3* db, const std::string& db_pat
             }
             version = 5;
             PATX_LOG_INFO("Schema migration v4 -> v5 committed");
+        } else if (version == 5) {
+            PATX_LOG_INFO("Applying schema migration v5 -> v6");
+            if (!Exec(db, "BEGIN IMMEDIATE;", &result.error)) {
+                result.ok = false;
+                return result;
+            }
+            std::string shape_error;
+            if (!EnsureV6Shape(db, &shape_error) || !HasV6Shape(db)) {
+                if (shape_error.empty()) shape_error = sqlite3_errmsg(db);
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                result.error = "v5->v6 migration failed (rolled back): " + shape_error;
+                if (!result.backup_path.empty()) {
+                    result.error += "; backup: " + result.backup_path;
+                }
+                return result;
+            }
+            if (!Exec(db, "DELETE FROM schema_info;", &result.error) ||
+                !Exec(db, "INSERT INTO schema_info (version) VALUES (6);", &result.error) ||
+                !Exec(db, "COMMIT;", &result.error)) {
+                Exec(db, "ROLLBACK;");
+                result.ok = false;
+                if (result.error.empty()) result.error = "v5->v6 commit failed";
+                return result;
+            }
+            version = 6;
+            PATX_LOG_INFO("Schema migration v5 -> v6 committed");
         } else {
             result.ok = false;
             result.error = "unknown schema version " + std::to_string(version);
